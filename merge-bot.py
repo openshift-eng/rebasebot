@@ -242,8 +242,7 @@ def main():
         format="%(levelname)s - %(message)s", stream=sys.stdout, level=logging.DEBUG
     )
 
-    args = parse_cli_arguments()
-    errors = validate_cli_arguments(args)
+    args, errors = parse_cli_arguments()
     if errors:
         for error in errors:
             logging.error(error)
