@@ -82,8 +82,9 @@ def parse_cli_arguments(testing_args=None):
     parser.add_argument(
         "--merge-branch",
         type=str,
-        required=True,
+        required=False,
         help="The git branch on dest to push merge to.",
+        default=None,  # We will default this below based on bot name and dest branch
     )
     parser.add_argument(
         "--bot-name",
@@ -255,11 +256,14 @@ def create_pr(
     return pr.url
 
 
-def github_login_for_account(gh_account, gh_app_id, gh_key):
+def github_app_login(gh_app_id, gh_key):
     logging.info("Logging to GitHub")
     g = github3.GitHub()
     g.login_as_app(gh_key, gh_app_id)
+    return g
 
+
+def github_login_for_installation(g, gh_account, gh_app_id, gh_key):
     # Look for an authorised installation matching repo
     matches = (
         install
@@ -317,7 +321,9 @@ def main():
         gh_account = split_path[1]
         gh_repo_name = split_path[2]
 
-        g = github_login_for_account(gh_account, gh_app_id, gh_key)
+        g = github_app_login(gh_app_id, gh_key)
+        gh_app = g.authenticated_app()
+        g = github_login_for_installation(g, gh_account, gh_app_id, gh_key)
 
         dest = urlparse.urlunparse(dest_parsed)
         dest_authenticated = dest_parsed._replace(
@@ -346,6 +352,9 @@ def main():
 
         if args.update_go_modules:
             commit_go_mod_updates(repo)
+
+        if merge_branch is None:
+            merge_branch = f"{gh_app.name}-{dest_branch}"
 
         push(repo, merge_branch)
 
