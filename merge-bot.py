@@ -261,13 +261,11 @@ def main():
     gh_token_path = args.github_token[0]
     slack_webhook_path = args.slack_webhook[0]
 
-    file = open(gh_token_path, "r")
-    gh_token = file.read()
-    gh_token = gh_token.strip()
+    with open(gh_token_path, "r") as f:
+        gh_token = f.read().strip()
 
-    file = open(slack_webhook_path, "r")
-    slack_webhook_url = file.read()
-    slack_webhook_url = slack_webhook_url.strip()
+    with open(slack_webhook_path, "r") as f:
+        slack_webhook_url = f.read().strip()
 
     try:
         g = login_to_github(gh_token)
