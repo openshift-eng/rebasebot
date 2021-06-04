@@ -96,12 +96,13 @@ def parse_cli_arguments(testing_args=None):
     parser.add_argument(
         "--slack-webhook",
         type=str,
-        required=True,
+        required=False,
         help="The path where credentials for the slack webhook are.",
     )
     parser.add_argument(
         "--update-go-modules",
         action="store_true",
+        default=False,
         required=False,
         help="When enabled, the bot will update and vendor the go modules in a separate commit",
     )
@@ -173,6 +174,8 @@ def fetch_and_merge(source, dest, fork, working_dir, g):
 
 
 def message_slack(webhook_url, msg):
+    if webhook_url is None:
+        return
     requests.post(webhook_url, json={"text": msg})
 
 
@@ -252,13 +255,14 @@ def main():
     working_dir = args.working_dir
     ssh_key_path = args.github_key
     gh_token_path = args.github_token
-    slack_webhook_path = args.slack_webhook
 
     with open(gh_token_path, "r") as f:
         gh_token = f.read().strip()
 
-    with open(slack_webhook_path, "r") as f:
-        slack_webhook_url = f.read().strip()
+    slack_webhook_url = None
+    if args.slack_webhook is not None:
+        with open(args.slack_webhook, "r") as f:
+            slack_webhook_url = f.read().strip()
 
     try:
         g = login_to_github(gh_token)
