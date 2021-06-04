@@ -1,0 +1,5 @@
+#!/bin/sh
+
+set -o pipefail
+
+git ls-tree --full-tree --name-only HEAD | grep \.py$ | exec xargs black --check
