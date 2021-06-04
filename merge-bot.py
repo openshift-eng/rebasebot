@@ -36,13 +36,13 @@ TODAY = str(datetime.date.today())
 # errors in the cli arguments
 def validate_cli_arguments(cli_args):
     validation_errors = []
-    if not validators.url(cli_args.source_repo[0]):
+    if not validators.url(cli_args.source_repo):
         validation_errors.append(
-            f"the value for `--source-repo`, {cli_args.source_repo[0]}, is not a valid URL"
+            f"the value for `--source-repo`, {cli_args.source_repo}, is not a valid URL"
         )
-    if not validators.url(cli_args.dest_repo[0]):
+    if not validators.url(cli_args.dest_repo):
         validation_errors.append(
-            f"the value for `--dest-repo`, {cli_args.dest_repo[0]}, is not a valid URL"
+            f"the value for `--dest-repo`, {cli_args.dest_repo}, is not a valid URL"
         )
 
     return validation_errors
@@ -58,7 +58,6 @@ def parse_cli_arguments(testing_args=None):
         "--source-repo",
         "-s",
         type=str,
-        nargs=1,
         required=True,
         help="The git URL of the source/upstream github repo you want to merge changes from.",
     )
@@ -66,7 +65,6 @@ def parse_cli_arguments(testing_args=None):
         "--dest-repo",
         "-d",
         type=str,
-        nargs=1,
         required=True,
         help="The git URL of the destination/downstream github repo you want to merge changes into.",
     )
@@ -74,35 +72,30 @@ def parse_cli_arguments(testing_args=None):
         "--fork-repo",
         "-f",
         type=str,
-        nargs=1,
         required=True,
         help="The git ssh address of the repo the bot will fork the code in to create a pull request.",
     )
     parser.add_argument(
         "--working-dir",
         type=str,
-        nargs=1,
         required=True,
         help="The working directory where the git repos will be cloned.",
     )
     parser.add_argument(
         "--github-token",
         type=str,
-        nargs=1,
         required=True,
         help="The path to a github token the bot will use to make a pull request.",
     )
     parser.add_argument(
         "--github-key",
         type=str,
-        nargs=1,
         required=True,
         help="The path to a github key the bot will use to make a pull request.",
     )
     parser.add_argument(
         "--slack-webhook",
         type=str,
-        nargs=1,
         required=True,
         help="The path where credentials for the slack webhook are.",
     )
@@ -253,13 +246,13 @@ def main():
             logging.error(error)
         exit(1)
 
-    source_repo = args.source_repo[0]
-    dest_repo = args.dest_repo[0]
-    fork_repo = args.fork_repo[0]
-    working_dir = args.working_dir[0]
-    ssh_key_path = args.github_key[0]
-    gh_token_path = args.github_token[0]
-    slack_webhook_path = args.slack_webhook[0]
+    source_repo = args.source_repo
+    dest_repo = args.dest_repo
+    fork_repo = args.fork_repo
+    working_dir = args.working_dir
+    ssh_key_path = args.github_key
+    gh_token_path = args.github_token
+    slack_webhook_path = args.slack_webhook
 
     with open(gh_token_path, "r") as f:
         gh_token = f.read().strip()
