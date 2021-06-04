@@ -14,19 +14,19 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import argparse
 import datetime
 import logging
-from os import path
 import os
 import shutil
 import sys
+import time
 import traceback
-from urllib.parse import urlparse
-import argparse
+from urllib import parse as urlparse
 import validators
 
 import git
-import github
+import github3
 import requests
 
 TODAY = str(datetime.date.today())
@@ -36,6 +36,7 @@ TODAY = str(datetime.date.today())
 # errors in the cli arguments
 def validate_cli_arguments(cli_args):
     validation_errors = []
+    print(cli_args)
     if not validators.url(cli_args.source_repo):
         validation_errors.append(
             f"the value for `--source-repo`, {cli_args.source_repo}, is not a valid URL"
@@ -59,21 +60,44 @@ def parse_cli_arguments(testing_args=None):
         "-s",
         type=str,
         required=True,
-        help="The git URL of the source/upstream github repo you want to merge changes from.",
+        help="The git URL of the source/upstream github repo to merge changes from.",
+    )
+    parser.add_argument(
+        "--source-branch",
+        type=str,
+        required=True,
+        help="The git branch to merge changes from.",
     )
     parser.add_argument(
         "--dest-repo",
         "-d",
         type=str,
         required=True,
-        help="The git URL of the destination/downstream github repo you want to merge changes into.",
+        help="The git URL of the destination/downstream github repo to merge changes into.",
     )
     parser.add_argument(
-        "--fork-repo",
-        "-f",
+        "--dest-branch",
         type=str,
         required=True,
-        help="The git ssh address of the repo the bot will fork the code in to create a pull request.",
+        help="The git branch to merge changes into.",
+    )
+    parser.add_argument(
+        "--merge-branch",
+        type=str,
+        required=True,
+        help="The git branch on dest to push merge to.",
+    )
+    parser.add_argument(
+        "--bot-name",
+        type=str,
+        required=True,
+        help="The name to be used in any git commits.",
+    )
+    parser.add_argument(
+        "--bot-email",
+        type=str,
+        required=True,
+        help="The email to be used in any git commits.",
     )
     parser.add_argument(
         "--working-dir",
@@ -82,16 +106,17 @@ def parse_cli_arguments(testing_args=None):
         help="The working directory where the git repos will be cloned.",
     )
     parser.add_argument(
-        "--github-token",
-        type=str,
-        required=True,
-        help="The path to a github token the bot will use to make a pull request.",
-    )
-    parser.add_argument(
         "--github-key",
         type=str,
         required=True,
-        help="The path to a github key the bot will use to make a pull request.",
+        help="The path to a github app private key.",
+    )
+    parser.add_argument(
+        "--github-app-id",
+        type=int,
+        required=False,
+        help="The app ID of the GitHub app to use.",
+        default=118774,  # shiftstack-merge-bot
     )
     parser.add_argument(
         "--slack-webhook",
@@ -127,50 +152,55 @@ def check_conflict(repo):
     return False
 
 
-def configure_push_info(g, repo):
-    user = g.get_user()
-
+def configure_commit_info(repo, bot_name, bot_email):
     with repo.config_writer() as config:
-        config.set_value("user", "email", user.email)
-        config.set_value("user", "name", user.login)
+        config.set_value("user", "email", bot_email)
+        config.set_value("user", "name", bot_name)
 
 
-def fetch_and_merge(source, dest, fork, working_dir, g):
-    repo_dir = path.join(working_dir, "repo")
+def fetch_and_merge(
+    working_dir,
+    dest,
+    dest_authenticated,
+    dest_branch,
+    source,
+    source_branch,
+    bot_name,
+    bot_email,
+):
+    repo_dir = os.path.join(working_dir, "repo")
     logging.info("Using %s as repo directory", repo_dir)
     shutil.rmtree(repo_dir, ignore_errors=True)
 
-    logging.info("Cloning repo %s into %s", source, repo_dir)
-    repo = git.Repo.clone_from(source, repo_dir)
-    configure_push_info(g, repo)
+    logging.info("Cloning repo %s into %s", dest, repo_dir)
+    repo = git.Repo.clone_from(dest_authenticated, repo_dir, branch=dest_branch)
+    orig_commit = repo.active_branch.commit
+    configure_commit_info(repo, bot_name, bot_email)
 
-    logging.info("Adding remotes %s and %s", dest, fork)
-    dest_remote = repo.create_remote("destination", dest)
-    dest_remote.fetch()
-    fork_remote = repo.create_remote("fork", fork)
-    source_branch = repo.heads.master
-
-    logging.info("Checking out destination's master into destination-master")
-    dest_branch = repo.create_head("destination-master", dest_remote.refs.master)
-    dest_branch.checkout()
+    logging.info("Adding and fetching remote %s", source)
+    source_remote = repo.create_remote("upstream", source)
+    source_remote.fetch()
 
     logging.info("Performing merge")
-    repo.git.merge("origin/master", "--no-commit")
-    if not repo.is_dirty():
-        logging.info("Seems like no merge is necessary")
-        return None, None
+    repo.git.merge(f"upstream/{source_branch}", "--no-commit")
 
-    if check_conflict(repo):
-        raise Exception("Merge conflict, needs manual resolution!")
+    if repo.is_dirty():
+        if check_conflict(repo):
+            raise Exception("Merge conflict, needs manual resolution!")
 
-    logging.info("Committing merge")
-    repo.index.commit(
-        "Merge %s:master into master" % source,
-        parent_commits=(dest_branch.commit, source_branch.commit),
-    )
-    dest_branch.checkout(force=True)
+        logging.info("Committing merge")
+        repo.index.commit(
+            f"Merge {source}:{source_branch} into {dest_branch}",
+            parent_commits=(orig_commit, repo.remotes.upstream.refs[source_branch]),
+        )
+        return repo
 
-    return repo, fork_remote
+    if repo.active_branch.commit != orig_commit:
+        logging.info("Destination can be fast-forwarded")
+        return repo
+
+    logging.info("Seems like no merge is necessary")
+    return None
 
 
 def message_slack(webhook_url, msg):
@@ -199,42 +229,51 @@ def commit_go_mod_updates(repo):
     return
 
 
-def push(repo, fork_remote, ssh_key_path):
-    name = "rebase-%s" % TODAY
-    logging.info("Creating branch %s and checking it out")
-    pr_branch = repo.create_head(name)
-    pr_branch.checkout()
-
-    logging.info("Pushing using %s key", ssh_key_path)
-    repo.git.update_environment(
-        GIT_SSH_COMMAND="ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i %s"
-        % ssh_key_path
-    )
-    result = fork_remote.push()
+def push(repo, merge_branch):
+    result = repo.remotes.origin.push(refspec=f"HEAD:{merge_branch}", force=True)
     if result[0].flags & git.PushInfo.ERROR != 0:
         logging.error("Error when pushing!")
         raise Exception("Error when pushing %d!" % result[0].flags)
 
-    return name
+
+def create_pr(
+    g, gh_account, gh_repo_name, dest_branch, merge_branch, source_repo, source_branch
+):
+    logging.info("Checking for existing pull request")
+    gh_repo = g.repository(gh_account, gh_repo_name)
+    try:
+        pr = gh_repo.pull_requests(head=merge_branch).next()
+    except StopIteration:
+        logging.info("Creating a pull request")
+        pr = gh_repo.create_pull(
+            f"Merge {source_branch} from {source_repo} into {dest_branch}",
+            dest_branch,
+            merge_branch,
+        )
+
+    return pr.url
 
 
-def login_to_github(gh_token):
+def github_login_for_account(gh_account, gh_app_id, gh_key):
     logging.info("Logging to GitHub")
-    return github.Github(gh_token)
+    g = github3.GitHub()
+    g.login_as_app(gh_key, gh_app_id)
 
-
-def create_pr(source_repo, branch, repo, g):
-    r = g.get_repo(repo)
-    u = g.get_user()
-    logging.info("Creating a pull request")
-    p = r.create_pull(
-        title="Rebase %s from %s" % (repo, source_repo),
-        head="%s:%s" % (u.login, branch),
-        base="master",
-        maintainer_can_modify=True,
-        body="",
+    # Look for an authorised installation matching repo
+    matches = (
+        install
+        for install in g.app_installations()
+        if install.account["login"] == gh_account
     )
-    return p.html_url
+    try:
+        install = next(matches)
+    except StopIteration:
+        msg = f"App has not been authorised by {gh_account}"
+        logging.error(msg)
+        raise Exception(msg)
+
+    g.login_as_app_installation(gh_key, gh_app_id, install.id)
+    return g
 
 
 def main():
@@ -249,14 +288,18 @@ def main():
         exit(1)
 
     source_repo = args.source_repo
+    source_branch = args.source_branch
     dest_repo = args.dest_repo
-    fork_repo = args.fork_repo
+    dest_branch = args.dest_branch
+    merge_branch = args.merge_branch
     working_dir = args.working_dir
-    ssh_key_path = args.github_key
-    gh_token_path = args.github_token
+    bot_name = args.bot_name
+    bot_email = args.bot_email
+    gh_key_path = args.github_key
+    gh_app_id = args.github_app_id
 
-    with open(gh_token_path, "r") as f:
-        gh_token = f.read().strip()
+    with open(gh_key_path, "r") as f:
+        gh_key = f.read().strip().encode()
 
     slack_webhook_url = None
     if args.slack_webhook is not None:
@@ -264,14 +307,33 @@ def main():
             slack_webhook_url = f.read().strip()
 
     try:
-        g = login_to_github(gh_token)
+        dest_parsed = urlparse.urlparse(dest_repo)
+        if dest_parsed.hostname != "github.com":
+            msg = f"Destination {dest_repo} is not a GitHub repo"
+            logging.error(msg)
+            raise Exception(msg)
+        split_path = dest_parsed.path.split("/")
+        gh_account = split_path[1]
+        gh_repo_name = split_path[2]
 
-        repo, fork_remote = fetch_and_merge(
-            source_repo, dest_repo, fork_repo, working_dir, g
+        g = github_login_for_account(gh_account, gh_app_id, gh_key)
+
+        dest = urlparse.urlunparse(dest_parsed)
+        dest_authenticated = dest_parsed._replace(
+            netloc=f"x-access-token:{g.session.auth.token}@{dest_parsed.hostname}"
         )
+        dest_authenticated = urlparse.urlunparse(dest_authenticated)
 
-        if args.update_go_modules:
-            commit_go_mod_updates(repo)
+        repo = fetch_and_merge(
+            working_dir,
+            dest,
+            dest_authenticated,
+            dest_branch,
+            source_repo,
+            source_branch,
+            bot_name,
+            bot_email,
+        )
 
         if repo is None:
             message_slack(
@@ -280,10 +342,22 @@ def main():
                 "date! Have a great day team!",
             )
             exit(0)
-        pr_branch_name = push(repo, fork_remote, ssh_key_path)
 
-        gh_repo = urlparse.urlparse(dest_repo).path.strip("/")
-        pr_url = create_pr(source_repo, pr_branch_name, gh_repo, g)
+        if args.update_go_modules:
+            commit_go_mod_updates(repo)
+
+        push(repo, merge_branch)
+
+        pr_url = create_pr(
+            g,
+            gh_account,
+            gh_repo_name,
+            dest_branch,
+            merge_branch,
+            source_repo,
+            source_branch,
+        )
+        logging.info(f"Merge PR is {pr_url}")
     except Exception:
         logging.exception("Error!")
 
