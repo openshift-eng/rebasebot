@@ -1,4 +1,0 @@
-cryptography
-gitpython
-github3.py
-validators
