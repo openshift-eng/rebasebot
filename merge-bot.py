@@ -29,8 +29,6 @@ import git
 import github3
 import requests
 
-TODAY = str(datetime.date.today())
-
 
 # validate_cli_arguments returns a list strings containing all validation
 # errors in the cli arguments
