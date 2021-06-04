@@ -52,7 +52,7 @@ def validate_cli_arguments(cli_args):
 # an object representing the populated namespace, and a list of errors
 #
 # testing_args should be left empty, except for during testing
-def parse_cli_arguments(testing_args=[]):
+def parse_cli_arguments(testing_args=None):
     parser = argparse.ArgumentParser(description="Merge changes from an upstream repo")
     parser.add_argument(
         "--source-repo",
@@ -113,8 +113,7 @@ def parse_cli_arguments(testing_args=[]):
         help="When enabled, the bot will update and vendor the go modules in a separate commit",
     )
 
-    args = None
-    if testing_args:
+    if testing_args is not None:
         args = parser.parse_args(testing_args)
     else:
         args = parser.parse_args()
