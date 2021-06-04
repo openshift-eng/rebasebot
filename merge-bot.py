@@ -32,29 +32,86 @@ import requests
 TODAY = str(datetime.date.today())
 
 
-# validate_cli_arguments returns a list strings containing all validation errors in the cli arguments
+# validate_cli_arguments returns a list strings containing all validation
+# errors in the cli arguments
 def validate_cli_arguments(cli_args):
     validation_errors = []
     if not validators.url(cli_args.source_repo[0]):
-        validation_errors.append("the value for `--source-repo`, {0}, is not a valid URL".format(cli_args.source_repo[0]))
+        validation_errors.append(
+            f"the value for `--source-repo`, {cli_args.source_repo[0]}, is not a valid URL"
+        )
     if not validators.url(cli_args.dest_repo[0]):
-        validation_errors.append("the value for `--dest-repo`, {0}, is not a valid URL".format(cli_args.dest_repo[0]))
+        validation_errors.append(
+            f"the value for `--dest-repo`, {cli_args.dest_repo[0]}, is not a valid URL"
+        )
 
     return validation_errors
 
 
-# parse_cli_arguments parses command line arguments using argparse and returns an object representing the populated namespace, and a list of errors
+# parse_cli_arguments parses command line arguments using argparse and returns
+# an object representing the populated namespace, and a list of errors
+#
 # testing_args should be left empty, except for during testing
 def parse_cli_arguments(testing_args=[]):
-    parser = argparse.ArgumentParser(description='Merge changes from an upstream repo')
-    parser.add_argument('--source-repo', '-s', type=str, nargs=1, required=True, help='The git URL of the source/upstream github repo you want to merge changes from.')
-    parser.add_argument('--dest-repo', '-d', type=str, nargs=1, required=True, help='The git URL of the destination/downstream github repo you want to merge changes into.')
-    parser.add_argument('--fork-repo', '-f', type=str, nargs=1, required=True, help='The git ssh address of the repo the bot will fork the code in to create a pull request.')
-    parser.add_argument('--working-dir', type=str, nargs=1, required=True, help='The working directory where the git repos will be cloned.')
-    parser.add_argument('--github-token', type=str, nargs=1, required=True, help='The path to a github token the bot will use to make a pull request.')
-    parser.add_argument('--github-key', type=str, nargs=1, required=True, help='The path to a github key the bot will use to make a pull request.')
-    parser.add_argument('--slack-webhook', type=str, nargs=1, required=True, help='The path where credentials for the slack webhook are.')
-    parser.add_argument('--update-go-modules', action='store_true', required=False, help='When enabled, the bot will update and vendor the go modules in a separate commit')
+    parser = argparse.ArgumentParser(description="Merge changes from an upstream repo")
+    parser.add_argument(
+        "--source-repo",
+        "-s",
+        type=str,
+        nargs=1,
+        required=True,
+        help="The git URL of the source/upstream github repo you want to merge changes from.",
+    )
+    parser.add_argument(
+        "--dest-repo",
+        "-d",
+        type=str,
+        nargs=1,
+        required=True,
+        help="The git URL of the destination/downstream github repo you want to merge changes into.",
+    )
+    parser.add_argument(
+        "--fork-repo",
+        "-f",
+        type=str,
+        nargs=1,
+        required=True,
+        help="The git ssh address of the repo the bot will fork the code in to create a pull request.",
+    )
+    parser.add_argument(
+        "--working-dir",
+        type=str,
+        nargs=1,
+        required=True,
+        help="The working directory where the git repos will be cloned.",
+    )
+    parser.add_argument(
+        "--github-token",
+        type=str,
+        nargs=1,
+        required=True,
+        help="The path to a github token the bot will use to make a pull request.",
+    )
+    parser.add_argument(
+        "--github-key",
+        type=str,
+        nargs=1,
+        required=True,
+        help="The path to a github key the bot will use to make a pull request.",
+    )
+    parser.add_argument(
+        "--slack-webhook",
+        type=str,
+        nargs=1,
+        required=True,
+        help="The path where credentials for the slack webhook are.",
+    )
+    parser.add_argument(
+        "--update-go-modules",
+        action="store_true",
+        required=False,
+        help="When enabled, the bot will update and vendor the go modules in a separate commit",
+    )
 
     args = None
     if testing_args:
@@ -64,6 +121,7 @@ def parse_cli_arguments(testing_args=[]):
 
     errors = validate_cli_arguments(args)
     return args, errors
+
 
 def check_conflict(repo):
     unmerged_blobs = repo.index.unmerged_blobs()
@@ -100,8 +158,7 @@ def fetch_and_merge(source, dest, fork, working_dir, g):
     source_branch = repo.heads.master
 
     logging.info("Checking out destination's master into destination-master")
-    dest_branch = repo.create_head("destination-master",
-                                   dest_remote.refs.master)
+    dest_branch = repo.create_head("destination-master", dest_remote.refs.master)
     dest_branch.checkout()
 
     logging.info("Performing merge")
@@ -116,13 +173,16 @@ def fetch_and_merge(source, dest, fork, working_dir, g):
     logging.info("Committing merge")
     repo.index.commit(
         "Merge %s:master into master" % source,
-        parent_commits=(dest_branch.commit, source_branch.commit))
+        parent_commits=(dest_branch.commit, source_branch.commit),
+    )
     dest_branch.checkout(force=True)
 
     return repo, fork_remote
 
+
 def message_slack(webhook_url, msg):
     requests.post(webhook_url, json={"text": msg})
+
 
 def commit_go_mod_updates(repo):
     try:
@@ -134,7 +194,9 @@ def commit_go_mod_updates(repo):
 
     try:
         repo.git.add(all=True)
-        repo.git.commit('-m', "Updating and vendoring go modules after an upstream merge.")
+        repo.git.commit(
+            "-m", "Updating and vendoring go modules after an upstream merge."
+        )
     except Exception as err:
         err.extra_info = "Unable to commit go module changes in git"
         raise err
@@ -150,7 +212,9 @@ def push(repo, fork_remote, ssh_key_path):
 
     logging.info("Pushing using %s key", ssh_key_path)
     repo.git.update_environment(
-        GIT_SSH_COMMAND="ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i %s" % ssh_key_path)
+        GIT_SSH_COMMAND="ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i %s"
+        % ssh_key_path
+    )
     result = fork_remote.push()
     if result[0].flags & git.PushInfo.ERROR != 0:
         logging.error("Error when pushing!")
@@ -168,14 +232,20 @@ def create_pr(source_repo, branch, repo, g):
     r = g.get_repo(repo)
     u = g.get_user()
     logging.info("Creating a pull request")
-    p = r.create_pull(title="Rebase %s from %s" % (repo, source_repo),
-                      head="%s:%s" % (u.login, branch), base="master",
-                      maintainer_can_modify=True, body="")
+    p = r.create_pull(
+        title="Rebase %s from %s" % (repo, source_repo),
+        head="%s:%s" % (u.login, branch),
+        base="master",
+        maintainer_can_modify=True,
+        body="",
+    )
     return p.html_url
 
+
 def main():
-    logging.basicConfig(format='%(levelname)s - %(message)s',
-                        stream=sys.stdout, level=logging.DEBUG)
+    logging.basicConfig(
+        format="%(levelname)s - %(message)s", stream=sys.stdout, level=logging.DEBUG
+    )
 
     args = parse_cli_arguments()
     errors = validate_cli_arguments(args)
@@ -203,8 +273,9 @@ def main():
     try:
         g = login_to_github(gh_token)
 
-        repo, fork_remote = fetch_and_merge(source_repo, dest_repo, fork_repo,
-                                            working_dir, g)
+        repo, fork_remote = fetch_and_merge(
+            source_repo, dest_repo, fork_repo, working_dir, g
+        )
 
         if args.update_go_modules:
             commit_go_mod_updates(repo)
@@ -213,7 +284,8 @@ def main():
             message_slack(
                 slack_webhook_url,
                 "I tried creating a rebase PR but everything seems up to "
-                "date! Have a great day team!")
+                "date! Have a great day team!",
+            )
             exit(0)
         pr_branch_name = push(repo, fork_remote, ssh_key_path)
 
@@ -225,12 +297,14 @@ def main():
         message_slack(
             slack_webhook_url,
             "I tried creating a rebase PR but ended up with "
-            "error: %s. Merge conflict?" % traceback.format_exc())
+            "error: %s. Merge conflict?" % traceback.format_exc(),
+        )
 
         exit(1)
 
-    message_slack(slack_webhook_url, "I created a rebase PR: %s. Have "
-                                     "a good one!" % pr_url)
+    message_slack(
+        slack_webhook_url, "I created a rebase PR: %s. Have " "a good one!" % pr_url
+    )
 
 
 if __name__ == "__main__":
