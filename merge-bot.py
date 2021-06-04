@@ -191,7 +191,10 @@ def fetch_and_merge(
         logging.info("Committing merge")
         repo.index.commit(
             f"Merge {source}:{source_branch} into {dest_branch}",
-            parent_commits=(orig_commit, repo.remotes.upstream.refs[source_branch]),
+            parent_commits=(
+                orig_commit,
+                repo.remotes.upstream.refs[source_branch].commit,
+            ),
         )
         return repo
 
