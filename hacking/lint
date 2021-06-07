@@ -3,4 +3,5 @@
 # Don't set pipefail: grep will return 1 if it doesn't match and we don't care
 #set -o pipefail
 
+# Check black wouldn't reformat any files being committed
 git diff --name-only --cached | grep \.py$ | exec xargs -r -- black --check
