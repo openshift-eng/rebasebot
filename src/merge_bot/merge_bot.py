@@ -25,6 +25,7 @@ import validators
 
 import git
 import github3
+import github3.exceptions as gh_exceptions
 import requests
 
 
@@ -261,16 +262,12 @@ def github_app_login(gh_app_id, gh_key):
     return g
 
 
-def github_login_for_installation(g, gh_account, gh_app_id, gh_key):
-    # Look for an authorised installation matching repo
-    matches = (
-        install
-        for install in g.app_installations()
-        if install.account["login"] == gh_account
-    )
+def github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_key):
     try:
-        install = next(matches)
-    except StopIteration:
+        install = g.app_installation_for_repository(
+            owner=gh_account, repository=gh_repo_name
+        )
+    except gh_exceptions.NotFoundError:
         msg = f"App has not been authorised by {gh_account}"
         logging.error(msg)
         raise Exception(msg)
@@ -321,7 +318,7 @@ def main():
 
         g = github_app_login(gh_app_id, gh_key)
         gh_app = g.authenticated_app()
-        g = github_login_for_installation(g, gh_account, gh_app_id, gh_key)
+        g = github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_key)
 
         dest = urlparse.urlunparse(dest_parsed)
         dest_authenticated = dest_parsed._replace(
