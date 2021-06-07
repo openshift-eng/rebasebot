@@ -320,7 +320,6 @@ def main():
         gh_app = g.authenticated_app()
         g = github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_key)
 
-        dest = urlparse.urlunparse(dest_parsed)
         dest_authenticated = dest_parsed._replace(
             netloc=f"x-access-token:{g.session.auth.token}@{dest_parsed.hostname}"
         )
@@ -328,7 +327,7 @@ def main():
 
         repo = fetch_and_merge(
             working_dir,
-            dest,
+            dest_repo,
             dest_authenticated,
             dest_branch,
             source_repo,
