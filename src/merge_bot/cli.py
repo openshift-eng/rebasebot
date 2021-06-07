@@ -24,7 +24,6 @@ import merge_bot
 # errors in the cli arguments
 def validate_cli_arguments(cli_args):
     validation_errors = []
-    print(cli_args)
     if not validators.url(cli_args.source_repo):
         validation_errors.append(
             f"the value for `--source-repo`, {cli_args.source_repo}, is not a valid URL"

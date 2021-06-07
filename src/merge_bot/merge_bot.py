@@ -106,14 +106,15 @@ def commit_go_mod_updates(repo):
         err.extra_info = "Unable to update go modules"
         raise err
 
-    try:
-        repo.git.add(all=True)
-        repo.git.commit(
-            "-m", "Updating and vendoring go modules after an upstream merge."
-        )
-    except Exception as err:
-        err.extra_info = "Unable to commit go module changes in git"
-        raise err
+    if repo.is_dirty():
+        try:
+            repo.git.add(all=True)
+            repo.git.commit(
+                "-m", "Updating and vendoring go modules after an upstream merge."
+            )
+        except Exception as err:
+            err.extra_info = "Unable to commit go module changes in git"
+            raise err
 
     return
 
