@@ -15,12 +15,10 @@
 #    under the License.
 
 import argparse
-import datetime
 import logging
 import os
 import shutil
 import sys
-import time
 import traceback
 from urllib import parse as urlparse
 import validators
