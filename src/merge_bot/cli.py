@@ -18,7 +18,7 @@ import argparse
 import sys
 import validators
 
-import merge_bot
+from . import merge_bot
 
 # validate_cli_arguments returns a list strings containing all validation
 # errors in the cli arguments
