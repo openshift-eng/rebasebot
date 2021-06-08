@@ -1,7 +1,26 @@
 #!/bin/sh
 
-# Don't set pipefail: grep will return 1 if it doesn't match and we don't care
-#set -o pipefail
+lint_args="--check"
 
-# Check black wouldn't reformat any files being committed
-git diff --name-only --cached | grep \.py$ | exec xargs -r -- black --check
+usage() {
+    echo "Usage: $0 [-r | --reformat]"
+}
+
+PARSED_ARGS=$(getopt -a -n lint -o r --long reformat -- "$@")
+if [ "$?" != "0" ]
+then
+    exec 1>&2
+    usage
+    exit 2
+fi
+
+eval set -- "$PARSED_ARGS"
+while :
+do
+    case $1 in
+        -r | --reformat) lint_args=""; shift ;;
+        --) shift; break;;
+    esac
+done
+
+black $lint_args .
