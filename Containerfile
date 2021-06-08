@@ -4,4 +4,4 @@ WORKDIR /src
 COPY . .
 RUN python -m pip install .
 
-ENTRYPOINT /opt/app-root/bin/merge-bot
+ENTRYPOINT [ "/opt/app-root/bin/merge-bot" ]
