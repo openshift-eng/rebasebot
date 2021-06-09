@@ -1,5 +1,6 @@
 FROM registry.access.redhat.com/ubi8/python-39
 
+# Prow expects to be able to check out a repo under /go
 USER 0:0
 WORKDIR /go
 RUN chown 1001:1001 .
