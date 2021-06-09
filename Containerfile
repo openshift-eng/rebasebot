@@ -8,6 +8,7 @@ RUN python -m pip install .
 WORKDIR /working
 RUN rm -rf /src
 RUN chown 1001:1001 .
+RUN chmod 0777 .
 
 USER 1001:1001
 ENTRYPOINT [ "/opt/app-root/bin/merge-bot" ]
