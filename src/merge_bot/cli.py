@@ -90,8 +90,9 @@ def parse_cli_arguments(testing_args=None):
     parser.add_argument(
         "--working-dir",
         type=str,
-        required=True,
+        required=False,
         help="The working directory where the git repos will be cloned.",
+        default=".",
     )
     parser.add_argument(
         "--github-key",
