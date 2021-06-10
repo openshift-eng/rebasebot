@@ -1,9 +1,10 @@
-from cli import parse_cli_arguments
-from merge_bot import commit_go_mod_updates
-
 import unittest
 import os
 from git import Repo
+
+from . import cli
+from . import merge_bot
+
 
 valid_args = [
     "--source-repo",
@@ -78,7 +79,7 @@ func main() {
 
 class test_cli(unittest.TestCase):
     def test_valid_cli_argmuents(self):
-        args, errors = parse_cli_arguments(valid_args)
+        args, errors = cli.parse_cli_arguments(valid_args)
 
         # sanity checks
         self.assertEqual(
@@ -99,7 +100,7 @@ class test_cli(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def test_invalid_url(self):
-        _, errors = parse_cli_arguments(invalid_url_args)
+        _, errors = cli.parse_cli_arguments(invalid_url_args)
         self.assertEqual(
             errors,
             [
@@ -120,7 +121,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.commit("-m", "Initial commit")
 
         try:
-            commit_go_mod_updates(repo)
+            merge_bot.commit_go_mod_updates(repo)
         except Exception as err:
             self.assertEqual(str(err), "")
         else:
@@ -152,7 +153,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.commit("-m", "Initial commit")
 
         try:
-            commit_go_mod_updates(repo)
+            merge_bot.commit_go_mod_updates(repo)
         except Exception as err:
             self.assertEqual(str(err), "")
         else:
