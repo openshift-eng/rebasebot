@@ -15,25 +15,35 @@
 #    under the License.
 
 import argparse
+import re
 import sys
-import validators
 
 from . import merge_bot
 
-# validate_cli_arguments returns a list strings containing all validation
-# errors in the cli arguments
-def validate_cli_arguments(cli_args):
-    validation_errors = []
-    if not validators.url(cli_args.source_repo):
-        validation_errors.append(
-            f"the value for `--source-repo`, {cli_args.source_repo}, is not a valid URL"
-        )
-    if not validators.url(cli_args.dest_repo):
-        validation_errors.append(
-            f"the value for `--dest-repo`, {cli_args.dest_repo}, is not a valid URL"
-        )
 
-    return validation_errors
+class GitHubBranchAction(argparse.Action):
+    """An action to take git branch arguments in the form:
+
+      <user or organisation>/<repo>:<branch>
+
+    The argument will be returned as a GitHubBranch object.
+    """
+
+    GITHUBBRANCH = re.compile("^(?P<ns>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        m = self.GITHUBBRANCH.match(values)
+        if m is None:
+            parser.error(
+                f"GitHub branch value for {option_string} should be of "
+                f"the form <user or organisation>/<repo>:<branch>"
+            )
+
+        setattr(
+            namespace,
+            self.dest,
+            merge_bot.GitHubBranch(m.group("ns"), m.group("name"), m.group("branch")),
+        )
 
 
 # parse_cli_arguments parses command line arguments using argparse and returns
@@ -41,39 +51,34 @@ def validate_cli_arguments(cli_args):
 #
 # testing_args should be left empty, except for during testing
 def parse_cli_arguments(testing_args=None):
+    _form_text = (
+        "in the form <user or organisation>/<repo>:<branch>, "
+        "e.g. kubernetes/cloud-provider-openstack:master"
+    )
+
     parser = argparse.ArgumentParser(description="Merge changes from an upstream repo")
     parser.add_argument(
-        "--source-repo",
+        "--source",
         "-s",
         type=str,
         required=True,
-        help="The git URL of the source/upstream github repo to merge changes from.",
+        action=GitHubBranchAction,
+        help=f"The source/upstream github repo to merge changes from {_form_text}",
     )
     parser.add_argument(
-        "--source-branch",
-        type=str,
-        required=True,
-        help="The git branch to merge changes from.",
-    )
-    parser.add_argument(
-        "--dest-repo",
+        "--dest",
         "-d",
         type=str,
         required=True,
-        help="The git URL of the destination/downstream github repo to merge changes into.",
+        action=GitHubBranchAction,
+        help=f"The destination/downstream GitHub branch to merge changes into {_form_text}",
     )
     parser.add_argument(
-        "--dest-branch",
+        "--merge",
         type=str,
         required=True,
-        help="The git branch to merge changes into.",
-    )
-    parser.add_argument(
-        "--merge-branch",
-        type=str,
-        required=False,
-        help="The git branch on dest to push merge to.",
-        default=None,  # We will default this below based on bot name and dest branch
+        action=GitHubBranchAction,
+        help=f"The GitHub branch to write the merge to {_form_text}",
     )
     parser.add_argument(
         "--bot-name",
@@ -95,7 +100,7 @@ def parse_cli_arguments(testing_args=None):
         default=".",
     )
     parser.add_argument(
-        "--github-key",
+        "--github-app-key",
         type=str,
         required=True,
         help="The path to a github app private key.",
@@ -106,6 +111,12 @@ def parse_cli_arguments(testing_args=None):
         required=False,
         help="The app ID of the GitHub app to use.",
         default=118774,  # shiftstack-merge-bot
+    )
+    parser.add_argument(
+        "--github-oauth-token",
+        type=str,
+        required=True,
+        help="The path to a github oauth token.",
     )
     parser.add_argument(
         "--slack-webhook",
@@ -126,39 +137,41 @@ def parse_cli_arguments(testing_args=None):
     else:
         args = parser.parse_args()
 
-    errors = validate_cli_arguments(args)
-    return args, errors
+    return args
 
 
 def main():
-    args, errors = parse_cli_arguments()
-    if errors:
-        for error in errors:
-            print(error, file=sys.stderr)
-        exit(1)
+    args = parse_cli_arguments()
 
-    with open(args.github_key, "r") as f:
-        gh_key = f.read().strip().encode()
+    with open(args.github_app_key, "r") as f:
+        gh_app_key = f.read().strip().encode()
+
+    with open(args.github_oauth_token, "r") as f:
+        gh_oauth_token = f.read().strip()
 
     slack_webhook = None
     if args.slack_webhook is not None:
         with open(args.slack_webhook, "r") as f:
             slack_webhook = f.read().strip()
 
-    return merge_bot.run(
-        args.dest_repo,
-        args.dest_branch,
-        args.source_repo,
-        args.source_branch,
-        args.merge_branch,
+    success = merge_bot.run(
+        args.dest,
+        args.source,
+        args.merge,
         args.working_dir,
         args.bot_name,
         args.bot_email,
-        gh_key,
         args.github_app_id,
+        gh_app_key,
+        gh_oauth_token,
         slack_webhook,
         update_go_modules=args.update_go_modules,
     )
+
+    if success:
+        exit(0)
+    else:
+        exit(1)
 
 
 if __name__ == "__main__":
