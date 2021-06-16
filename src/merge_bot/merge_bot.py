@@ -28,6 +28,7 @@ import github3.exceptions as gh_exceptions
 import requests
 
 GitHubBranch = namedtuple("GitHubBranch", ["ns", "name", "branch"])
+GitBranch = namedtuple("GitBranch", ["url", "branch"])
 
 
 def check_conflict(repo):
@@ -59,7 +60,7 @@ def git_merge(gitwd, dest, source):
 
         logging.info("Committing merge")
         gitwd.index.commit(
-            f"Merge {source.ns}/{source.name}:{source.branch} into {dest.branch}",
+            f"Merge {source.url}:{source.branch} into {dest.branch}",
             parent_commits=(
                 orig_commit,
                 gitwd.remotes.source.refs[source.branch].commit,
@@ -117,13 +118,31 @@ def create_pr(g, dest_repo, dest, source, merge):
         pass
 
     logging.info("Creating a pull request")
-    pr = dest_repo.create_pull(
-        f"Merge {source.ns}/{source.name}:{source.branch} into {dest.branch}",
-        dest.branch,
-        merge.branch,
-    )
+    # XXX(mdbooth): This hack is because github3 doesn't support setting
+    # maintainer_can_modify to false when creating a PR.
+    #
+    # When maintainer_can_modify is true, which is the default we can't change,
+    # we get a 422 response from GitHub. The reason for this is that we're
+    # creating the pull in the destination repo with credentials that don't
+    # have write permission on the source. This means they can't grant
+    # permission to the maintainer at the destination to modify the merge
+    # branch.
+    #
+    # https://github.com/sigmavirus24/github3.py/issues/1031
 
-    return pr.url, True
+    pr = g._post(
+        f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
+        data={
+            "title": f"Merge {source.url}:{source.branch} into {dest.branch}",
+            "head": f"{merge.ns}:{merge.branch}",
+            "base": dest.branch,
+            "maintainer_can_modify": False,
+        },
+        json=True,
+    )
+    pr.raise_for_status()
+
+    return pr.json()["html_url"], True
 
 
 def github_app_login(gh_app_id, gh_app_key):
@@ -139,7 +158,10 @@ def github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
             owner=gh_account, repository=gh_repo_name
         )
     except gh_exceptions.NotFoundError:
-        msg = f"App has not been authorised by {gh_account}"
+        msg = (
+            f"App has not been authorised by {gh_account}, or repo "
+            f"{gh_account}/{gh_repo_name} does not exist"
+        )
         logging.error(msg)
         raise Exception(msg)
 
@@ -149,47 +171,53 @@ def github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
 
 def init_working_dir(
     working_dir,
-    dest_repo,
-    source_repo,
-    merge_repo,
-    dest,
-    source,
+    source_url,
+    source_branch,
+    dest_url,
+    dest_branch,
+    merge_url,
     gh_app,  # Read permission on dest
-    gh_oauth,  # Write permission on merge
+    gh_cloner_app,  # Write permission on merge
     bot_email,
     bot_name,
 ):
     gitwd = git.Repo.init(path=working_dir, mkdir=True)
-    dest_remote = gitwd.create_remote("dest", dest_repo.clone_url)
-    merge_remote = gitwd.create_remote("merge", merge_repo.clone_url)
-    source_remote = gitwd.create_remote("source", source_repo.clone_url)
 
-    # We want to avoid writing our app or oauth credentials to disk. We write
-    # them to files in /dev/shm/credentials and configure git to read them from
-    # there as required.
+    for remote, url in [
+        ("source", source_url),
+        ("dest", dest_url),
+        ("merge", merge_url),
+    ]:
+        if remote in gitwd.remotes:
+            gitwd.remotes[remote].set_url(url)
+        else:
+            gitwd.create_remote(remote, url)
+
+    # We want to avoid writing app credentials to disk. We write them to files
+    # in /dev/shm/credentials and configure git to read them from there as
+    # required.
     # This isn't perfect because /dev/shm can still be swapped, but this whole
     # executable can be swapped, so it's no worse than that.
     credentials_dir = "/dev/shm/credentials"
     app_credentials = os.path.join(credentials_dir, "app")
-    oauth_credentials = os.path.join(credentials_dir, "oauth")
+    cloner_credentials = os.path.join(credentials_dir, "cloner")
 
     os.mkdir(credentials_dir)
     with open(app_credentials, "w") as f:
         f.write(gh_app.session.auth.token)
-    with open(oauth_credentials, "w") as f:
-        f.write(gh_oauth.session.auth.token)
+    with open(cloner_credentials, "w") as f:
+        f.write(gh_cloner_app.session.auth.token)
 
     with gitwd.config_writer() as config:
         config.set_value("credential", "username", "x-access-token")
         config.set_value("credential", "useHttpPath", "true")
 
         for repo, credentials in [
-            (dest_repo, app_credentials),
-            (source_repo, oauth_credentials),
-            (merge_repo, oauth_credentials),
+            (dest_url, app_credentials),
+            (merge_url, cloner_credentials),
         ]:
             config.set_value(
-                f'credential "{repo.clone_url}"',
+                f'credential "{repo}"',
                 "helper",
                 f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
             )
@@ -197,30 +225,36 @@ def init_working_dir(
         config.set_value("user", "email", bot_email)
         config.set_value("user", "name", bot_name)
 
-    logging.info(f"Fetching {dest.branch} from dest")
-    dest_remote.fetch(dest.branch)
-    logging.info(f"Fetching {source.branch} from source")
-    source_remote.fetch(source.branch)
+    logging.info(f"Fetching {dest_branch} from dest")
+    gitwd.remotes.dest.fetch(dest_branch)
+    logging.info(f"Fetching {source_branch} from source")
+    gitwd.remotes.source.fetch(source_branch)
 
-    working_branch = f"dest/{dest.branch}"
+    working_branch = f"dest/{dest_branch}"
     logging.info(f"Checking out {working_branch}")
-    dest_checkout = gitwd.create_head("merge", working_branch)
-    gitwd.head.reference = dest_checkout
+
+    head_commit = gitwd.remotes.dest.refs.master.commit
+    if "merge" in gitwd.heads:
+        gitwd.heads.merge.set_commit(head_commit)
+    else:
+        gitwd.create_head("merge", head_commit)
+    gitwd.head.reference = gitwd.heads.merge
     gitwd.head.reset(index=True, working_tree=True)
 
     return gitwd
 
 
 def run(
-    dest,
     source,
+    dest,
     merge,
     working_dir,
     bot_name,
     bot_email,
     gh_app_id,
     gh_app_key,
-    gh_oauth_token,
+    gh_cloner_id,
+    gh_cloner_key,
     slack_webhook,
     update_go_modules=False,
 ):
@@ -228,23 +262,23 @@ def run(
         format="%(levelname)s - %(message)s", stream=sys.stdout, level=logging.DEBUG
     )
 
-    # App credentials for the destination
+    # App credentials for accessing the destination and opening a PR
     gh_app = github_app_login(gh_app_id, gh_app_key)
 
     gh_app_name = gh_app.authenticated_app().name
     gh_app = github_login_for_repo(gh_app, dest.ns, dest.name, gh_app_id, gh_app_key)
 
-    # OAUTH credentials for the merge repo
-    gh_oauth = github3.GitHub()
-    gh_oauth.login(token=gh_oauth_token)
+    # App credentials for writing to the merge repo
+    gh_cloner_app = github_app_login(gh_cloner_id, gh_cloner_key)
+    gh_cloner_app = github_login_for_repo(
+        gh_cloner_app, merge.ns, merge.name, gh_cloner_id, gh_cloner_key
+    )
 
     try:
-        dest_repo = gh_oauth.repository(dest.ns, dest.name)
+        dest_repo = gh_app.repository(dest.ns, dest.name)
         logging.info(f"Destination repository is {dest_repo.clone_url}")
-        merge_repo = dest_repo.create_fork(merge.ns)
+        merge_repo = gh_cloner_app.repository(merge.ns, merge.name)
         logging.info(f"Merge repository is {merge_repo.clone_url}")
-        source_repo = gh_oauth.repository(source.ns, source.name)
-        logging.info(f"Source repository is {source_repo.clone_url}")
     except Exception as ex:
         logging.exception(ex)
         message_slack(
@@ -255,13 +289,13 @@ def run(
     try:
         gitwd = init_working_dir(
             working_dir,
-            dest_repo,
-            source_repo,
-            merge_repo,
-            dest,
-            source,
+            source.url,
+            source.branch,
+            dest_repo.clone_url,
+            dest.branch,
+            merge_repo.clone_url,
             gh_app,
-            gh_oauth,
+            gh_cloner_app,
             bot_email,
             bot_name,
         )
@@ -283,7 +317,7 @@ def run(
         message_slack(
             slack_webhook,
             f"I got an error trying to merge "
-            f"{source.ns}/{source.name}:{source.branch} "
+            f"{source.url}:{source.branch} "
             f"into {dest.ns}/{dest.name}:{dest.branch}: "
             f"{ex}",
         )

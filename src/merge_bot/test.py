@@ -7,19 +7,14 @@ from . import merge_bot
 
 
 valid_args = {
-    # XXX(mdbooth): By assuming everything is a GitHub branch I've broken the
-    # original Kuryr use case where upstream is:
-    #   https://opendev.org/openstack/kuryr-kubernetes:master
-    # We don't use any GitHub-specific features on the source, so this should
-    # be easy to fix.
-    "source": "openstack/kuryr-kubernetes:master",
+    "source": "https://opendev.org/openstack/kuryr-kubernetes:master",
     "dest": "openshift/kuryr-kubernetes:master",
     "merge": "shiftstack/kuryr-kubernetes:merge-bot-master",
     "bot-name": "test",
     "bot-email": "test@email.com",
     "working-dir": "tmp",
     "github-app-key": "/credentials/gh-app-key",
-    "github-oauth-token": "/credentials/gh-oauth-token",
+    "github-cloner-key": "/credentials/gh-cloner-key",
     "slack-webhook": "/credentials/slack-webhook",
     "update-go-modules": None,
 }
@@ -63,8 +58,9 @@ class test_cli(unittest.TestCase):
         args = cli.parse_cli_arguments(args_dict_to_list(valid_args))
 
         # sanity checks
-        self.assertEqual(args.source.ns, "openstack")
-        self.assertEqual(args.source.name, "kuryr-kubernetes")
+        self.assertEqual(
+            args.source.url, "https://opendev.org/openstack/kuryr-kubernetes"
+        )
         self.assertEqual(args.source.branch, "master")
         self.assertEqual(args.dest.ns, "openshift")
         self.assertEqual(args.dest.name, "kuryr-kubernetes")
@@ -75,7 +71,7 @@ class test_cli(unittest.TestCase):
         self.assertEqual(args.bot_email, "test@email.com")
         self.assertEqual(args.working_dir, "tmp")
         self.assertEqual(args.github_app_key, "/credentials/gh-app-key")
-        self.assertEqual(args.github_oauth_token, "/credentials/gh-oauth-token")
+        self.assertEqual(args.github_cloner_key, "/credentials/gh-cloner-key")
         self.assertEqual(args.slack_webhook, "/credentials/slack-webhook")
         self.assertEqual(args.update_go_modules, True)
 

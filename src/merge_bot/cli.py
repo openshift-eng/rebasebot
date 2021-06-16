@@ -17,12 +17,13 @@
 import argparse
 import re
 import sys
+import validators
 
 from . import merge_bot
 
 
 class GitHubBranchAction(argparse.Action):
-    """An action to take git branch arguments in the form:
+    """An action to take a GitHub branch argument in the form:
 
       <user or organisation>/<repo>:<branch>
 
@@ -35,7 +36,7 @@ class GitHubBranchAction(argparse.Action):
         m = self.GITHUBBRANCH.match(values)
         if m is None:
             parser.error(
-                f"GitHub branch value for {option_string} should be of "
+                f"GitHub branch value for {option_string} must be in "
                 f"the form <user or organisation>/<repo>:<branch>"
             )
 
@@ -44,6 +45,31 @@ class GitHubBranchAction(argparse.Action):
             self.dest,
             merge_bot.GitHubBranch(m.group("ns"), m.group("name"), m.group("branch")),
         )
+
+
+class GitBranchAction(argparse.Action):
+    """An action to take a git branch argument in the form:
+
+      <git url>:<branch>
+
+    The argument will be return as a GitBranch object.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        msg = (
+            f"Git branch value for {option_string} must be in "
+            f"the form <git url>:<branch>"
+        )
+
+        split = values.rsplit(":", 1)
+        if len(split) != 2:
+            parser.error(msg)
+
+        url, branch = split
+        if not validators.url(url):
+            parser.error(msg)
+
+        setattr(namespace, self.dest, merge_bot.GitBranch(url, branch))
 
 
 # parse_cli_arguments parses command line arguments using argparse and returns
@@ -62,8 +88,12 @@ def parse_cli_arguments(testing_args=None):
         "-s",
         type=str,
         required=True,
-        action=GitHubBranchAction,
-        help=f"The source/upstream github repo to merge changes from {_form_text}",
+        action=GitBranchAction,
+        help=(
+            "The source/upstream git repo to merge changes from in the form "
+            "<git url>:<branch>. Note that unlike dest and merge this does "
+            "not need to be a GitHub url, hence its syntax is different."
+        ),
     )
     parser.add_argument(
         "--dest",
@@ -100,12 +130,6 @@ def parse_cli_arguments(testing_args=None):
         default=".",
     )
     parser.add_argument(
-        "--github-app-key",
-        type=str,
-        required=True,
-        help="The path to a github app private key.",
-    )
-    parser.add_argument(
         "--github-app-id",
         type=int,
         required=False,
@@ -113,10 +137,23 @@ def parse_cli_arguments(testing_args=None):
         default=118774,  # shiftstack-merge-bot
     )
     parser.add_argument(
-        "--github-oauth-token",
+        "--github-app-key",
         type=str,
         required=True,
-        help="The path to a github oauth token.",
+        help="The path to a github app private key.",
+    )
+    parser.add_argument(
+        "--github-cloner-id",
+        type=int,
+        required=False,
+        help="The app ID of the GitHub cloner app to use.",
+        default=121614,  # shiftstack-merge-bot-cloner
+    )
+    parser.add_argument(
+        "--github-cloner-key",
+        type=str,
+        required=True,
+        help="The path to a github app private key.",
     )
     parser.add_argument(
         "--slack-webhook",
@@ -146,8 +183,8 @@ def main():
     with open(args.github_app_key, "r") as f:
         gh_app_key = f.read().strip().encode()
 
-    with open(args.github_oauth_token, "r") as f:
-        gh_oauth_token = f.read().strip()
+    with open(args.github_cloner_key, "r") as f:
+        gh_cloner_key = f.read().strip().encode()
 
     slack_webhook = None
     if args.slack_webhook is not None:
@@ -155,15 +192,16 @@ def main():
             slack_webhook = f.read().strip()
 
     success = merge_bot.run(
-        args.dest,
         args.source,
+        args.dest,
         args.merge,
         args.working_dir,
         args.bot_name,
         args.bot_email,
         args.github_app_id,
         gh_app_key,
-        gh_oauth_token,
+        args.github_cloner_id,
+        gh_cloner_key,
         slack_webhook,
         update_go_modules=args.update_go_modules,
     )
