@@ -31,6 +31,14 @@ GitHubBranch = namedtuple("GitHubBranch", ["ns", "name", "branch"])
 GitBranch = namedtuple("GitBranch", ["url", "branch"])
 
 
+class RepoException(Exception):
+    """An error requiring the user to perform a manual action in the
+    destination repo
+    """
+
+    pass
+
+
 def check_conflict(repo):
     unmerged_blobs = repo.index.unmerged_blobs()
 
@@ -52,11 +60,14 @@ def git_merge(gitwd, dest, source):
     orig_commit = gitwd.active_branch.commit
 
     logging.info("Performing merge")
-    gitwd.git.merge(f"source/{source.branch}", "--no-commit")
+    try:
+        gitwd.git.merge(f"source/{source.branch}", "--no-commit")
+    except git.exc.GitCommandError as ex:
+        raise RepoException(f"Git merge failed: {ex}")
 
     if gitwd.is_dirty():
         if check_conflict(gitwd):
-            raise Exception("Merge conflict, needs manual resolution!")
+            raise RepoException("Merge conflict, needs manual resolution!")
 
         logging.info("Committing merge")
         gitwd.index.commit(
@@ -87,8 +98,7 @@ def commit_go_mod_updates(repo):
         os.system("go mod tidy")
         os.system("go mod vendor")
     except Exception as err:
-        err.extra_info = "Unable to update go modules"
-        raise err
+        raise RepoException(f"Unable to update go modules: {err}")
 
     if repo.is_dirty():
         try:
@@ -312,6 +322,16 @@ def run(
 
         if update_go_modules:
             commit_go_mod_updates(repo)
+    except RepoException as ex:
+        logging.error(ex)
+        message_slack(
+            slack_webhook,
+            f"Manual intervention is needed to merge "
+            f"{source.url}:{source.branch} "
+            f"into {dest.ns}/{dest.name}:{dest.branch}: "
+            f"{ex}",
+        )
+        return True
     except Exception as ex:
         logging.exception(ex)
         message_slack(
