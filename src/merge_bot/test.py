@@ -6,52 +6,28 @@ from . import cli
 from . import merge_bot
 
 
-valid_args = [
-    "--source-repo",
-    "https://opendev.org/openstack/kuryr-kubernetes",
-    "--source-branch",
-    "master",
-    "--dest-repo",
-    "https://github.com/openshift/kuryr-kubernetes",
-    "--dest-branch",
-    "master",
-    "--merge-branch",
-    "merge_branch",
-    "--bot-name",
-    "test",
-    "--bot-email",
-    "test@email.com",
-    "--working-dir",
-    "tmp",
-    "--github-key",
-    "/credentials/gh-key",
-    "--slack-webhook",
-    "/credentials/slack-webhook",
-    "--update-go-modules",
-]
+valid_args = {
+    "source": "https://opendev.org/openstack/kuryr-kubernetes:master",
+    "dest": "openshift/kuryr-kubernetes:master",
+    "merge": "shiftstack/kuryr-kubernetes:merge-bot-master",
+    "bot-name": "test",
+    "bot-email": "test@email.com",
+    "working-dir": "tmp",
+    "github-app-key": "/credentials/gh-app-key",
+    "github-cloner-key": "/credentials/gh-cloner-key",
+    "slack-webhook": "/credentials/slack-webhook",
+    "update-go-modules": None,
+}
 
-invalid_url_args = [
-    "--source-repo",
-    "opendev.org/openstack/kuryr-kubernetes",
-    "--source-branch",
-    "master",
-    "--dest-repo",
-    "https://github/openshift/kuryr-kubernetes",
-    "--dest-branch",
-    "master",
-    "--merge-branch",
-    "merge_branch",
-    "--bot-name",
-    "test",
-    "--bot-email",
-    "test@email.com",
-    "--working-dir",
-    "tmp",
-    "--github-key",
-    "/credentials/gh-token",
-    "--slack-webhook",
-    "/credentials/slack-webhook",
-]
+
+def args_dict_to_list(args_dict):
+    args = []
+    for k, v in args_dict.items():
+        args.append(f"--{k}")
+        if v is not None:
+            args.append(v)
+    return args
+
 
 working_dir = os.getcwd()
 
@@ -79,35 +55,33 @@ func main() {
 
 class test_cli(unittest.TestCase):
     def test_valid_cli_argmuents(self):
-        args, errors = cli.parse_cli_arguments(valid_args)
+        args = cli.parse_cli_arguments(args_dict_to_list(valid_args))
 
         # sanity checks
         self.assertEqual(
-            args.source_repo, "https://opendev.org/openstack/kuryr-kubernetes"
+            args.source.url, "https://opendev.org/openstack/kuryr-kubernetes"
         )
-        self.assertEqual(args.source_branch, "master")
-        self.assertEqual(
-            args.dest_repo, "https://github.com/openshift/kuryr-kubernetes"
-        )
-        self.assertEqual(args.dest_branch, "master")
+        self.assertEqual(args.source.branch, "master")
+        self.assertEqual(args.dest.ns, "openshift")
+        self.assertEqual(args.dest.name, "kuryr-kubernetes")
+        self.assertEqual(args.dest.branch, "master")
+        self.assertEqual(args.merge.ns, "shiftstack")
+        self.assertEqual(args.merge.name, "kuryr-kubernetes")
+        self.assertEqual(args.merge.branch, "merge-bot-master")
         self.assertEqual(args.bot_email, "test@email.com")
         self.assertEqual(args.working_dir, "tmp")
-        self.assertEqual(args.github_key, "/credentials/gh-key")
+        self.assertEqual(args.github_app_key, "/credentials/gh-app-key")
+        self.assertEqual(args.github_cloner_key, "/credentials/gh-cloner-key")
         self.assertEqual(args.slack_webhook, "/credentials/slack-webhook")
         self.assertEqual(args.update_go_modules, True)
 
-        # error checks
-        self.assertEqual(errors, [])
+    def test_invalid_branch(self):
+        for branch in ("dest", "source", "merge"):
+            invalid_args = valid_args.copy()
+            invalid_args[branch] = "invalid"
 
-    def test_invalid_url(self):
-        _, errors = cli.parse_cli_arguments(invalid_url_args)
-        self.assertEqual(
-            errors,
-            [
-                "the value for `--source-repo`, opendev.org/openstack/kuryr-kubernetes, is not a valid URL",
-                "the value for `--dest-repo`, https://github/openshift/kuryr-kubernetes, is not a valid URL",
-            ],
-        )
+            with self.assertRaises(SystemExit):
+                cli.parse_cli_arguments(args_dict_to_list(invalid_args))
 
 
 class test_go_mod(unittest.TestCase):
@@ -133,7 +107,7 @@ class test_go_mod(unittest.TestCase):
             self.assertEqual(len(commits), 2)
             self.assertEqual(
                 commits[0].message,
-                "Updating and vendoring go modules after an upstream merge.\n",
+                "Updating and vendoring go modules after an upstream merge\n",
             )
         finally:
             # clean up
