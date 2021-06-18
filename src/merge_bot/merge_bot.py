@@ -347,3 +347,5 @@ def run(
         message_slack(slack_webhook, f"I created a new merge PR: {pr_url}")
     else:
         message_slack(slack_webhook, f"I updated existing merge PR: {pr_url}")
+
+    return True
