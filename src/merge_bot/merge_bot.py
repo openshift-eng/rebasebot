@@ -18,6 +18,7 @@ from collections import namedtuple
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 from urllib import parse as urlparse
@@ -95,10 +96,12 @@ def message_slack(webhook_url, msg):
 
 def commit_go_mod_updates(repo):
     try:
-        os.system("go mod tidy")
-        os.system("go mod vendor")
-    except Exception as err:
-        raise RepoException(f"Unable to update go modules: {err}")
+        subprocess.run("go mod tidy", shell=True, check=True, capture_output=True)
+        subprocess.run("go mod vendor", shell=True, check=True, capture_output=True)
+    except subprocess.CalledProcessError as err:
+        raise RepoException(
+            f"Unable to update go modules: {err}: {err.stderr.decode()}"
+        )
 
     if repo.is_dirty():
         try:
