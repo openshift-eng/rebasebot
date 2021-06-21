@@ -321,7 +321,7 @@ def run(
             return True
 
         if update_go_modules:
-            commit_go_mod_updates(repo)
+            commit_go_mod_updates(gitwd)
     except RepoException as ex:
         logging.error(ex)
         message_slack(
