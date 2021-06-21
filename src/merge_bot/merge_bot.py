@@ -300,6 +300,12 @@ def run(
 
     try:
         os.mkdir(working_dir)
+    except FileExistsError:
+        pass
+    except Exception:
+        raise
+
+    try:
         os.chdir(working_dir)
         gitwd = init_working_dir(
             source.url,
