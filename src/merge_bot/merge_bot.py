@@ -180,7 +180,6 @@ def github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
 
 
 def init_working_dir(
-    working_dir,
     source_url,
     source_branch,
     dest_url,
@@ -191,7 +190,7 @@ def init_working_dir(
     bot_email,
     bot_name,
 ):
-    gitwd = git.Repo.init(path=working_dir, mkdir=True)
+    gitwd = git.Repo.init(path=".")
 
     for remote, url in [
         ("source", source_url),
@@ -297,8 +296,9 @@ def run(
         return False
 
     try:
+        os.mkdir(working_dir)
+        os.chdir(working_dir)
         gitwd = init_working_dir(
-            working_dir,
             source.url,
             source.branch,
             dest_repo.clone_url,
