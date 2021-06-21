@@ -18,6 +18,7 @@ from collections import namedtuple
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import traceback
 from urllib import parse as urlparse
@@ -95,10 +96,12 @@ def message_slack(webhook_url, msg):
 
 def commit_go_mod_updates(repo):
     try:
-        os.system("go mod tidy")
-        os.system("go mod vendor")
-    except Exception as err:
-        raise RepoException(f"Unable to update go modules: {err}")
+        subprocess.run("go mod tidy", shell=True, check=True, capture_output=True)
+        subprocess.run("go mod vendor", shell=True, check=True, capture_output=True)
+    except subprocess.CalledProcessError as err:
+        raise RepoException(
+            f"Unable to update go modules: {err}: {err.stderr.decode()}"
+        )
 
     if repo.is_dirty():
         try:
@@ -180,7 +183,6 @@ def github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
 
 
 def init_working_dir(
-    working_dir,
     source_url,
     source_branch,
     dest_url,
@@ -191,7 +193,7 @@ def init_working_dir(
     bot_email,
     bot_name,
 ):
-    gitwd = git.Repo.init(path=working_dir, mkdir=True)
+    gitwd = git.Repo.init(path=".")
 
     for remote, url in [
         ("source", source_url),
@@ -297,8 +299,9 @@ def run(
         return False
 
     try:
+        os.mkdir(working_dir)
+        os.chdir(working_dir)
         gitwd = init_working_dir(
-            working_dir,
             source.url,
             source.branch,
             dest_repo.clone_url,
@@ -321,7 +324,7 @@ def run(
             return True
 
         if update_go_modules:
-            commit_go_mod_updates(repo)
+            commit_go_mod_updates(gitwd)
     except RepoException as ex:
         logging.error(ex)
         message_slack(
