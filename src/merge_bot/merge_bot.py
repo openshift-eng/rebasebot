@@ -96,8 +96,14 @@ def message_slack(webhook_url, msg):
 
 def commit_go_mod_updates(repo):
     try:
-        subprocess.run("go mod tidy", shell=True, check=True, capture_output=True)
-        subprocess.run("go mod vendor", shell=True, check=True, capture_output=True)
+        proc = subprocess.run(
+            "go mod tidy", shell=True, check=True, capture_output=True
+        )
+        logging.debug(f"go mod tidy output: {proc.stdout.decode()}")
+        proc = subprocess.run(
+            "go mod vendor", shell=True, check=True, capture_output=True
+        )
+        logging.debug(f"go mod vendor output: {proc.stdout.decode()}")
     except subprocess.CalledProcessError as err:
         raise RepoException(
             f"Unable to update go modules: {err}: {err.stderr.decode()}"
