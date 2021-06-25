@@ -1,14 +1,20 @@
 FROM registry.access.redhat.com/ubi8/python-39
 
-USER 0:0
+USER root
+
+ENV GO_VERSION=1.16.5
+RUN curl -Ls https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz | \
+    tar -C /usr/local -zxvf - go/bin go/pkg/linux_amd64 go/pkg/tool
+ENV PATH="/usr/local/go/bin:$PATH"
+
 WORKDIR /src
 COPY . .
 RUN python -m pip install .
 
 WORKDIR /working
 RUN rm -rf /src
-RUN chown 1001:1001 .
+RUN chown default .
 RUN chmod 0777 .
 
-USER 1001:1001
+USER default
 ENTRYPOINT [ "/opt/app-root/bin/merge-bot" ]
