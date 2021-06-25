@@ -1,14 +1,14 @@
 FROM registry.access.redhat.com/ubi8/python-39
 
-USER 0:0
+USER root
 WORKDIR /src
 COPY . .
 RUN python -m pip install .
 
 WORKDIR /working
 RUN rm -rf /src
-RUN chown 1001:1001 .
+RUN chown default .
 RUN chmod 0777 .
 
-USER 1001:1001
+USER default
 ENTRYPOINT [ "/opt/app-root/bin/merge-bot" ]
