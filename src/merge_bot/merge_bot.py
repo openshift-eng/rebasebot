@@ -57,8 +57,27 @@ def configure_commit_info(repo, bot_name, bot_email):
         config.set_value("user", "name", bot_name)
 
 
-def git_merge(gitwd, dest, source):
+def git_merge(gitwd, dest, source, merge):
     orig_commit = gitwd.active_branch.commit
+
+    if merge.branch in gitwd.remotes.merge.refs:
+        # Check if we have already pushed a merge to the merge branch which
+        # contains the current head of the source branch
+        try:
+            gitwd.git.merge_base(
+                f"source/{source.branch}", f"merge/{merge.branch}", is_ancestor=True
+            )
+            logging.info("Existing merge branch already contains source")
+
+            # We're not going to update merge branch, but we still want to
+            # ensure there's a PR open on it.
+            gitwd.head.reference = gitwd.remotes.merge.refs[merge.branch]
+            gitwd.head.reset(index=True, working_tree=True)
+            return True
+        except git.exc.GitCommandError:
+            # merge_base --is-ancestor indicates true/false by raising an
+            # exception or not
+            logging.info("Existing merge branch needs to be updated")
 
     logging.info("Performing merge")
     try:
@@ -194,6 +213,7 @@ def init_working_dir(
     dest_url,
     dest_branch,
     merge_url,
+    merge_branch,
     gh_app,  # Read permission on dest
     gh_cloner_app,  # Write permission on merge
     bot_email,
@@ -250,6 +270,12 @@ def init_working_dir(
 
     working_branch = f"dest/{dest_branch}"
     logging.info(f"Checking out {working_branch}")
+
+    logging.info(f"Checking for existing merge branch {merge_branch} in {merge_url}")
+    merge_ref = gitwd.git.ls_remote("merge", merge_branch, heads=True)
+    if len(merge_ref) > 0:
+        logging.info("Fetching existing merge branch")
+        gitwd.remotes.merge.fetch(merge_branch)
 
     head_commit = gitwd.remotes.dest.refs.master.commit
     if "merge" in gitwd.heads:
@@ -319,6 +345,7 @@ def run(
             dest_repo.clone_url,
             dest.branch,
             merge_repo.clone_url,
+            merge.branch,
             gh_app,
             gh_cloner_app,
             bot_email,
@@ -332,7 +359,7 @@ def run(
         return False
 
     try:
-        if not git_merge(gitwd, dest, source):
+        if not git_merge(gitwd, dest, source, merge):
             return True
 
         if update_go_modules:
