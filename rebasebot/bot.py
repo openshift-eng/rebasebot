@@ -114,11 +114,11 @@ def _commit_go_mod_updates(repo):
     return
 
 
-def _create_pr(g, dest_repo, dest, source, merge):
+def _create_pr(github, dest_repo, dest, source, merge):
     logging.info("Checking for existing pull request")
     try:
-        pr = dest_repo.pull_requests(head=f"{merge.ns}:{merge.branch}").next()
-        return pr.html_url, False
+        github_pr = dest_repo.pull_requests(head=f"{merge.ns}:{merge.branch}").next()
+        return github_pr.html_url, False
     except StopIteration:
         pass
 
@@ -135,7 +135,7 @@ def _create_pr(g, dest_repo, dest, source, merge):
     #
     # https://github.com/sigmavirus24/github3.py/issues/1031
 
-    pr = g._post(
+    github_pr = github._post(
         f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
         data={
             "title": f"Merge {source.url}:{source.branch} into {dest.branch}",
@@ -145,28 +145,28 @@ def _create_pr(g, dest_repo, dest, source, merge):
         },
         json=True,
     )
-    pr.raise_for_status()
+    github_pr.raise_for_status()
 
-    return pr.json()["html_url"], True
+    return github_pr.json()["html_url"], True
 
 
 def _github_app_login(gh_app_id, gh_app_key):
     logging.info("Logging to GitHub as an Application")
-    g = github3.GitHub()
-    g.login_as_app(gh_app_key, gh_app_id, expire_in=300)
-    return g
+    github = github3.GitHub()
+    github.login_as_app(gh_app_key, gh_app_id, expire_in=300)
+    return github
 
 
 def _github_user_login(user_token):
     logging.info("Logging to GitHub as a User")
-    g = github3.GitHub()
-    g.login(token=user_token)
-    return g
+    github = github3.GitHub()
+    github.login(token=user_token)
+    return github
 
 
-def _github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
+def _github_login_for_repo(github, gh_account, gh_repo_name, gh_app_id, gh_app_key):
     try:
-        install = g.app_installation_for_repository(
+        install = github.app_installation_for_repository(
             owner=gh_account, repository=gh_repo_name
         )
     except gh_exceptions.NotFoundError as err:
@@ -177,8 +177,8 @@ def _github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
         logging.error(msg)
         raise Exception(msg) from err
 
-    g.login_as_app_installation(gh_app_key, gh_app_id, install.id)
-    return g
+    github.login_as_app_installation(gh_app_key, gh_app_id, install.id)
+    return github
 
 
 def _init_working_dir(
@@ -297,10 +297,10 @@ def run(
             shutil.rmtree(CREDENTIALS_DIR)
 
         os.mkdir(CREDENTIALS_DIR)
-        with open(app_credentials, "w") as f:
-            f.write(gh_app.session.auth.token)
-        with open(cloner_credentials, "w") as f:
-            f.write(gh_cloner_app.session.auth.token)
+        with open(app_credentials, "w") as app_credentials_file:
+            app_credentials_file.write(gh_app.session.auth.token)
+        with open(cloner_credentials, "w") as cloner_credentials_file:
+            cloner_credentials_file.write(gh_cloner_app.session.auth.token)
 
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)

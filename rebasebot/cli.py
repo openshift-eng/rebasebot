@@ -32,8 +32,8 @@ class GitHubBranchAction(argparse.Action):
     GITHUBBRANCH = re.compile("^(?P<ns>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
 
     def __call__(self, parser, namespace, values, option_string=None):
-        m = self.GITHUBBRANCH.match(values)
-        if m is None:
+        match = self.GITHUBBRANCH.match(values)
+        if match is None:
             parser.error(
                 f"GitHub branch value for {option_string} must be in "
                 f"the form <user or organisation>/<repo>:<branch>"
@@ -43,9 +43,9 @@ class GitHubBranchAction(argparse.Action):
             namespace,
             self.dest,
             bot.GitHubBranch(
-                m.group("ns"),
-                m.group("name"),
-                m.group("branch")
+                match.group("ns"),
+                match.group("name"),
+                match.group("branch")
             ),
         )
 
@@ -200,23 +200,23 @@ def main():
 
     gh_app_key = ""
     if args.github_app_key is not None:
-        with open(args.github_app_key, "r") as f:
-            gh_app_key = f.read().strip().encode()
+        with open(args.github_app_key, "r") as app_key_file:
+            gh_app_key = app_key_file.read().strip().encode()
 
     gh_cloner_key = ""
     if args.github_cloner_key is not None:
-        with open(args.github_cloner_key, "r") as f:
-            gh_cloner_key = f.read().strip().encode()
+        with open(args.github_cloner_key, "r") as app_key_file:
+            gh_cloner_key = app_key_file.read().strip().encode()
 
     gh_user_token = ""
     if args.github_user_token is not None:
-        with open(args.github_user_token, "r") as f:
-            gh_user_token = f.read().strip().encode().decode('utf-8')
+        with open(args.github_user_token, "r") as app_key_file:
+            gh_user_token = app_key_file.read().strip().encode().decode('utf-8')
 
     slack_webhook = None
     if args.slack_webhook is not None:
-        with open(args.slack_webhook, "r") as f:
-            slack_webhook = f.read().strip()
+        with open(args.slack_webhook, "r") as app_key_file:
+            slack_webhook = app_key_file.read().strip()
 
     success = bot.run(
         args.source,
