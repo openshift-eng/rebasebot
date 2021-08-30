@@ -39,6 +39,7 @@ class RepoException(Exception):
 CREDENTIALS_DIR = "/dev/shm/credentials"
 app_credentials = os.path.join(CREDENTIALS_DIR, "app")
 cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
+user_credentials = os.path.join(CREDENTIALS_DIR, "user")
 
 
 def _git_rebase(gitwd, source, rebase):
@@ -203,13 +204,23 @@ def _init_working_dir(
             gitwd.create_remote(remote, url)
 
     with gitwd.config_writer() as config:
-        if not user_auth:
-            config.set_value("credential", "username", "x-access-token")
-            config.set_value("credential", "useHttpPath", "true")
+        config.set_value("credential", "username", "x-access-token")
+        config.set_value("credential", "useHttpPath", "true")
 
+        if not user_auth:
             for repo, credentials in [
                 (dest_url, app_credentials),
                 (rebase_url, cloner_credentials),
+            ]:
+                config.set_value(
+                    f'credential "{repo}"',
+                    "helper",
+                    f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
+                )
+        else:
+            for repo, credentials in [
+                (dest_url, user_credentials),
+                (rebase_url, user_credentials),
             ]:
                 config.set_value(
                     f'credential "{repo}"',
@@ -271,9 +282,22 @@ def run(
         level=logging.DEBUG
     )
 
+    # We want to avoid writing app credentials to disk. We write them to
+    # files in /dev/shm/credentials and configure git to read them from
+    # there as required.
+    # This isn't perfect because /dev/shm can still be swapped, but this
+    # whole executable can be swapped, so it's no worse than that.
+    if os.path.exists(CREDENTIALS_DIR) and os.path.isdir(CREDENTIALS_DIR):
+        shutil.rmtree(CREDENTIALS_DIR)
+
+    os.mkdir(CREDENTIALS_DIR)
+
     if user_token is not None:
         gh_app = _github_user_login(user_token)
         gh_cloner_app = _github_user_login(user_token)
+
+        with open(user_credentials, "w") as user_credentials_file:
+            user_credentials_file.write(user_token)
     else:
         # App credentials for accessing the destination and opening a PR
         gh_app = _github_app_login(gh_app_id, gh_app_key)
@@ -286,15 +310,6 @@ def run(
             gh_cloner_app, rebase.ns, rebase.name, gh_cloner_id, gh_cloner_key
         )
 
-        # We want to avoid writing app credentials to disk. We write them to
-        # files in /dev/shm/credentials and configure git to read them from
-        # there as required.
-        # This isn't perfect because /dev/shm can still be swapped, but this
-        # whole executable can be swapped, so it's no worse than that.
-        if os.path.exists(CREDENTIALS_DIR) and os.path.isdir(CREDENTIALS_DIR):
-            shutil.rmtree(CREDENTIALS_DIR)
-
-        os.mkdir(CREDENTIALS_DIR)
         with open(app_credentials, "w") as app_credentials_file:
             app_credentials_file.write(gh_app.session.auth.token)
         with open(cloner_credentials, "w") as cloner_credentials_file:
