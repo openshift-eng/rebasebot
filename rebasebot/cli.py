@@ -79,7 +79,7 @@ class GitBranchAction(argparse.Action):
 # an object representing the populated namespace, and a list of errors
 #
 # testing_args should be left empty, except for during testing
-def parse_cli_arguments(testing_args=None):
+def _parse_cli_arguments(testing_args=None):
     _form_text = (
         "in the form <user or organisation>/<repo>:<branch>, "
         "e.g. kubernetes/cloud-provider-openstack:master"
@@ -196,7 +196,7 @@ def parse_cli_arguments(testing_args=None):
 
 
 def main():
-    args = parse_cli_arguments()
+    args = _parse_cli_arguments()
 
     gh_app_key = ""
     if args.github_app_key is not None:

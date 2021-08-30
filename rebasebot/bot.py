@@ -41,7 +41,7 @@ app_credentials = os.path.join(CREDENTIALS_DIR, "app")
 cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
 
 
-def git_rebase(gitwd, source, rebase):
+def _git_rebase(gitwd, source, rebase):
     orig_commit = gitwd.active_branch.commit
 
     if rebase.branch in gitwd.remotes.rebase.refs:
@@ -79,13 +79,13 @@ def git_rebase(gitwd, source, rebase):
     return False
 
 
-def message_slack(webhook_url, msg):
+def _message_slack(webhook_url, msg):
     if webhook_url is None:
         return
     requests.post(webhook_url, json={"text": msg})
 
 
-def commit_go_mod_updates(repo):
+def _commit_go_mod_updates(repo):
     try:
         proc = subprocess.run(
             "go mod tidy", shell=True, check=True, capture_output=True
@@ -114,7 +114,7 @@ def commit_go_mod_updates(repo):
     return
 
 
-def create_pr(g, dest_repo, dest, source, merge):
+def _create_pr(g, dest_repo, dest, source, merge):
     logging.info("Checking for existing pull request")
     try:
         pr = dest_repo.pull_requests(head=f"{merge.ns}:{merge.branch}").next()
@@ -150,21 +150,21 @@ def create_pr(g, dest_repo, dest, source, merge):
     return pr.json()["html_url"], True
 
 
-def github_app_login(gh_app_id, gh_app_key):
+def _github_app_login(gh_app_id, gh_app_key):
     logging.info("Logging to GitHub as an Application")
     g = github3.GitHub()
     g.login_as_app(gh_app_key, gh_app_id, expire_in=300)
     return g
 
 
-def github_user_login(user_token):
+def _github_user_login(user_token):
     logging.info("Logging to GitHub as a User")
     g = github3.GitHub()
     g.login(token=user_token)
     return g
 
 
-def github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
+def _github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
     try:
         install = g.app_installation_for_repository(
             owner=gh_account, repository=gh_repo_name
@@ -181,7 +181,7 @@ def github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
     return g
 
 
-def init_working_dir(
+def _init_working_dir(
     source_url,
     source_branch,
     dest_url,
@@ -274,17 +274,17 @@ def run(
     )
 
     if user_token is not None:
-        gh_app = github_user_login(user_token)
-        gh_cloner_app = github_user_login(user_token)
+        gh_app = _github_user_login(user_token)
+        gh_cloner_app = _github_user_login(user_token)
     else:
         # App credentials for accessing the destination and opening a PR
-        gh_app = github_app_login(gh_app_id, gh_app_key)
-        gh_app = github_login_for_repo(
+        gh_app = _github_app_login(gh_app_id, gh_app_key)
+        gh_app = _github_login_for_repo(
             gh_app, dest.ns, dest.name, gh_app_id, gh_app_key)
 
         # App credentials for writing to the rebase repo
-        gh_cloner_app = github_app_login(gh_cloner_id, gh_cloner_key)
-        gh_cloner_app = github_login_for_repo(
+        gh_cloner_app = _github_app_login(gh_cloner_id, gh_cloner_key)
+        gh_cloner_app = _github_login_for_repo(
             gh_cloner_app, rebase.ns, rebase.name, gh_cloner_id, gh_cloner_key
         )
 
@@ -309,7 +309,7 @@ def run(
         logging.info(f"rebase repository is {rebase_repo.clone_url}")
     except Exception as ex:
         logging.exception(ex)
-        message_slack(
+        _message_slack(
             slack_webhook,
             f"I got an error fetching repo information from GitHub: {ex}"
         )
@@ -324,7 +324,7 @@ def run(
 
     try:
         os.chdir(working_dir)
-        gitwd = init_working_dir(
+        gitwd = _init_working_dir(
             source.url,
             source.branch,
             dest_repo.clone_url,
@@ -337,21 +337,21 @@ def run(
         )
     except Exception as ex:
         logging.exception(ex)
-        message_slack(
+        _message_slack(
             slack_webhook,
             f"I got an error initialising the git directory: {ex}"
         )
         return False
 
     try:
-        if not git_rebase(gitwd, source, rebase):
+        if not _git_rebase(gitwd, source, rebase):
             return True
 
         if update_go_modules:
-            commit_go_mod_updates(gitwd)
+            _commit_go_mod_updates(gitwd)
     except RepoException as ex:
         logging.error(ex)
-        message_slack(
+        _message_slack(
             slack_webhook,
             f"Manual intervention is needed to rebase "
             f"{source.url}:{source.branch} "
@@ -361,7 +361,7 @@ def run(
         return True
     except Exception as ex:
         logging.exception(ex)
-        message_slack(
+        _message_slack(
             slack_webhook,
             f"I got an error trying to rebase "
             f"{source.url}:{source.branch} "
@@ -379,7 +379,7 @@ def run(
             raise Exception("Error when pushing %d!" % result[0].flags)
     except Exception as ex:
         logging.exception(ex)
-        message_slack(
+        _message_slack(
             slack_webhook,
             f"I got an error pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}",
         )
@@ -390,12 +390,12 @@ def run(
         return True
 
     try:
-        pr_url, created = create_pr(gh_app, dest_repo, dest, source, rebase)
+        pr_url, created = _create_pr(gh_app, dest_repo, dest, source, rebase)
         logging.info(f"Rebase PR is {pr_url}")
     except Exception as ex:
         logging.exception(ex)
 
-        message_slack(
+        _message_slack(
             slack_webhook,
             f"I got an error creating a rebase PR: {ex}"
         )
@@ -403,8 +403,8 @@ def run(
         return False
 
     if created:
-        message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
+        _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
     else:
-        message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
+        _message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
 
     return True

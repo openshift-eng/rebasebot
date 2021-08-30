@@ -55,7 +55,7 @@ def make_golang_repo(tmp_dir):
 
 class test_cli(unittest.TestCase):
     def test_valid_cli_argmuents(self):
-        args = cli.parse_cli_arguments(args_dict_to_list(valid_args))
+        args = cli._parse_cli_arguments(args_dict_to_list(valid_args))
 
         # sanity checks
         self.assertEqual(
@@ -81,7 +81,7 @@ class test_cli(unittest.TestCase):
             invalid_args[branch] = "invalid"
 
             with self.assertRaises(SystemExit):
-                cli.parse_cli_arguments(args_dict_to_list(invalid_args))
+                cli._parse_cli_arguments(args_dict_to_list(invalid_args))
 
 
 class test_go_mod(unittest.TestCase):
@@ -95,7 +95,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.commit("-m", "Initial commit")
 
         try:
-            bot.commit_go_mod_updates(repo)
+            bot._commit_go_mod_updates(repo)
         except Exception as err:
             self.assertEqual(str(err), "")
         else:
@@ -128,7 +128,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.commit("-m", "Initial commit")
 
         try:
-            bot.commit_go_mod_updates(repo)
+            bot._commit_go_mod_updates(repo)
         except Exception as err:
             self.assertEqual(str(err), "")
         else:
