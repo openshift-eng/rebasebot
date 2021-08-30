@@ -189,8 +189,8 @@ def init_working_dir(
     rebase_url,
     rebase_branch,
     user_auth,
-    bot_email,
-    bot_name,
+    git_username,
+    git_email,
 ):
     gitwd = git.Repo.init(path=".")
 
@@ -219,8 +219,10 @@ def init_working_dir(
                     f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
                 )
 
-        config.set_value("user", "email", bot_email)
-        config.set_value("user", "name", bot_name)
+        if git_email is not None:
+            config.set_value("repository", "email", git_email)
+        if git_username is not None:
+            config.set_value("repository", "name", git_username)
         config.set_value("merge", "renameLimit", 999999)
 
     logging.info(f"Fetching {dest_branch} from dest")
@@ -254,8 +256,8 @@ def run(
     dest,
     rebase,
     working_dir,
-    bot_name,
-    bot_email,
+    git_username,
+    git_email,
     user_token,
     gh_app_id,
     gh_app_key,
@@ -330,8 +332,8 @@ def run(
             rebase_repo.clone_url,
             rebase.branch,
             user_token is not None,
-            bot_email,
-            bot_name,
+            git_username,
+            git_email
         )
     except Exception as ex:
         logging.exception(ex)

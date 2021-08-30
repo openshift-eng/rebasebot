@@ -115,16 +115,16 @@ def parse_cli_arguments(testing_args=None):
         help=f"The base GitHub repo that will be used to create a pull request {_form_text}",
     )
     parser.add_argument(
-        "--bot-name",
+        "--git-username",
         type=str,
-        required=True,
-        help="The name to be used in any git commits.",
+        required=False,
+        help="Custom git username to be used in any git commits.",
     )
     parser.add_argument(
-        "--bot-email",
+        "--git-email",
         type=str,
-        required=True,
-        help="The email to be used in any git commits.",
+        required=False,
+        help="Custom git email to be used in any git commits.",
     )
     parser.add_argument(
         "--working-dir",
@@ -223,8 +223,8 @@ def main():
         args.dest,
         args.rebase,
         args.working_dir,
-        args.bot_name,
-        args.bot_email,
+        args.git_username,
+        args.git_email,
         gh_user_token,
         args.github_app_id,
         gh_app_key,

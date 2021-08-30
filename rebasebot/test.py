@@ -10,8 +10,8 @@ valid_args = {
     "source": "https://github.com/kubernetes/autoscaler:master",
     "dest": "openshift/kubernetes-autoscaler:master",
     "rebase": "rebasebot/kubernetes-autoscaler:rebase-bot-master",
-    "bot-name": "test",
-    "bot-email": "test@email.com",
+    "git-username": "test",
+    "git-email": "test@email.com",
     "working-dir": "tmp",
     "github-app-key": "/credentials/gh-app-key",
     "github-cloner-key": "/credentials/gh-cloner-key",
@@ -68,7 +68,7 @@ class test_cli(unittest.TestCase):
         self.assertEqual(args.rebase.ns, "rebasebot")
         self.assertEqual(args.rebase.name, "kubernetes-autoscaler")
         self.assertEqual(args.rebase.branch, "rebase-bot-master")
-        self.assertEqual(args.bot_email, "test@email.com")
+        self.assertEqual(args.git_email, "test@email.com")
         self.assertEqual(args.working_dir, "tmp")
         self.assertEqual(args.github_app_key, "/credentials/gh-app-key")
         self.assertEqual(args.github_cloner_key, "/credentials/gh-cloner-key")
