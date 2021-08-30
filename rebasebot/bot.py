@@ -41,7 +41,7 @@ app_credentials = os.path.join(CREDENTIALS_DIR, "app")
 cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
 
 
-def git_rebase(gitwd, dest, source, rebase):
+def git_rebase(gitwd, source, rebase):
     orig_commit = gitwd.active_branch.commit
 
     if rebase.branch in gitwd.remotes.rebase.refs:
@@ -344,7 +344,7 @@ def run(
         return False
 
     try:
-        if not git_rebase(gitwd, dest, source, rebase):
+        if not git_rebase(gitwd, source, rebase):
             return True
 
         if update_go_modules:
