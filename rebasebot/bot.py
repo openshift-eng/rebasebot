@@ -60,7 +60,7 @@ def _git_rebase(gitwd, source, rebase):
             gitwd.head.reference = gitwd.remotes.rebase.refs[rebase.branch]
             gitwd.head.reset(index=True, working_tree=True)
             return True
-        except git.exc.GitCommandError:
+        except git.GitCommandError:
             # rebase_base --is-ancestor indicates true/false by raising an
             # exception or not
             logging.info("Existing rebase branch needs to be updated")
@@ -68,7 +68,7 @@ def _git_rebase(gitwd, source, rebase):
     logging.info("Performing rebase")
     try:
         gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
-    except git.exc.GitCommandError as ex:
+    except git.GitCommandError as ex:
         raise RepoException(f"Git rebase failed: {ex}")
 
     if gitwd.active_branch.commit != orig_commit:
