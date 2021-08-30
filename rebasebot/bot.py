@@ -111,8 +111,6 @@ def _commit_go_mod_updates(repo):
             err.extra_info = "Unable to commit go module changes in git"
             raise err
 
-    return
-
 
 def _create_pr(github, dest_repo, dest, source, merge):
     logging.info("Checking for existing pull request")
