@@ -69,7 +69,7 @@ def _git_rebase(gitwd, source, rebase):
     try:
         gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
     except git.GitCommandError as ex:
-        raise RepoException(f"Git rebase failed: {ex}")
+        raise RepoException(f"Git rebase failed: {ex}") from ex
 
     if gitwd.active_branch.commit != orig_commit:
         logging.info("Destination can be fast-forwarded")
@@ -98,7 +98,7 @@ def _commit_go_mod_updates(repo):
     except subprocess.CalledProcessError as err:
         raise RepoException(
             f"Unable to update go modules: {err}: {err.stderr.decode()}"
-        )
+        ) from err
 
     if repo.is_dirty():
         try:
@@ -169,13 +169,13 @@ def _github_login_for_repo(g, gh_account, gh_repo_name, gh_app_id, gh_app_key):
         install = g.app_installation_for_repository(
             owner=gh_account, repository=gh_repo_name
         )
-    except gh_exceptions.NotFoundError:
+    except gh_exceptions.NotFoundError as err:
         msg = (
             f"App has not been authorised by {gh_account}, or repo "
             f"{gh_account}/{gh_repo_name} does not exist"
         )
         logging.error(msg)
-        raise Exception(msg)
+        raise Exception(msg) from err
 
     g.login_as_app_installation(gh_app_key, gh_app_id, install.id)
     return g
