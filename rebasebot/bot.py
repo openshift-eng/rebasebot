@@ -317,8 +317,6 @@ def run(
         os.mkdir(working_dir)
     except FileExistsError:
         pass
-    except Exception:
-        raise
 
     try:
         os.chdir(working_dir)
