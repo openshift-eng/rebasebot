@@ -90,11 +90,11 @@ def _commit_go_mod_updates(repo):
         proc = subprocess.run(
             "go mod tidy", shell=True, check=True, capture_output=True
         )
-        logging.debug(f"go mod tidy output: {proc.stdout.decode()}")
+        logging.debug("go mod tidy output: %s", proc.stdout.decode())
         proc = subprocess.run(
             "go mod vendor", shell=True, check=True, capture_output=True
         )
-        logging.debug(f"go mod vendor output: {proc.stdout.decode()}")
+        logging.debug("go mod vendor output %s:", proc.stdout.decode())
     except subprocess.CalledProcessError as err:
         raise RepoException(
             f"Unable to update go modules: {err}: {err.stderr.decode()}"
@@ -223,16 +223,16 @@ def _init_working_dir(
             config.set_value("repository", "name", git_username)
         config.set_value("merge", "renameLimit", 999999)
 
-    logging.info(f"Fetching {dest_branch} from dest")
+    logging.info("Fetching %s from dest", dest_branch)
     gitwd.remotes.dest.fetch(dest_branch)
-    logging.info(f"Fetching {source_branch} from source")
+    logging.info("Fetching %s from source", source_branch)
     gitwd.remotes.source.fetch(source_branch)
 
     working_branch = f"dest/{dest_branch}"
-    logging.info(f"Checking out {working_branch}")
+    logging.info("Checking out %s", working_branch)
 
     logging.info(
-        f"Checking for existing rebase branch {rebase_branch} in {rebase_url}")
+        "Checking for existing rebase branch %s in %s", rebase_branch, rebase_url)
     rebase_ref = gitwd.git.ls_remote("rebase", rebase_branch, heads=True)
     if len(rebase_ref) > 0:
         logging.info("Fetching existing rebase branch")
@@ -302,9 +302,9 @@ def run(
 
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)
-        logging.info(f"Destination repository is {dest_repo.clone_url}")
+        logging.info("Destination repository is %s", dest_repo.clone_url)
         rebase_repo = gh_cloner_app.repository(rebase.ns, rebase.name)
-        logging.info(f"rebase repository is {rebase_repo.clone_url}")
+        logging.info("rebase repository is %s", rebase_repo.clone_url)
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
@@ -389,7 +389,7 @@ def run(
 
     try:
         pr_url, created = _create_pr(gh_app, dest_repo, dest, source, rebase)
-        logging.info(f"Rebase PR is {pr_url}")
+        logging.info("Rebase PR is %s", pr_url)
     except Exception as ex:
         logging.exception(ex)
 
