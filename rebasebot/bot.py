@@ -385,6 +385,10 @@ def run(
         )
         return False
 
+    if dry_run:
+        logging.info("Dry run mode is enabled. Do not create a PR.")
+        return True
+
     try:
         result = gitwd.remotes.rebase.push(
             refspec=f"HEAD:{rebase.branch}",
@@ -399,10 +403,6 @@ def run(
             f"I got an error pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}",
         )
         return False
-
-    if dry_run:
-        logging.info("Dry run mode is enabled. Do not create a PR.")
-        return True
 
     try:
         pr_url, created = _create_pr(gh_app, dest_repo, dest, source, rebase)
