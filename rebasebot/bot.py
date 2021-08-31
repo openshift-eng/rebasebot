@@ -89,6 +89,10 @@ def _message_slack(webhook_url, msg):
 def _commit_go_mod_updates(repo):
     try:
         proc = subprocess.run(
+            "rm -rf vendor", shell=True, check=True, capture_output=True
+        )
+        logging.debug("rm -rf vendor %s:", proc.stdout.decode())
+        proc = subprocess.run(
             "go mod tidy", shell=True, check=True, capture_output=True
         )
         logging.debug("go mod tidy output: %s", proc.stdout.decode())
