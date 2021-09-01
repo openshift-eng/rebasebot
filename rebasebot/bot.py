@@ -399,7 +399,7 @@ def run(
             force=True
         )
         if result[0].flags & git.PushInfo.ERROR != 0:
-            raise Exception("Error when pushing %d!" % result[0].flags)
+            raise Exception(f"Error when pushing {result[0].flags}! {result[0].summary}")
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
