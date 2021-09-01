@@ -93,10 +93,6 @@ def _commit_go_mod_updates(repo, source):
             repo.remotes.source.repo.git.checkout(f"source/{source.branch}", filename)
 
         proc = subprocess.run(
-            "rm -rf vendor", shell=True, check=True, capture_output=True
-        )
-        logging.debug("rm -rf vendor %s:", proc.stdout.decode())
-        proc = subprocess.run(
             "go mod tidy", shell=True, check=True, capture_output=True
         )
         logging.debug("go mod tidy output: %s", proc.stdout.decode())
@@ -104,6 +100,8 @@ def _commit_go_mod_updates(repo, source):
             "go mod vendor", shell=True, check=True, capture_output=True
         )
         logging.debug("go mod vendor output %s:", proc.stdout.decode())
+
+        repo.git.add(all=True)
     except subprocess.CalledProcessError as err:
         raise RepoException(
             f"Unable to update go modules: {err}: {err.stderr.decode()}"
@@ -119,6 +117,13 @@ def _commit_go_mod_updates(repo, source):
         except Exception as err:
             err.extra_info = "Unable to commit go module changes in git"
             raise err
+
+
+def _do_merge(repo, dest):
+    repo.git.merge(
+        f"dest/{dest.branch}", "-Xtheirs", "-m",
+        f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {repo.active_branch}"
+    )
 
 
 def _create_pr(github, dest_repo, dest, source, merge):
@@ -282,7 +287,8 @@ def run(
     gh_cloner_key,
     slack_webhook,
     update_go_modules=False,
-    dry_run=False
+    dry_run=False,
+    with_merge=False
 ):
     logging.basicConfig(
         format="%(levelname)s - %(message)s",
@@ -365,6 +371,9 @@ def run(
     try:
         if not _git_rebase(gitwd, source, rebase):
             return True
+
+        if with_merge:
+            _do_merge(gitwd, dest)
 
         if update_go_modules:
             _commit_go_mod_updates(gitwd, source)

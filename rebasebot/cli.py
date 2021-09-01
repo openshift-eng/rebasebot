@@ -187,6 +187,14 @@ def _parse_cli_arguments(testing_args=None):
         required=False,
         help="When enabled, the bot will not create a PR.",
     )
+    parser.add_argument(
+        "--with-merge",
+        action="store_true",
+        default=False,
+        required=False,
+        help="When enabled, the bot will create an empty merge commit to prevent "
+        "github conflicts.",
+    )
 
     if testing_args is not None:
         args = parser.parse_args(testing_args)
@@ -233,7 +241,8 @@ def main():
         gh_cloner_key,
         slack_webhook,
         update_go_modules=args.update_go_modules,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        with_merge=args.with_merge
     )
 
     if success:
