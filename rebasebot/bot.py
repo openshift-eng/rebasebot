@@ -86,8 +86,12 @@ def _message_slack(webhook_url, msg):
     requests.post(webhook_url, json={"text": msg})
 
 
-def _commit_go_mod_updates(repo):
+def _commit_go_mod_updates(repo, source):
     try:
+        # Reset go.mod and go.sum to make sure they are the same as in the source
+        for filename in ["go.mod", "go.sum"]:
+            repo.remotes.source.repo.git.checkout(f"source/{source.branch}", filename)
+
         proc = subprocess.run(
             "rm -rf vendor", shell=True, check=True, capture_output=True
         )
@@ -363,7 +367,7 @@ def run(
             return True
 
         if update_go_modules:
-            _commit_go_mod_updates(gitwd)
+            _commit_go_mod_updates(gitwd, source)
     except RepoException as ex:
         logging.error(ex)
         _message_slack(
