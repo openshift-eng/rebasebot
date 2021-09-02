@@ -42,15 +42,24 @@ cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
 user_credentials = os.path.join(CREDENTIALS_DIR, "user")
 
 
-def _git_rebase(gitwd, source, rebase):
+def _git_rebase(gitwd, source, dest, rebase):
     orig_commit = gitwd.active_branch.commit
 
     if rebase.branch in gitwd.remotes.rebase.refs:
         # Check if we have already pushed a rebase PR to the rebase branch
         # which contains the current head of the source branch
         try:
+
+            # Check if the source has been updated
             gitwd.git.merge_base(
                 f"source/{source.branch}",
+                f"rebase/{rebase.branch}",
+                is_ancestor=True
+            )
+
+            # Check if the dest has been updated
+            gitwd.git.merge_base(
+                f"dest/{dest.branch}",
                 f"rebase/{rebase.branch}",
                 is_ancestor=True
             )
@@ -369,7 +378,7 @@ def run(
         return False
 
     try:
-        if not _git_rebase(gitwd, source, rebase):
+        if not _git_rebase(gitwd, source, dest, rebase):
             return True
 
         if with_merge:
