@@ -48,53 +48,6 @@ cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
 user_credentials = os.path.join(CREDENTIALS_DIR, "user")
 
 
-def _git_rebase(gitwd, source, dest, rebase):
-    orig_commit = gitwd.active_branch.commit
-
-    if rebase.branch in gitwd.remotes.rebase.refs:
-        # Check if we have already pushed a rebase PR to the rebase branch
-        # which contains the current head of the source branch
-        try:
-
-            # Check if the source has been updated
-            gitwd.git.merge_base(
-                f"source/{source.branch}",
-                f"rebase/{rebase.branch}",
-                is_ancestor=True
-            )
-
-            # Check if the dest has been updated
-            gitwd.git.merge_base(
-                f"dest/{dest.branch}",
-                f"rebase/{rebase.branch}",
-                is_ancestor=True
-            )
-            logging.info("Existing rebase branch already contains source")
-
-            # We're not going to update rebase branch, but we still want to
-            # ensure there's a PR open on it.
-            gitwd.head.reference = gitwd.remotes.rebase.refs[rebase.branch]
-            gitwd.head.reset(index=True, working_tree=True)
-            return True
-        except git.GitCommandError:
-            # rebase_base --is-ancestor indicates true/false by raising an
-            # exception or not
-            logging.info("Existing rebase branch needs to be updated")
-
-    logging.info("Performing rebase")
-    try:
-        gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
-    except git.GitCommandError as ex:
-        raise RepoException(f"Git rebase failed: {ex}") from ex
-
-    if gitwd.active_branch.commit != orig_commit:
-        logging.info("Destination can be fast-forwarded")
-        return True
-
-    logging.info("No rebase is necessary")
-    return False
-
-
 def _message_slack(webhook_url, msg):
     if webhook_url is None:
         return
@@ -378,8 +331,11 @@ def run(
         return False
 
     try:
-        if not _git_rebase(gitwd, source, dest, rebase):
-            return True
+        logging.info("Performing rebase")
+        try:
+            gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
+        except git.GitCommandError as ex:
+            raise RepoException(f"Git rebase failed: {ex}") from ex
 
         if with_merge:
             _do_merge(gitwd, dest)
@@ -407,11 +363,18 @@ def run(
         )
         return False
 
+    if rebase.branch in gitwd.remotes.rebase.refs:
+        diff_index = gitwd.git.diff(f"rebase/{rebase.branch}")
+        if len(diff_index) == 0:
+            logging.info("Existing rebase branch already contains source.")
+            return True
+
     if dry_run:
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
     try:
+        logging.info("Existing rebase branch needs to be updated.")
         result = gitwd.remotes.rebase.push(
             refspec=f"HEAD:{rebase.branch}",
             force=True
