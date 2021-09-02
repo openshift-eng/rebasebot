@@ -36,6 +36,12 @@ class RepoException(Exception):
     """
 
 
+logging.basicConfig(
+    format="%(levelname)s - %(message)s",
+    stream=sys.stdout,
+    level=logging.DEBUG
+)
+
 CREDENTIALS_DIR = "/dev/shm/credentials"
 app_credentials = os.path.join(CREDENTIALS_DIR, "app")
 cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
@@ -299,12 +305,6 @@ def run(
     dry_run=False,
     with_merge=False
 ):
-    logging.basicConfig(
-        format="%(levelname)s - %(message)s",
-        stream=sys.stdout,
-        level=logging.DEBUG
-    )
-
     # We want to avoid writing app credentials to disk. We write them to
     # files in /dev/shm/credentials and configure git to read them from
     # there as required.
