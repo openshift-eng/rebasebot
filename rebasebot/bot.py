@@ -14,7 +14,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from collections import namedtuple
 import logging
 import os
 import shutil
@@ -25,9 +24,6 @@ import git
 import github3
 import github3.exceptions as gh_exceptions
 import requests
-
-GitHubBranch = namedtuple("GitHubBranch", ["ns", "name", "branch"])
-GitBranch = namedtuple("GitBranch", ["url", "branch"])
 
 
 class RepoException(Exception):
@@ -162,12 +158,9 @@ def _github_login_for_repo(github, gh_account, gh_repo_name, gh_app_id, gh_app_k
 
 
 def _init_working_dir(
-    source_url,
-    source_branch,
-    dest_url,
-    dest_branch,
-    rebase_url,
-    rebase_branch,
+    source,
+    dest,
+    rebase,
     user_auth,
     git_username,
     git_email,
@@ -175,9 +168,9 @@ def _init_working_dir(
     gitwd = git.Repo.init(path=".")
 
     for remote, url in [
-        ("source", source_url),
-        ("dest", dest_url),
-        ("rebase", rebase_url),
+        ("source", source.url),
+        ("dest", dest.url),
+        ("rebase", rebase.url),
     ]:
         if remote in gitwd.remotes:
             gitwd.remotes[remote].set_url(url)
@@ -190,8 +183,8 @@ def _init_working_dir(
 
         if not user_auth:
             for repo, credentials in [
-                (dest_url, app_credentials),
-                (rebase_url, cloner_credentials),
+                (dest.url, app_credentials),
+                (rebase.url, cloner_credentials),
             ]:
                 config.set_value(
                     f'credential "{repo}"',
@@ -200,8 +193,8 @@ def _init_working_dir(
                 )
         else:
             for repo, credentials in [
-                (dest_url, user_credentials),
-                (rebase_url, user_credentials),
+                (dest.url, user_credentials),
+                (rebase.url, user_credentials),
             ]:
                 config.set_value(
                     f'credential "{repo}"',
@@ -215,20 +208,20 @@ def _init_working_dir(
             config.set_value("repository", "name", git_username)
         config.set_value("merge", "renameLimit", 999999)
 
-    logging.info("Fetching %s from dest", dest_branch)
-    gitwd.remotes.dest.fetch(dest_branch)
-    logging.info("Fetching %s from source", source_branch)
-    gitwd.remotes.source.fetch(source_branch)
+    logging.info("Fetching %s from dest", dest.branch)
+    gitwd.remotes.dest.fetch(dest.branch)
+    logging.info("Fetching %s from source", source.branch)
+    gitwd.remotes.source.fetch(source.branch)
 
-    working_branch = f"dest/{dest_branch}"
+    working_branch = f"dest/{dest.branch}"
     logging.info("Checking out %s", working_branch)
 
     logging.info(
-        "Checking for existing rebase branch %s in %s", rebase_branch, rebase_url)
-    rebase_ref = gitwd.git.ls_remote("rebase", rebase_branch, heads=True)
+        "Checking for existing rebase branch %s in %s", rebase.branch, rebase.url)
+    rebase_ref = gitwd.git.ls_remote("rebase", rebase.branch, heads=True)
     if len(rebase_ref) > 0:
         logging.info("Fetching existing rebase branch")
-        gitwd.remotes.rebase.fetch(rebase_branch)
+        gitwd.remotes.rebase.fetch(rebase.branch)
 
     head_commit = gitwd.remotes.dest.refs.master.commit
     if "rebase" in gitwd.heads:
@@ -312,12 +305,9 @@ def run(
     try:
         os.chdir(working_dir)
         gitwd = _init_working_dir(
-            source.url,
-            source.branch,
-            dest_repo.clone_url,
-            dest.branch,
-            rebase_repo.clone_url,
-            rebase.branch,
+            source,
+            dest,
+            rebase,
             user_token is not None,
             git_username,
             git_email

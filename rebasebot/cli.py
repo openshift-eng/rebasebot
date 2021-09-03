@@ -15,11 +15,16 @@
 #    under the License.
 
 import argparse
+from collections import namedtuple
 import re
 import sys
 import validators
 
 from rebasebot import bot
+
+
+GitHubBranch = namedtuple("GitHubBranch", ["url", "ns", "name", "branch"])
+GitBranch = namedtuple("GitBranch", ["url", "branch"])
 
 
 class GitHubBranchAction(argparse.Action):
@@ -43,7 +48,8 @@ class GitHubBranchAction(argparse.Action):
         setattr(
             namespace,
             self.dest,
-            bot.GitHubBranch(
+            GitHubBranch(
+                f"https://github.com/{match.group('ns')}/{match.group('name')}",
                 match.group("ns"),
                 match.group("name"),
                 match.group("branch")
@@ -73,7 +79,7 @@ class GitBranchAction(argparse.Action):
         if not validators.url(url):
             parser.error(msg)
 
-        setattr(namespace, self.dest, bot.GitBranch(url, branch))
+        setattr(namespace, self.dest, GitBranch(url, branch))
 
 
 # parse_cli_arguments parses command line arguments using argparse and returns
