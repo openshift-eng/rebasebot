@@ -13,6 +13,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+"""This module implements functions for the Rebase Bot."""
 
 import logging
 import os
@@ -251,6 +252,7 @@ def run(
     dry_run=False,
     with_merge=False
 ):
+    """Run Rebase Bot."""
     # We want to avoid writing app credentials to disk. We write them to
     # files in /dev/shm/credentials and configure git to read them from
     # there as required.

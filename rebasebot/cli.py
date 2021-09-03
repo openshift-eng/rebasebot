@@ -14,6 +14,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+"""This module parses CLI arguments for the Rebase Bot."""
+
 import argparse
 from collections import namedtuple
 import re
@@ -211,6 +213,7 @@ def _parse_cli_arguments(testing_args=None):
 
 
 def main():
+    """Rebase Bot entry point function."""
     args = _parse_cli_arguments()
 
     gh_app_key = ""
