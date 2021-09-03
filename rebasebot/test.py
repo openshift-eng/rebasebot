@@ -94,8 +94,12 @@ class test_go_mod(unittest.TestCase):
         repo.git.add(all=True)
         repo.git.commit("-m", "Initial commit")
 
+        source = cli.GitBranch(tmp_dir, "master")
+        repo.create_remote("source", source.url)
+        repo.remotes.source.fetch(source.branch)
+
         try:
-            bot._commit_go_mod_updates(repo)
+            bot._commit_go_mod_updates(repo, source)
         except Exception as err:
             self.assertEqual(str(err), "")
         else:
@@ -127,8 +131,12 @@ class test_go_mod(unittest.TestCase):
         repo.git.add(all=True)
         repo.git.commit("-m", "Initial commit")
 
+        source = cli.GitBranch(tmp_dir, "master")
+        repo.create_remote("source", source.url)
+        repo.remotes.source.fetch(source.branch)
+
         try:
-            bot._commit_go_mod_updates(repo)
+            bot._commit_go_mod_updates(repo, source)
         except Exception as err:
             self.assertEqual(str(err), "")
         else:

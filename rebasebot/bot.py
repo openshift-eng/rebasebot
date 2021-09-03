@@ -55,6 +55,8 @@ def _commit_go_mod_updates(repo, source):
     try:
         # Reset go.mod and go.sum to make sure they are the same as in the source
         for filename in ["go.mod", "go.sum"]:
+            if not os.path.exists(filename):
+                continue
             repo.remotes.source.repo.git.checkout(f"source/{source.branch}", filename)
 
         proc = subprocess.run(
