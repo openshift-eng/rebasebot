@@ -16,7 +16,6 @@ unittests:
 lint:
 	$(PYTHON) -m flake8 --max-line-length=99 rebasebot
 	$(PYTHON) -m pylint rebasebot
-	$(PYTHON) -m mypy rebasebot
 
 .PHONY: venv
 venv:
