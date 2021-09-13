@@ -271,7 +271,7 @@ def run(
         gh_app = _github_user_login(user_token)
         gh_cloner_app = _github_user_login(user_token)
 
-        with open(user_credentials, "w") as user_credentials_file:
+        with open(user_credentials, "w", encoding='utf-8') as user_credentials_file:
             user_credentials_file.write(user_token)
     else:
         # App credentials for accessing the destination and opening a PR
@@ -285,9 +285,9 @@ def run(
             gh_cloner_app, rebase.ns, rebase.name, gh_cloner_id, gh_cloner_key
         )
 
-        with open(app_credentials, "w") as app_credentials_file:
+        with open(app_credentials, "w", encoding='utf-8') as app_credentials_file:
             app_credentials_file.write(gh_app.session.auth.token)
-        with open(cloner_credentials, "w") as cloner_credentials_file:
+        with open(cloner_credentials, "w", encoding='utf-8') as cloner_credentials_file:
             cloner_credentials_file.write(gh_cloner_app.session.auth.token)
 
     try:

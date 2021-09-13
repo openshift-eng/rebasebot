@@ -218,22 +218,22 @@ def main():
 
     gh_app_key = ""
     if args.github_app_key is not None:
-        with open(args.github_app_key, "r") as app_key_file:
+        with open(args.github_app_key, "r", encoding='utf-8') as app_key_file:
             gh_app_key = app_key_file.read().strip().encode()
 
     gh_cloner_key = ""
     if args.github_cloner_key is not None:
-        with open(args.github_cloner_key, "r") as app_key_file:
+        with open(args.github_cloner_key, "r", encoding='utf-8') as app_key_file:
             gh_cloner_key = app_key_file.read().strip().encode()
 
     gh_user_token = ""
     if args.github_user_token is not None:
-        with open(args.github_user_token, "r") as app_key_file:
+        with open(args.github_user_token, "r", encoding='utf-8') as app_key_file:
             gh_user_token = app_key_file.read().strip().encode().decode('utf-8')
 
     slack_webhook = None
     if args.slack_webhook is not None:
-        with open(args.slack_webhook, "r") as app_key_file:
+        with open(args.slack_webhook, "r", encoding='utf-8') as app_key_file:
             slack_webhook = app_key_file.read().strip()
 
     success = bot.run(
