@@ -205,10 +205,10 @@ def _init_working_dir(
                     f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
                 )
 
-        if git_email is not None:
-            config.set_value("repository", "email", git_email)
-        if git_username is not None:
-            config.set_value("repository", "name", git_username)
+        if git_email != "":
+            config.set_value("user", "email", git_email)
+        if git_username != "":
+            config.set_value("user", "name", git_username)
         config.set_value("merge", "renameLimit", 999999)
 
     logging.info("Fetching %s from dest", dest.branch)
