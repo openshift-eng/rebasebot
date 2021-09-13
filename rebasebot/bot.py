@@ -265,7 +265,9 @@ def run(
 
     os.mkdir(CREDENTIALS_DIR)
 
-    if user_token is not None:
+    user_auth = user_token != ""
+
+    if user_auth:
         gh_app = _github_user_login(user_token)
         gh_cloner_app = _github_user_login(user_token)
 
@@ -312,7 +314,7 @@ def run(
             source,
             dest,
             rebase,
-            user_token is not None,
+            user_auth,
             git_username,
             git_email
         )
