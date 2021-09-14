@@ -160,7 +160,7 @@ def commit_go_mod_updates(repo):
 def push(gitwd, merge):
     result = gitwd.remotes.merge.push(refspec=f"HEAD:{merge.branch}", force=True)
     if result[0].flags & git.PushInfo.ERROR != 0:
-        raise Exception("Error when pushing %d!" % result[0].flags)
+        raise Exception(f"Error pushing to {merge}: {result[0].summary}")
 
 
 def create_pr(g, dest_repo, dest, source, merge):
