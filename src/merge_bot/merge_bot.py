@@ -28,8 +28,24 @@ import github3
 import github3.exceptions as gh_exceptions
 import requests
 
-GitHubBranch = namedtuple("GitHubBranch", ["ns", "name", "branch"])
-GitBranch = namedtuple("GitBranch", ["url", "branch"])
+
+class GitHubBranch:
+    def __init__(self, ns, name, branch) -> None:
+        self.ns = ns
+        self.name = name
+        self.branch = branch
+
+    def __str__(self) -> str:
+        return f"{self.ns}/{self.name}:{self.branch}"
+
+
+class GitBranch:
+    def __init__(self, url, branch) -> None:
+        self.url = url
+        self.branch = branch
+
+    def __str__(self) -> str:
+        return f"{self.url}:{self.branch}"
 
 
 class RepoException(Exception):
@@ -144,7 +160,7 @@ def commit_go_mod_updates(repo):
 def push(gitwd, merge):
     result = gitwd.remotes.merge.push(refspec=f"HEAD:{merge.branch}", force=True)
     if result[0].flags & git.PushInfo.ERROR != 0:
-        raise Exception("Error when pushing %d!" % result[0].flags)
+        raise Exception(f"Error pushing to {merge}: {result[0].summary}")
 
 
 def create_pr(g, dest_repo, dest, source, merge):
@@ -368,20 +384,14 @@ def run(
         logging.error(ex)
         message_slack(
             slack_webhook,
-            f"Manual intervention is needed to merge "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
+            f"Manual intervention is needed to merge {source} into {dest}: {ex}",
         )
         return True
     except Exception as ex:
         logging.exception(ex)
         message_slack(
             slack_webhook,
-            f"I got an error trying to merge "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
+            f"I got an error trying to merge {source} into {dest}: {ex}",
         )
         return False
 
@@ -391,7 +401,7 @@ def run(
         logging.exception(ex)
         message_slack(
             slack_webhook,
-            f"I got an error pushing to " f"{merge.ns}/{merge.name}:{merge.branch}",
+            f"I got an error pushing to {merge}: {ex}",
         )
         return False
 
