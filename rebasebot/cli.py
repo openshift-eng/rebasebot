@@ -128,12 +128,14 @@ def _parse_cli_arguments(testing_args=None):
         type=str,
         required=False,
         help="Custom git username to be used in any git commits.",
+        default="",
     )
     parser.add_argument(
         "--git-email",
         type=str,
         required=False,
         help="Custom git email to be used in any git commits.",
+        default="",
     )
     parser.add_argument(
         "--working-dir",
