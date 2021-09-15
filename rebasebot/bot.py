@@ -93,6 +93,16 @@ def _do_merge(repo, dest):
     )
 
 
+def _is_push_required(gitwd, rebase):
+    if rebase.branch in gitwd.remotes.rebase.refs:
+        diff_index = gitwd.git.diff(f"rebase/{rebase.branch}")
+        if len(diff_index) == 0:
+            logging.info("Existing rebase branch already contains source.")
+            return False
+
+    return True
+
+
 def _create_pr(github, dest_repo, dest, source, merge):
     logging.info("Checking for existing pull request")
     try:
@@ -359,24 +369,19 @@ def run(
         )
         return False
 
-    if rebase.branch in gitwd.remotes.rebase.refs:
-        diff_index = gitwd.git.diff(f"rebase/{rebase.branch}")
-        if len(diff_index) == 0:
-            logging.info("Existing rebase branch already contains source.")
-            return True
-
     if dry_run:
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
     try:
-        logging.info("Existing rebase branch needs to be updated.")
-        result = gitwd.remotes.rebase.push(
-            refspec=f"HEAD:{rebase.branch}",
-            force=True
-        )
-        if result[0].flags & git.PushInfo.ERROR != 0:
-            raise Exception("Error when pushing %d!" % result[0].flags)
+        if _is_push_required(gitwd, rebase):
+            logging.info("Existing rebase branch needs to be updated.")
+            result = gitwd.remotes.rebase.push(
+                refspec=f"HEAD:{rebase.branch}",
+                force=True
+            )
+            if result[0].flags & git.PushInfo.ERROR != 0:
+                raise Exception("Error when pushing %d!" % result[0].flags)
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
