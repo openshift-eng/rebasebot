@@ -93,7 +93,12 @@ def _do_merge(gitwd, dest):
     )
 
 
-def _is_push_required(gitwd, rebase):
+def _is_push_required(gitwd, dest, rebase):
+    diff_index = gitwd.git.diff(f"dest/{dest.branch}")
+    if len(diff_index) == 0:
+        logging.info("Dest branch already contains all latest changes.")
+        return False
+
     if rebase.branch in gitwd.remotes.rebase.refs:
         diff_index = gitwd.git.diff(f"rebase/{rebase.branch}")
         if len(diff_index) == 0:
@@ -103,14 +108,18 @@ def _is_push_required(gitwd, rebase):
     return True
 
 
-def _create_pr(gh_app, dest_repo, dest, source, rebase):
+def _is_pr_available(dest_repo, rebase):
     logging.info("Checking for existing pull request")
     try:
         gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
-        return gh_pr.html_url, False
+        return gh_pr.html_url, True
     except StopIteration:
         pass
 
+    return "", False
+
+
+def _create_pr(gh_app, dest, source, rebase):
     logging.info("Creating a pull request")
     # FIXME(mdbooth): This hack is because github3 doesn't support setting
     # maintainer_can_modify to false when creating a PR.
@@ -137,7 +146,7 @@ def _create_pr(gh_app, dest_repo, dest, source, rebase):
     logging.info(gh_pr.json())
     logging.info(gh_pr.raise_for_status())
 
-    return gh_pr.json()["html_url"], True
+    return gh_pr.json()["html_url"]
 
 
 def _github_app_login(gh_app_id, gh_app_key):
@@ -374,8 +383,11 @@ def run(
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
+    push_required = _is_push_required(gitwd, dest, rebase)
+    pr_url, pr_available = _is_pr_available(dest_repo, rebase)
+
     try:
-        if _is_push_required(gitwd, rebase):
+        if push_required:
             logging.info("Existing rebase branch needs to be updated.")
             result = gitwd.remotes.rebase.push(
                 refspec=f"HEAD:{rebase.branch}",
@@ -392,8 +404,9 @@ def run(
         return False
 
     try:
-        pr_url, created = _create_pr(gh_app, dest_repo, dest, source, rebase)
-        logging.info("Rebase PR is %s", pr_url)
+        if push_required and not pr_available:
+            pr_url = _create_pr(gh_app, dest, source, rebase)
+            logging.info("Rebase PR is %s", pr_url)
     except Exception as ex:
         logging.exception(ex)
 
@@ -404,9 +417,15 @@ def run(
 
         return False
 
-    if created:
-        _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
+    if push_required:
+        if not pr_available:
+            _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
+        else:
+            _message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
     else:
-        _message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
+        if pr_url != "":
+            _message_slack(slack_webhook, f"PR {pr_url} already contains all latest changes.")
+        else:
+            _message_slack(slack_webhook, "Destination repo already contains all latest changes.")
 
     return True
