@@ -419,13 +419,24 @@ def run(
 
     if push_required:
         if not pr_available:
+            # Case 1: either source or dest repos were updated and there is no PR yet.
+            # We create a new PR then.
             _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
         else:
+            # Case 2: repos were updated recently, but we already have an open PR.
+            # We updated the exiting PR.
             _message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
     else:
         if pr_url != "":
+            # Case 3: we created a PR, but no changes were done to the repos after that.
+            # Just infrom that the PR is in a good shape.
             _message_slack(slack_webhook, f"PR {pr_url} already contains all latest changes.")
         else:
-            _message_slack(slack_webhook, "Destination repo already contains all latest changes.")
+            # Case 4: source and dest repos are the same (git diff is empty), and there is no PR.
+            # Just inform that there is nothing to update in the dest repository.
+            _message_slack(
+                slack_webhook,
+                f"Destination repo {dest.url} already contains all latest changes."
+            )
 
     return True
