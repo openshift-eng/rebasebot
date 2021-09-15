@@ -134,7 +134,7 @@ def _create_pr(gh_app, dest_repo, dest, source, rebase):
         },
         json=True,
     )
-    gh_pr.raise_for_status()
+    logging.info(gh_pr.raise_for_status())
 
     return gh_pr.json()["html_url"], True
 
@@ -160,7 +160,7 @@ def _github_login_for_repo(gh_app, gh_account, gh_repo_name, gh_app_id, gh_app_k
         )
     except gh_exceptions.NotFoundError as err:
         msg = (
-            f"App has not been authorised by {gh_account}, or repo "
+            f"App has not been authorized by {gh_account}, or repo "
             f"{gh_account}/{gh_repo_name} does not exist"
         )
         logging.error(msg)
@@ -332,7 +332,7 @@ def run(
         logging.exception(ex)
         _message_slack(
             slack_webhook,
-            f"I got an error initialising the git directory: {ex}"
+            f"I got an error initializing the git directory: {ex}"
         )
         return False
 
@@ -381,7 +381,7 @@ def run(
                 force=True
             )
             if result[0].flags & git.PushInfo.ERROR != 0:
-                raise Exception("Error when pushing %d!" % result[0].flags)
+                raise Exception(f"Error pushing to {rebase}: {result[0].summary}")
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
