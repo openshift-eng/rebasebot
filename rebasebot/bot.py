@@ -37,7 +37,7 @@ class RepoException(Exception):
 logging.basicConfig(
     format="%(levelname)s - %(message)s",
     stream=sys.stdout,
-    level=logging.DEBUG
+    level=logging.INFO
 )
 
 CREDENTIALS_DIR = "/dev/shm/credentials"
