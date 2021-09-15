@@ -7,12 +7,6 @@ setuptools.setup(
    author='Mikhail Fedosin',
    author_email='mfedosin@redhat.com',
    packages=['rebasebot'],
-   install_requires=[
-      'cryptography',
-      'gitpython',
-      'github3.py',
-      'requests',
-      'retrying',
-      'validators'], #external packages as dependencies
+   install_requires=['cryptography', 'gitpython', 'github3.py', 'requests', 'validators'], #external packages as dependencies
    scripts=['rebasebot/cli.py']
 )
