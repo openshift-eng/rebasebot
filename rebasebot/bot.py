@@ -51,13 +51,13 @@ def _message_slack(webhook_url, msg):
     requests.post(webhook_url, json={"text": msg})
 
 
-def _commit_go_mod_updates(repo, source):
+def _commit_go_mod_updates(gitwd, source):
     try:
         # Reset go.mod and go.sum to make sure they are the same as in the source
         for filename in ["go.mod", "go.sum"]:
             if not os.path.exists(filename):
                 continue
-            repo.remotes.source.repo.git.checkout(f"source/{source.branch}", filename)
+            gitwd.remotes.source.repo.git.checkout(f"source/{source.branch}", filename)
 
         proc = subprocess.run(
             "go mod tidy", shell=True, check=True, capture_output=True
@@ -68,16 +68,16 @@ def _commit_go_mod_updates(repo, source):
         )
         logging.debug("go mod vendor output %s:", proc.stdout.decode())
 
-        repo.git.add(all=True)
+        gitwd.git.add(all=True)
     except subprocess.CalledProcessError as err:
         raise RepoException(
             f"Unable to update go modules: {err}: {err.stderr.decode()}"
         ) from err
 
-    if repo.is_dirty():
+    if gitwd.is_dirty():
         try:
-            repo.git.add(all=True)
-            repo.git.commit(
+            gitwd.git.add(all=True)
+            gitwd.git.commit(
                 "-m", "UPSTREAM: <carry>: Updating and vendoring go modules "
                 "after an upstream rebase"
             )
@@ -86,10 +86,10 @@ def _commit_go_mod_updates(repo, source):
             raise err
 
 
-def _do_merge(repo, dest):
-    repo.git.merge(
+def _do_merge(gitwd, dest):
+    gitwd.git.merge(
         f"dest/{dest.branch}", "-Xtheirs", "-m",
-        f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {repo.active_branch}"
+        f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
     )
 
 
@@ -103,11 +103,11 @@ def _is_push_required(gitwd, rebase):
     return True
 
 
-def _create_pr(github, dest_repo, dest, source, merge):
+def _create_pr(gh_app, dest_repo, dest, source, rebase):
     logging.info("Checking for existing pull request")
     try:
-        github_pr = dest_repo.pull_requests(head=f"{merge.ns}:{merge.branch}").next()
-        return github_pr.html_url, False
+        gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
+        return gh_pr.html_url, False
     except StopIteration:
         pass
 
@@ -124,38 +124,38 @@ def _create_pr(github, dest_repo, dest, source, merge):
     #
     # https://github.com/sigmavirus24/github3.py/issues/1031
 
-    github_pr = github._post(
+    gh_pr = gh_app._post(
         f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
         data={
             "title": f"Merge {source.url}:{source.branch} into {dest.branch}",
-            "head": f"{merge.ns}:{merge.branch}",
+            "head": f"{rebase.ns}:{rebase.branch}",
             "base": dest.branch,
             "maintainer_can_modify": False,
         },
         json=True,
     )
-    github_pr.raise_for_status()
+    gh_pr.raise_for_status()
 
-    return github_pr.json()["html_url"], True
+    return gh_pr.json()["html_url"], True
 
 
 def _github_app_login(gh_app_id, gh_app_key):
     logging.info("Logging to GitHub as an Application")
-    github = github3.GitHub()
-    github.login_as_app(gh_app_key, gh_app_id, expire_in=300)
-    return github
+    gh_app = github3.GitHub()
+    gh_app.login_as_app(gh_app_key, gh_app_id, expire_in=300)
+    return gh_app
 
 
 def _github_user_login(user_token):
     logging.info("Logging to GitHub as a User")
-    github = github3.GitHub()
-    github.login(token=user_token)
-    return github
+    gh_app = github3.GitHub()
+    gh_app.login(token=user_token)
+    return gh_app
 
 
-def _github_login_for_repo(github, gh_account, gh_repo_name, gh_app_id, gh_app_key):
+def _github_login_for_repo(gh_app, gh_account, gh_repo_name, gh_app_id, gh_app_key):
     try:
-        install = github.app_installation_for_repository(
+        install = gh_app.app_installation_for_repository(
             owner=gh_account, repository=gh_repo_name
         )
     except gh_exceptions.NotFoundError as err:
@@ -166,8 +166,8 @@ def _github_login_for_repo(github, gh_account, gh_repo_name, gh_app_id, gh_app_k
         logging.error(msg)
         raise Exception(msg) from err
 
-    github.login_as_app_installation(gh_app_key, gh_app_id, install.id)
-    return github
+    gh_app.login_as_app_installation(gh_app_key, gh_app_id, install.id)
+    return gh_app
 
 
 def _init_working_dir(
