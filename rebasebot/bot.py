@@ -25,6 +25,7 @@ import git
 import github3
 import github3.exceptions as gh_exceptions
 import requests
+import retrying
 
 
 class RepoException(Exception):
@@ -93,6 +94,11 @@ def _do_merge(repo, dest):
     )
 
 
+@retrying.retry(
+    stop_max_attempt_number=3,
+    wait_fixed=2000,
+    retry_on_exception=lambda e: isinstance(e, requests.exceptions.HTTPError),
+)
 def _create_pr(github, dest_repo, dest, source, merge):
     logging.info("Checking for existing pull request")
     try:
