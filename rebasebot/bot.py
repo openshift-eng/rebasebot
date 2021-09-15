@@ -134,6 +134,7 @@ def _create_pr(gh_app, dest_repo, dest, source, rebase):
         },
         json=True,
     )
+    logging.info(gh_pr.json())
     logging.info(gh_pr.raise_for_status())
 
     return gh_pr.json()["html_url"], True
