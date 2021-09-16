@@ -319,7 +319,7 @@ def run(
     update_go_modules=False,
 ):
     logging.basicConfig(
-        format="%(levelname)s - %(message)s", stream=sys.stdout, level=logging.DEBUG
+        format="%(levelname)s - %(message)s", stream=sys.stdout, level=logging.INFO
     )
 
     # App credentials for accessing the destination and opening a PR
