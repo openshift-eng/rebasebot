@@ -140,12 +140,19 @@ def _do_merge(gitwd, dest):
     )
 
 
-def _is_push_required(gitwd, dest, rebase):
-    diff_index = gitwd.git.diff(f"dest/{dest.branch}")
-    if len(diff_index) == 0:
-        logging.info("Dest branch already contains all latest changes.")
-        return False
+def _is_push_required(gitwd, source, rebase):
+    # Check if the source head is already in dest
+    try:
+        source_head_commit = getattr(gitwd.remotes.source.refs, source.branch).commit
+        if gitwd.remotes.dest.repo.git.branch("--contains", source_head_commit):
+            logging.info("Dest branch already contains all latest changes.")
+            return False
+    except git.GitCommandError:
+        # if the source head hasn't been found in the dest repo git returns an error. In this case
+        # we need to ignore it and report that we need to perform a push.
+        pass
 
+    # Check if there is nothing to update in the open rebase PR.
     if rebase.branch in gitwd.remotes.rebase.refs:
         diff_index = gitwd.git.diff(f"rebase/{rebase.branch}")
         if len(diff_index) == 0:
