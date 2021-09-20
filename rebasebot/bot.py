@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 import git
+import git.compat
 import github3
 import github3.exceptions as gh_exceptions
 import requests
@@ -84,6 +85,52 @@ def _commit_go_mod_updates(gitwd, source):
         except Exception as err:
             err.extra_info = "Unable to commit go module changes in git"
             raise err
+
+
+def _do_rebase(gitwd, source):
+    logging.info("Performing rebase")
+    try:
+        gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
+    except git.GitCommandError as ex:
+        if not _resolve_modify_delete_conflicts(gitwd):
+            raise RepoException(f"Git rebase failed: {ex}") from ex
+
+
+def _resolve_modify_delete_conflicts(gitwd):
+    try:
+        proc = gitwd.git.status(porcelain=True, as_process=True)
+
+        # Modified/Deleted files preffix in porcelain mode
+        prefix = "UD "
+
+        ud_files = []
+        for line in proc.stdout:
+            line = line.decode(git.compat.defenc)
+            if not line.startswith(prefix):
+                # There is a conflict we can't resolve
+                return False
+            filename = line[len(prefix):].rstrip('\n')
+            # Special characters are escaped
+            if filename[0] == filename[-1] == '"':
+                filename = filename[1:-1]
+                filename = filename.encode('ascii').\
+                    decode('unicode_escape').\
+                    encode('latin1').\
+                    decode(git.compat.defenc)
+            ud_files.append(filename)
+
+        for ud_file in ud_files:
+            gitwd.git.rm(ud_file)
+
+        gitwd.git.commit("--no-edit")
+
+        logging.info("Modified/Deleted conflict have been resolved. Continue rebasing.")
+
+        gitwd.git.rebase("--continue")
+
+        return True
+    except git.GitCommandError:
+        return _resolve_modify_delete_conflicts(gitwd)
 
 
 def _do_merge(gitwd, dest):
@@ -347,11 +394,7 @@ def run(
         return False
 
     try:
-        logging.info("Performing rebase")
-        try:
-            gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
-        except git.GitCommandError as ex:
-            raise RepoException(f"Git rebase failed: {ex}") from ex
+        _do_rebase(gitwd, source)
 
         if with_merge:
             _do_merge(gitwd, dest)
