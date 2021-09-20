@@ -140,11 +140,12 @@ def _do_merge(gitwd, dest):
     )
 
 
-def _is_push_required(gitwd, source, rebase):
+def _is_push_required(gitwd, dest, source, rebase):
     # Check if the source head is already in dest
     try:
         source_head_commit = getattr(gitwd.remotes.source.refs, source.branch).commit
-        if gitwd.remotes.dest.repo.git.branch("--contains", source_head_commit):
+        branches_with_commit = gitwd.git.branch("-r", "--contains", source_head_commit)
+        if f"dest/{dest.branch}" in branches_with_commit:
             logging.info("Dest branch already contains all latest changes.")
             return False
     except git.GitCommandError:
@@ -433,7 +434,7 @@ def run(
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
-    push_required = _is_push_required(gitwd, dest, rebase)
+    push_required = _is_push_required(gitwd, dest, source, rebase)
     pr_url, pr_available = _is_pr_available(dest_repo, rebase)
 
     try:
