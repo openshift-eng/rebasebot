@@ -92,52 +92,67 @@ def _do_rebase(gitwd, source):
     try:
         gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
     except git.GitCommandError as ex:
-        if not _resolve_modify_delete_conflicts(gitwd):
+        if not _resolve_rebase_conflicts(gitwd):
             raise RepoException(f"Git rebase failed: {ex}") from ex
 
 
-def _resolve_modify_delete_conflicts(gitwd):
+def _do_merge(gitwd, dest):
+    logging.info("Performing merge")
     try:
-        proc = gitwd.git.status(porcelain=True, as_process=True)
+        gitwd.git.merge(
+            f"dest/{dest.branch}", "-Xtheirs", "-m",
+            f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
+        )
+    except git.GitCommandError as ex:
+        if not _resolve_conflict(gitwd):
+            logging.info("Merge conflict has been automatically resolved.")
+            raise RepoException(f"Git merge failed: {ex}") from ex
 
-        # Modified/Deleted files preffix in porcelain mode
-        prefix = "UD "
 
-        ud_files = []
-        for line in proc.stdout:
-            line = line.decode(git.compat.defenc)
-            if not line.startswith(prefix):
-                # There is a conflict we can't resolve
-                return False
-            filename = line[len(prefix):].rstrip('\n')
-            # Special characters are escaped
-            if filename[0] == filename[-1] == '"':
-                filename = filename[1:-1]
-                filename = filename.encode('ascii').\
-                    decode('unicode_escape').\
-                    encode('latin1').\
-                    decode(git.compat.defenc)
-            ud_files.append(filename)
+def _resolve_conflict(gitwd):
+    proc = gitwd.git.status(porcelain=True, as_process=True)
 
-        for ud_file in ud_files:
-            gitwd.git.rm(ud_file)
+    # Conflict prefixes in porcelain mode that we can fix
+    # UD - Modified/Deleted
+    # AU - Renamed/Deleted
+    prefixes = ["UD ", "AU "]
 
-        gitwd.git.commit("--no-edit")
+    ud_files = []
+    for line in proc.stdout:
+        line = line.decode(git.compat.defenc)
+        if line[:3] not in prefixes:
+            # There is a conflict we can't resolve
+            return False
+        filename = line[3:].rstrip('\n')
+        # Special characters are escaped
+        if filename[0] == filename[-1] == '"':
+            filename = filename[1:-1]
+            filename = filename.encode('ascii').\
+                decode('unicode_escape').\
+                encode('latin1').\
+                decode(git.compat.defenc)
+        ud_files.append(filename)
 
-        logging.info("Modified/Deleted conflict have been resolved. Continue rebasing.")
+    for ud_file in ud_files:
+        gitwd.git.rm(ud_file)
+
+    gitwd.git.commit("--no-edit")
+
+    return True
+
+
+def _resolve_rebase_conflicts(gitwd):
+    try:
+        if not _resolve_conflict(gitwd):
+            return False
+
+        logging.info("Rebase conflict has been resolved. Continue rebasing.")
 
         gitwd.git.rebase("--continue")
 
         return True
     except git.GitCommandError:
-        return _resolve_modify_delete_conflicts(gitwd)
-
-
-def _do_merge(gitwd, dest):
-    gitwd.git.merge(
-        f"dest/{dest.branch}", "-Xtheirs", "-m",
-        f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
-    )
+        return _resolve_rebase_conflicts(gitwd)
 
 
 def _is_push_required(gitwd, dest, source, rebase):
