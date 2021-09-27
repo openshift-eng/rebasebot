@@ -115,12 +115,19 @@ def _resolve_conflict(gitwd):
     # Conflict prefixes in porcelain mode that we can fix
     # UD - Modified/Deleted
     # AU - Renamed/Deleted
-    prefixes = ["UD ", "AU "]
+    allowed_conflict_prefixes = ["UD ", "AU "]
+
+    # Non-conflict status prefixes that we should ignore
+    allowed_status_prefixes = ["M  ", "D  ", "A  "]
 
     ud_files = []
     for line in proc.stdout:
         line = line.decode(git.compat.defenc)
-        if line[:3] not in prefixes:
+        file_status = line[:3]
+        if file_status in allowed_status_prefixes:
+            # There is a conflict we can't resolve
+            continue
+        if file_status not in allowed_conflict_prefixes:
             # There is a conflict we can't resolve
             return False
         filename = line[3:].rstrip('\n')
