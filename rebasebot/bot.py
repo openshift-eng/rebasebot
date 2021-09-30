@@ -96,19 +96,6 @@ def _do_rebase(gitwd, source):
             raise RepoException(f"Git rebase failed: {ex}") from ex
 
 
-def _do_merge(gitwd, dest):
-    logging.info("Performing merge")
-    try:
-        gitwd.git.merge(
-            f"dest/{dest.branch}", "-Xtheirs", "-m",
-            f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
-        )
-    except git.GitCommandError as ex:
-        if not _resolve_conflict(gitwd):
-            logging.info("Merge conflict has been automatically resolved.")
-            raise RepoException(f"Git merge failed: {ex}") from ex
-
-
 def _resolve_conflict(gitwd):
     proc = gitwd.git.status(porcelain=True, as_process=True)
 
@@ -349,7 +336,6 @@ def run(
     slack_webhook,
     update_go_modules=False,
     dry_run=False,
-    with_merge=False
 ):
     """Run Rebase Bot."""
     # We want to avoid writing app credentials to disk. We write them to
@@ -425,9 +411,6 @@ def run(
 
     try:
         _do_rebase(gitwd, source)
-
-        if with_merge:
-            _do_merge(gitwd, dest)
 
         if update_go_modules:
             _commit_go_mod_updates(gitwd, source)
