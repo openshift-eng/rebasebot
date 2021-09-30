@@ -90,7 +90,7 @@ def _commit_go_mod_updates(gitwd, source):
 def _do_rebase(gitwd, source):
     logging.info("Performing rebase")
     try:
-        gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs", "-r")
+        gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
     except git.GitCommandError as ex:
         if not _resolve_rebase_conflicts(gitwd):
             raise RepoException(f"Git rebase failed: {ex}") from ex
