@@ -156,3 +156,9 @@ Sessionx.vim
 tags
 # Persistent undo
 [._]*.un~
+
+# Virtual environment
+env/
+
+# Default working dir
+.rebase/
