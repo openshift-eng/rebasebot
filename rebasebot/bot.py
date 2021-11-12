@@ -87,6 +87,22 @@ def _commit_go_mod_updates(gitwd, source):
             raise err
 
 
+def _needs_rebase(gitwd, source, dest):
+    try:
+        branches_with_commit = gitwd.git.branch("-r", "--contains", f"source/{source.branch}")
+        dest_branch = f"dest/{dest.branch}"
+        for branch in branches_with_commit.splitlines():
+            # Must strip the branch name as git branch adds an indent
+            if branch.lstrip() == dest_branch:
+                logging.info("Dest branch already contains all latest changes.")
+                return False
+    except git.GitCommandError as ex:
+        # if the source head hasn't been found in the dest repo git returns an error.
+        # In this case we need to ignore it and continue.
+        logging.error(ex)
+    return True
+
+
 def _do_rebase(gitwd, source, dest):
     logging.info("Performing rebase")
 
@@ -166,16 +182,8 @@ def _resolve_rebase_conflicts(gitwd):
 
 def _is_push_required(gitwd, dest, source, rebase):
     # Check if the source head is already in dest
-    try:
-        source_head_commit = getattr(gitwd.remotes.source.refs, source.branch).commit
-        branches_with_commit = gitwd.git.branch("-r", "--contains", source_head_commit)
-        if f"dest/{dest.branch}" in branches_with_commit:
-            logging.info("Dest branch already contains all latest changes.")
-            return False
-    except git.GitCommandError:
-        # if the source head hasn't been found in the dest repo git returns an error. In this case
-        # we need to ignore it and report that we need to perform a push.
-        pass
+    if not _needs_rebase(gitwd, source, dest):
+        return False
 
     # Check if there is nothing to update in the open rebase PR.
     if rebase.branch in gitwd.remotes.rebase.refs:
@@ -425,10 +433,12 @@ def run(
         return False
 
     try:
-        _do_rebase(gitwd, source, dest)
+        needs_rebase = _needs_rebase(gitwd, source, dest)
+        if needs_rebase:
+            _do_rebase(gitwd, source, dest)
 
-        if update_go_modules:
-            _commit_go_mod_updates(gitwd, source)
+            if update_go_modules:
+                _commit_go_mod_updates(gitwd, source)
     except RepoException as ex:
         logging.error(ex)
         _message_slack(
