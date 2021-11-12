@@ -87,17 +87,34 @@ def _commit_go_mod_updates(gitwd, source):
             raise err
 
 
-def _do_rebase(gitwd, source):
+def _do_rebase(gitwd, source, dest):
     logging.info("Performing rebase")
-    try:
-        gitwd.git.rebase(f"source/{source.branch}", "-Xtheirs")
-    except git.GitCommandError as ex:
-        if not _resolve_rebase_conflicts(gitwd):
-            raise RepoException(f"Git rebase failed: {ex}") from ex
+
+    merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
+    logging.info("Rebasing from merge base: %s", merge_base)
+
+    commits = gitwd.git.log("--reverse", "--pretty=format:%H - %s", "--no-merges",
+                            "--ancestry-path", f"{merge_base}..HEAD")
+    logging.info("Picking commits: \n%s", commits)
+
+    for commit in commits.splitlines():
+        # Commit contains the message for logging purposes,
+        # trim on the first space to get just the commit sha
+        sha = commit.split(" ", 1)[0]
+        try:
+            gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+        except git.GitCommandError as ex:
+            if not _resolve_rebase_conflicts(gitwd):
+                raise RepoException(f"Git rebase failed: {ex}") from ex
 
 
 def _resolve_conflict(gitwd):
-    proc = gitwd.git.status(porcelain=True, as_process=True)
+    status = gitwd.git.status(porcelain=True)
+
+    if not status:
+        # No status means the pick was empty, so skip it
+        gitwd.git.cherry_pick("--skip")
+        return True
 
     # Conflict prefixes in porcelain mode that we can fix
     # UD - Modified/Deleted
@@ -108,7 +125,7 @@ def _resolve_conflict(gitwd):
     allowed_status_prefixes = ["M  ", "D  ", "A  "]
 
     ud_files = []
-    for line in proc.stdout:
+    for line in status.splitlines():
         line = line.decode(git.compat.defenc)
         file_status = line[:3]
         if file_status in allowed_status_prefixes:
@@ -140,9 +157,7 @@ def _resolve_rebase_conflicts(gitwd):
         if not _resolve_conflict(gitwd):
             return False
 
-        logging.info("Rebase conflict has been resolved. Continue rebasing.")
-
-        gitwd.git.rebase("--continue")
+        logging.info("Conflict has been resolved. Continue rebase.")
 
         return True
     except git.GitCommandError:
@@ -410,7 +425,7 @@ def run(
         return False
 
     try:
-        _do_rebase(gitwd, source)
+        _do_rebase(gitwd, source, dest)
 
         if update_go_modules:
             _commit_go_mod_updates(gitwd, source)
