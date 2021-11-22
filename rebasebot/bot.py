@@ -109,8 +109,10 @@ def _do_rebase(gitwd, source, dest):
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
     logging.info("Rebasing from merge base: %s", merge_base)
 
+    # Find the list of commits between the merge base and the destination head
+    # This should be the list of commits we are carrying on top of the UPSTREAM
     commits = gitwd.git.log("--reverse", "--pretty=format:%H - %s", "--no-merges",
-                            "--ancestry-path", f"{merge_base}..HEAD")
+                            "--ancestry-path", f"{merge_base}..dest/{dest.branch}")
     logging.info("Picking commits: \n%s", commits)
 
     for commit in commits.splitlines():
@@ -142,7 +144,7 @@ def _resolve_conflict(gitwd):
 
     ud_files = []
     for line in status.splitlines():
-        line = line.decode(git.compat.defenc)
+        logging.info("Resolving conflict: %s", line)
         file_status = line[:3]
         if file_status in allowed_status_prefixes:
             # There is a conflict we can't resolve
@@ -323,7 +325,9 @@ def _init_working_dir(
     logging.info("Fetching %s from source", source.branch)
     gitwd.remotes.source.fetch(source.branch)
 
-    working_branch = f"dest/{dest.branch}"
+    # For a cherry-pick, we must start with the source branch and pick
+    # the carry commits on top.
+    working_branch = f"source/{source.branch}"
     logging.info("Checking out %s", working_branch)
 
     logging.info(
@@ -333,12 +337,14 @@ def _init_working_dir(
         logging.info("Fetching existing rebase branch")
         gitwd.remotes.rebase.fetch(rebase.branch)
 
-    head_commit = gitwd.remotes.dest.refs.master.commit
+    # Reset the existing rebase branch to match the source branch
+    # or create a new rebase branch based on the source branch.
+    head_commit = gitwd.git.rev_parse(f"source/{source.branch}")
     if "rebase" in gitwd.heads:
         gitwd.heads.rebase.set_commit(head_commit)
     else:
         gitwd.create_head("rebase", head_commit)
-    gitwd.head.reference = gitwd.heads.rebase
+    gitwd.git.checkout("rebase")
     gitwd.head.reset(index=True, working_tree=True)
 
     return gitwd
