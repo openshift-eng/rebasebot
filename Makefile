@@ -3,7 +3,7 @@ PYTHON=python3
 .PHONY: deps
 deps:
 	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install black coverage flake8 flit mccabe mypy pylint pytest tox tox-gh-actions
+	$(PYTHON) -m pip install -r requirements-hacking.txt
 	$(PYTHON) -m pip install -r requirements.txt
 
 .PHONY: unittests
