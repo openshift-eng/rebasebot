@@ -53,6 +53,8 @@ def _message_slack(webhook_url, msg):
 
 
 def _commit_go_mod_updates(gitwd, source):
+    logging.info("Performing go modules update")
+
     try:
         # Reset go.mod and go.sum to make sure they are the same as in the source
         for filename in ["go.mod", "go.sum"]:
@@ -124,6 +126,37 @@ def _do_rebase(gitwd, source, dest):
         except git.GitCommandError as ex:
             if not _resolve_rebase_conflicts(gitwd):
                 raise RepoException(f"Git rebase failed: {ex}") from ex
+
+
+def _needs_merge(gitwd, dest):
+    logging.info("Checking if we need a merge commit")
+
+    try:
+        gitwd.git.checkout(f"dest/{dest.branch}")
+        gitwd.git.merge("--no-ff", "rebase")
+    except git.GitCommandError:
+        logging.info("Merge commit is required")
+        return True
+    finally:
+        gitwd.git.reset("--hard", "HEAD")
+        gitwd.git.checkout("rebase")
+
+    logging.info("Merge commit is not required")
+
+    return False
+
+
+def _do_merge(gitwd, dest):
+    logging.info("Performing merge")
+    try:
+        gitwd.git.merge(
+            f"dest/{dest.branch}", "-Xtheirs", "-m",
+            f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
+        )
+    except git.GitCommandError as ex:
+        if not _resolve_conflict(gitwd):
+            logging.info("Merge conflict has been automatically resolved.")
+            raise RepoException(f"Git merge failed: {ex}") from ex
 
 
 def _resolve_conflict(gitwd):
@@ -430,6 +463,14 @@ def run(
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
+
+        # To prevent potential github conflicts we need to check if
+        # "git merge --no-ff" returns no errors. If it's not true, we
+        # have to create a merge commit.
+        needs_merge = _needs_merge(gitwd, dest)
+        if needs_merge:
+            _do_merge(gitwd, dest)
+
     except RepoException as ex:
         logging.error(ex)
         _message_slack(
