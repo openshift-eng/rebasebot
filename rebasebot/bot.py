@@ -210,32 +210,17 @@ def _is_pr_available(dest_repo, rebase):
 
 def _create_pr(gh_app, dest, source, rebase):
     logging.info("Creating a pull request")
-    # FIXME(mdbooth): This hack is because github3 doesn't support setting
-    # maintainer_can_modify to false when creating a PR.
-    #
-    # When maintainer_can_modify is true, which is the default we can't change,
-    # we get a 422 response from GitHub. The reason for this is that we're
-    # creating the pull in the destination repo with credentials that don't
-    # have write permission on the source. This means they can't grant
-    # permission to the maintainer at the destination to modify the merge
-    # branch.
-    #
-    # https://github.com/sigmavirus24/github3.py/issues/1031
 
-    gh_pr = gh_app._post(
-        f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
-        data={
-            "title": f"Merge {source.url}:{source.branch} into {dest.branch}",
-            "head": f"{rebase.ns}:{rebase.branch}",
-            "base": dest.branch,
-            "maintainer_can_modify": False,
-        },
-        json=True,
+    pull_request = gh_app.repository(dest.ns, dest.name).create_pull(
+        title=f"Merge {source.url}:{source.branch} into {dest.branch}",
+        head=f"{rebase.ns}:{rebase.branch}",
+        base=dest.branch,
+        maintainer_can_modify=False,
     )
-    logging.info(gh_pr.json())
-    logging.info(gh_pr.raise_for_status())
 
-    return gh_pr.json()["html_url"]
+    logging.debug(pull_request.as_json())
+
+    return pull_request.html_url
 
 
 def _github_app_login(gh_app_id, gh_app_key):
