@@ -150,7 +150,7 @@ def _do_merge(gitwd, dest):
     logging.info("Performing merge")
     try:
         gitwd.git.merge(
-            f"dest/{dest.branch}", "-Xtheirs", "-m",
+            f"dest/{dest.branch}", "-Xours", "-m",
             f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
         )
     except git.GitCommandError as ex:
