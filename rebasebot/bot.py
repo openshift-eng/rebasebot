@@ -461,15 +461,15 @@ def run(
         if needs_rebase:
             _do_rebase(gitwd, source, dest)
 
+            # To prevent potential github conflicts we need to check if
+            # "git merge --no-ff" returns no errors. If it's not true, we
+            # have to create a merge commit.
+            needs_merge = _needs_merge(gitwd, dest)
+            if needs_merge:
+                _do_merge(gitwd, dest)
+
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
-
-        # To prevent potential github conflicts we need to check if
-        # "git merge --no-ff" returns no errors. If it's not true, we
-        # have to create a merge commit.
-        needs_merge = _needs_merge(gitwd, dest)
-        if needs_merge:
-            _do_merge(gitwd, dest)
 
     except RepoException as ex:
         logging.error(ex)
