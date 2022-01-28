@@ -167,10 +167,13 @@ def _resolve_conflict(gitwd):
         gitwd.git.cherry_pick("--skip")
         return True
 
-    # Conflict prefixes in porcelain mode that we can fix
+    # Conflict prefixes in porcelain mode that we can fix.
+    # In all next cases we delete the conflicting files.
     # UD - Modified/Deleted
+    # DU - Deleted/Modified
     # AU - Renamed/Deleted
-    allowed_conflict_prefixes = ["UD ", "AU "]
+    # UA - Deleted/Renamed
+    allowed_conflict_prefixes = ["UD ", "DU ", "AU ", "UA "]
 
     # Non-conflict status prefixes that we should ignore
     allowed_status_prefixes = ["M  ", "D  ", "A  "]
