@@ -105,7 +105,31 @@ def _needs_rebase(gitwd, source, dest):
     return True
 
 
-def _do_rebase(gitwd, source, dest):
+def _is_pr_merged(pr_number, source_repo):
+    logging.info("Checking that PR %s has been merged", pr_number)
+    gh_pr = source_repo.pull_request(pr_number)
+    return gh_pr.is_merged()
+
+
+def _add_to_rebase(commit_message, source_repo):
+    if commit_message.startswith("UPSTREAM: "):
+        commit_message = commit_message.removeprefix("UPSTREAM: ")
+        commit_tag = commit_message.split(":", 1)[0]
+        if commit_tag == "<drop>":
+            return False
+
+        if commit_tag == "<carry>":
+            return True
+
+        if commit_tag.isnumeric():
+            return not _is_pr_merged(int(commit_tag), source_repo)
+
+        raise Exception(f"Unknown commit message tag: {commit_tag}")
+
+    return True
+
+
+def _do_rebase(gitwd, source, dest, source_repo):
     logging.info("Performing rebase")
 
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
@@ -120,7 +144,11 @@ def _do_rebase(gitwd, source, dest):
     for commit in commits.splitlines():
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
-        sha = commit.split(" ", 1)[0]
+        sha, commit_message = commit.split(" - ")
+
+        if not _add_to_rebase(commit_message, source_repo):
+            continue
+
         try:
             gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
         except git.GitCommandError as ex:
@@ -425,6 +453,8 @@ def run(
         logging.info("Destination repository is %s", dest_repo.clone_url)
         rebase_repo = gh_cloner_app.repository(rebase.ns, rebase.name)
         logging.info("rebase repository is %s", rebase_repo.clone_url)
+        source_repo = gh_app.repository(source.ns, source.name)
+        logging.info("source repository is %s", source_repo.clone_url)
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
@@ -459,7 +489,7 @@ def run(
     try:
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
-            _do_rebase(gitwd, source, dest)
+            _do_rebase(gitwd, source, dest, source_repo)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
