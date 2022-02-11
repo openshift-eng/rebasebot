@@ -154,20 +154,30 @@ class test_go_mod(unittest.TestCase):
 
     @patch('rebasebot.bot._is_pr_merged')
     def test_commit_tags(self, mocked_is_pr_merged):
-        self.assertTrue(bot._add_to_rebase("UPSTREAM: <carry>: something", None))
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: <carry>: something", None, "soft"))
 
-        self.assertFalse(bot._add_to_rebase("UPSTREAM: <drop>: something", None))
+        self.assertFalse(bot._add_to_rebase("UPSTREAM: <drop>: something", None, "soft"))
 
         mocked_is_pr_merged.return_value = True
-        self.assertFalse(bot._add_to_rebase("UPSTREAM: 100: something", None))
+        self.assertFalse(bot._add_to_rebase("UPSTREAM: 100: something", None, "soft"))
 
         mocked_is_pr_merged.return_value = False
-        self.assertTrue(bot._add_to_rebase("UPSTREAM: 100: something", None))
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: 100: something", None, "soft"))
 
         self.assertRaises(Exception, bot._add_to_rebase, "UPSTREAM: INVALID: something", None)
 
-        self.assertTrue(bot._add_to_rebase("No Tag: <carry>: something", None))
-        self.assertTrue(bot._add_to_rebase("No Tag: something", None))
+        self.assertTrue(bot._add_to_rebase("No Tag: <carry>: something", None, "soft"))
+        self.assertTrue(bot._add_to_rebase("No Tag: something", None, "soft"))
+
+        # With "strict" tag policy intagged commits are discarded
+        self.assertFalse(bot._add_to_rebase("No Tag: <carry>: something", None, "strict"))
+        self.assertFalse(bot._add_to_rebase("No Tag: something", None, "strict"))
+
+        # We always keep commits with "none" tag policy
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: <drop>: something", None, "none"))
+
+        mocked_is_pr_merged.return_value = True
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: 100: something", None, "none"))
 
 
 if __name__ == "__main__":

@@ -173,6 +173,14 @@ def _parse_cli_arguments(testing_args=None):
         required=False,
         help="When enabled, the bot will not create a PR.",
     )
+    parser.add_argument(
+        "--tag-policy",
+        default="none",
+        const="none",
+        nargs="?",
+        choices=["none", "soft", "strict"],
+        help="Option that shows how to handle UPSTREAM tags in "
+             "commit messages. (default: %(default)s)")
 
     if testing_args is not None:
         args = parser.parse_args(testing_args)
@@ -219,6 +227,7 @@ def main():
         args.github_cloner_id,
         gh_cloner_key,
         slack_webhook,
+        args.tag_policy,
         update_go_modules=args.update_go_modules,
         dry_run=args.dry_run,
     )

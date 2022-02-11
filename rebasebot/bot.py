@@ -111,7 +111,11 @@ def _is_pr_merged(pr_number, source_repo):
     return gh_pr.is_merged()
 
 
-def _add_to_rebase(commit_message, source_repo):
+def _add_to_rebase(commit_message, source_repo, tag_policy):
+    # We always add commits to rebase PR in case of "none" tag policy
+    if tag_policy == "none":
+        return True
+
     if commit_message.startswith("UPSTREAM: "):
         commit_message = commit_message.removeprefix("UPSTREAM: ")
         commit_tag = commit_message.split(":", 1)[0]
@@ -126,10 +130,12 @@ def _add_to_rebase(commit_message, source_repo):
 
         raise Exception(f"Unknown commit message tag: {commit_tag}")
 
-    return True
+    # We keep untagged commits with "soft" tag policy, and discard them
+    # for "strict" one.
+    return tag_policy == "soft"
 
 
-def _do_rebase(gitwd, source, dest, source_repo):
+def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
     logging.info("Performing rebase")
 
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
@@ -146,7 +152,7 @@ def _do_rebase(gitwd, source, dest, source_repo):
         # trim on the first space to get just the commit sha
         sha, commit_message = commit.split(" - ")
 
-        if not _add_to_rebase(commit_message, source_repo):
+        if not _add_to_rebase(commit_message, source_repo, tag_policy):
             continue
 
         try:
@@ -409,6 +415,7 @@ def run(
     gh_cloner_id,
     gh_cloner_key,
     slack_webhook,
+    tag_policy,
     update_go_modules=False,
     dry_run=False,
 ):
@@ -489,7 +496,7 @@ def run(
     try:
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
-            _do_rebase(gitwd, source, dest, source_repo)
+            _do_rebase(gitwd, source, dest, source_repo, tag_policy)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
