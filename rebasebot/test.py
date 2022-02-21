@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import patch
 import os
+import shutil
 from git import Repo
 
 from rebasebot import bot
@@ -46,6 +48,8 @@ def make_golang_repo(tmp_dir):
 """
 
     # Create testing directory and files
+    if os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir)
     os.mkdir(tmp_dir)
     f = open(test_file, "x")
     f.write(script)
@@ -94,7 +98,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.add(all=True)
         repo.git.commit("-m", "Initial commit")
 
-        source = cli.GitBranch(tmp_dir, "master")
+        source = cli.GitHubBranch(tmp_dir, "example", "foo", "master")
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
@@ -131,7 +135,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.add(all=True)
         repo.git.commit("-m", "Initial commit")
 
-        source = cli.GitBranch(tmp_dir, "master")
+        source = cli.GitHubBranch(tmp_dir, "example", "foo", "master")
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
@@ -147,6 +151,33 @@ class test_go_mod(unittest.TestCase):
             # clean up
             os.chdir(working_dir)
             os.system("rm -rf " + str(tmp_dir))
+
+    @patch('rebasebot.bot._is_pr_merged')
+    def test_commit_tags(self, mocked_is_pr_merged):
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: <carry>: something", None, "soft"))
+
+        self.assertFalse(bot._add_to_rebase("UPSTREAM: <drop>: something", None, "soft"))
+
+        mocked_is_pr_merged.return_value = True
+        self.assertFalse(bot._add_to_rebase("UPSTREAM: 100: something", None, "soft"))
+
+        mocked_is_pr_merged.return_value = False
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: 100: something", None, "soft"))
+
+        self.assertRaises(Exception, bot._add_to_rebase, "UPSTREAM: INVALID: something", None)
+
+        self.assertTrue(bot._add_to_rebase("No Tag: <carry>: something", None, "soft"))
+        self.assertTrue(bot._add_to_rebase("No Tag: something", None, "soft"))
+
+        # With "strict" tag policy intagged commits are discarded
+        self.assertFalse(bot._add_to_rebase("No Tag: <carry>: something", None, "strict"))
+        self.assertFalse(bot._add_to_rebase("No Tag: something", None, "strict"))
+
+        # We always keep commits with "none" tag policy
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: <drop>: something", None, "none"))
+
+        mocked_is_pr_merged.return_value = True
+        self.assertTrue(bot._add_to_rebase("UPSTREAM: 100: something", None, "none"))
 
 
 if __name__ == "__main__":

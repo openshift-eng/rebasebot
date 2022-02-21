@@ -20,13 +20,11 @@ import argparse
 from collections import namedtuple
 import re
 import sys
-import validators
 
 from rebasebot import bot
 
 
 GitHubBranch = namedtuple("GitHubBranch", ["url", "ns", "name", "branch"])
-GitBranch = namedtuple("GitBranch", ["url", "branch"])
 
 
 class GitHubBranchAction(argparse.Action):
@@ -40,6 +38,9 @@ class GitHubBranchAction(argparse.Action):
     GITHUBBRANCH = re.compile("^(?P<ns>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
 
     def __call__(self, parser, namespace, values, option_string=None):
+        # For backward compatibility we need to ensure that the prefix was removed
+        values = values.removeprefix("https://github.com/")
+
         match = self.GITHUBBRANCH.match(values)
         if match is None:
             parser.error(
@@ -59,31 +60,6 @@ class GitHubBranchAction(argparse.Action):
         )
 
 
-class GitBranchAction(argparse.Action):
-    """An action to take a git branch argument in the form:
-
-      <git url>:<branch>
-
-    The argument will be return as a GitBranch object.
-    """
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        msg = (
-            f"Git branch value for {option_string} must be in "
-            f"the form <git url>:<branch>"
-        )
-
-        split = values.rsplit(":", 1)
-        if len(split) != 2:
-            parser.error(msg)
-
-        url, branch = split
-        if not validators.url(url):
-            parser.error(msg)
-
-        setattr(namespace, self.dest, GitBranch(url, branch))
-
-
 # parse_cli_arguments parses command line arguments using argparse and returns
 # an object representing the populated namespace, and a list of errors
 #
@@ -101,7 +77,7 @@ def _parse_cli_arguments(testing_args=None):
         "-s",
         type=str,
         required=True,
-        action=GitBranchAction,
+        action=GitHubBranchAction,
         help=(
             "The source/upstream git repo to rebase changes onto in the form "
             "<git url>:<branch>. Note that unlike dest and rebase this does "
@@ -197,6 +173,14 @@ def _parse_cli_arguments(testing_args=None):
         required=False,
         help="When enabled, the bot will not create a PR.",
     )
+    parser.add_argument(
+        "--tag-policy",
+        default="none",
+        const="none",
+        nargs="?",
+        choices=["none", "soft", "strict"],
+        help="Option that shows how to handle UPSTREAM tags in "
+             "commit messages. (default: %(default)s)")
 
     if testing_args is not None:
         args = parser.parse_args(testing_args)
@@ -243,6 +227,7 @@ def main():
         args.github_cloner_id,
         gh_cloner_key,
         slack_webhook,
+        args.tag_policy,
         update_go_modules=args.update_go_modules,
         dry_run=args.dry_run,
     )

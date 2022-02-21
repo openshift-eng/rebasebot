@@ -104,6 +104,18 @@ If you want to be notified in Slack about the status of recent rebases, you can 
 ...
 ```
 
+### Tag policy
+
+This option allows to manage UPSTREAM commit message tags policy.
+
+- `--tag-policy=none` will take all commits into the rebase PR, regardless of their tags, even including `UPSTREAM: <drop>`.
+
+- `--tag-policy=soft` if the commit has `UPSTREAM: <something>` it will be taken into account, otherwise we keep it.
+
+- `--tag-policy=strict` is similar to the previous one, but it discards commits without "UPSTREAM:" tags.
+
+Default value is `none`.
+
 ### Custom git username and email
 
 By default the bot takes global git username and email to perform the rebase. If you want to change it to something else you can use `--git-username` and `--git-email` options.
