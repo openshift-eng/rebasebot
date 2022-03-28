@@ -63,7 +63,7 @@ def _commit_go_mod_updates(gitwd, source):
             gitwd.remotes.source.repo.git.checkout(f"source/{source.branch}", filename)
 
         proc = subprocess.run(
-            "go mod tidy", shell=True, check=True, capture_output=True
+            "go mod tidy -compat=1.17", shell=True, check=True, capture_output=True
         )
         logging.debug("go mod tidy output: %s", proc.stdout.decode())
         proc = subprocess.run(
