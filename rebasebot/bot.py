@@ -162,30 +162,12 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
                 raise RepoException(f"Git rebase failed: {ex}") from ex
 
 
-def _needs_merge(gitwd, dest):
-    logging.info("Checking if we need a merge commit")
-
-    try:
-        gitwd.git.checkout(f"dest/{dest.branch}")
-        gitwd.git.merge("--no-ff", "rebase")
-    except git.GitCommandError:
-        logging.info("Merge commit is required")
-        return True
-    finally:
-        gitwd.git.reset("--hard", "HEAD")
-        gitwd.git.checkout("rebase")
-
-    logging.info("Merge commit is not required")
-
-    return False
-
-
 def _do_merge(gitwd, dest):
     logging.info("Performing merge")
     try:
         gitwd.git.merge(
-            f"dest/{dest.branch}", "-Xours", "-m",
-            f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
+            f"dest/{dest.branch}", "-m",
+            f"merge branch '{dest.branch}' in {gitwd.active_branch}"
         )
     except git.GitCommandError as ex:
         if not _resolve_conflict(gitwd):
@@ -497,19 +479,14 @@ def run(
         return False
 
     try:
+        _do_merge(gitwd, dest)
+
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
             _do_rebase(gitwd, source, dest, source_repo, tag_policy)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
-
-        # To prevent potential github conflicts we need to check if
-        # "git merge --no-ff" returns no errors. If it's not true, we
-        # have to create a merge commit.
-        needs_merge = _needs_merge(gitwd, dest)
-        if needs_merge:
-            _do_merge(gitwd, dest)
 
     except RepoException as ex:
         logging.error(ex)
