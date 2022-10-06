@@ -49,7 +49,7 @@ user_credentials = os.path.join(CREDENTIALS_DIR, "user")
 def _message_slack(webhook_url, msg):
     if webhook_url is None:
         return
-    requests.post(webhook_url, json={"text": msg})
+    requests.post(webhook_url, json={"text": msg}, timeout=5)
 
 
 def _commit_go_mod_updates(gitwd, source):
