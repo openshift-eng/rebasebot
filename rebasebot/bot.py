@@ -45,6 +45,8 @@ app_credentials = os.path.join(CREDENTIALS_DIR, "app")
 cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
 user_credentials = os.path.join(CREDENTIALS_DIR, "user")
 
+MERGE_TMP_BRANCH = "merge-tmp"
+
 
 def _message_slack(webhook_url, msg):
     if webhook_url is None:
@@ -162,35 +164,35 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
                 raise RepoException(f"Git rebase failed: {ex}") from ex
 
 
-def _needs_merge(gitwd, dest):
-    logging.info("Checking if we need a merge commit")
+def _prepare_rebase_branch(gitwd, source, dest):
+    logging.info("Preparing rebase branch")
 
+    # Remove an old merge-tmp branch if it exists
     try:
-        gitwd.git.checkout(f"dest/{dest.branch}")
-        gitwd.git.merge("--no-ff", "rebase")
+        gitwd.git.branch("-d", MERGE_TMP_BRANCH, force=True)
     except git.GitCommandError:
-        logging.info("Merge commit is required")
-        return True
-    finally:
-        gitwd.git.reset("--hard", "HEAD")
-        gitwd.git.checkout("rebase")
+        # If the branch doesn't exist, git returns an error.
+        pass
 
-    logging.info("Merge commit is not required")
+    # Create a merge tmp branch that matches the source branch head.
+    gitwd.git.checkout("-b", MERGE_TMP_BRANCH, f"source/{source.branch}")
 
-    return False
+    # Make sure we are at the tip of our branch.
+    gitwd.git.checkout(f"dest/{dest.branch}")
 
+    # Perform the merge operation.
+    commit = gitwd.git.commit_tree(f"{MERGE_TMP_BRANCH}^{{tree}}",
+                                   "-p", "HEAD", "-p", MERGE_TMP_BRANCH, "-m",
+                                   f"merge upstream/{source.branch} into {dest.branch}")
 
-def _do_merge(gitwd, dest):
-    logging.info("Performing merge")
+    # Remove an old rebase branch if it exists
     try:
-        gitwd.git.merge(
-            f"dest/{dest.branch}", "-Xours", "-m",
-            f"UPSTREAM: <carry>: Merge branch '{dest.branch}' in {gitwd.active_branch}"
-        )
-    except git.GitCommandError as ex:
-        if not _resolve_conflict(gitwd):
-            logging.info("Merge conflict has been automatically resolved.")
-            raise RepoException(f"Git merge failed: {ex}") from ex
+        gitwd.git.branch("-d", "rebase", force=True)
+    except git.GitCommandError:
+        # If the branch doesn't exist, git returns an error.
+        pass
+
+    gitwd.git.checkout("-b", "rebase", commit)
 
 
 def _resolve_conflict(gitwd):
@@ -499,17 +501,11 @@ def run(
     try:
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
+            _prepare_rebase_branch(gitwd, source, dest)
             _do_rebase(gitwd, source, dest, source_repo, tag_policy)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
-
-        # To prevent potential github conflicts we need to check if
-        # "git merge --no-ff" returns no errors. If it's not true, we
-        # have to create a merge commit.
-        needs_merge = _needs_merge(gitwd, dest)
-        if needs_merge:
-            _do_merge(gitwd, dest)
 
     except RepoException as ex:
         logging.error(ex)
