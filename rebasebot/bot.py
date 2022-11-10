@@ -15,6 +15,7 @@
 #    under the License.
 """This module implements functions for the Rebase Bot."""
 
+from collections import defaultdict
 import logging
 import os
 import shutil
@@ -137,7 +138,8 @@ def _add_to_rebase(commit_message, source_repo, tag_policy):
     return tag_policy == "soft"
 
 
-def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
+def _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
+               bot_emails, update_go_modules):
     logging.info("Performing rebase")
 
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
@@ -145,15 +147,17 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
 
     # Find the list of commits between the merge base and the destination head
     # This should be the list of commits we are carrying on top of the UPSTREAM
-    commits = gitwd.git.log("--reverse", "--pretty=format:%H - %s", "--no-merges",
+    commits = gitwd.git.log("--reverse", "--pretty=format:%H - %s - %aE", "--no-merges",
                             "--ancestry-path", f"{merge_base}..dest/{dest.branch}")
 
     logging.info("Identified upstream commits:\n%s", commits)
 
+    commits_to_squash = defaultdict(list)
+
     for commit in commits.splitlines():
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
-        sha, commit_message = commit.split(" - ")
+        sha, commit_message, committer_email = commit.split(" - ")
 
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
@@ -170,10 +174,38 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
         logging.info("Picking commit: %s - %s", sha, commit_message)
 
         try:
-            gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+            if allow_bot_squash:
+                # There is sometimes a prefix with number and a following + sign
+                # We have to get rid of that part to make sure to get
+                # only the email of the bot
+                email = committer_email.split("+")[-1]
+                if email in bot_emails:
+                    commits_to_squash[email].append(sha)
+                else:
+                    logging.info("cherry-picking %s", sha)
+                    gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+            else:
+                gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
         except git.GitCommandError as ex:
             if not _resolve_rebase_conflicts(gitwd):
                 raise RepoException(f"Git rebase failed: {ex}") from ex
+
+    # Here we cherry-pick the bot's commits and then squash them together
+    # We also want the newest bot commit message to represent the squashed commits
+    if allow_bot_squash:
+        for key, value in commits_to_squash.items():
+            logging.info("Squashing commits for bot: %s: %s", key, value)
+            for sha in value:
+                try:
+                    logging.info("cherry-picking %s", sha)
+                    gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+                except git.GitCommandError as ex:
+                    if not _resolve_rebase_conflicts(gitwd):
+                        raise RepoException(f"Git rebase failed: {ex}") from ex
+            gitwd.git.reset("--soft", f"HEAD~{len(value)}")
+            newest_bot_commit_message = gitwd.git.log("-n 1", f"{value[len(value)-1]}",
+                                                      "--pretty=format:%s")
+            gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
 
 
 def _prepare_rebase_branch(gitwd, source, dest):
@@ -433,6 +465,8 @@ def run(
     gh_cloner_key,
     slack_webhook,
     tag_policy,
+    allow_bot_squash,
+    bot_emails,
     update_go_modules=False,
     dry_run=False,
 ):
@@ -514,7 +548,8 @@ def run(
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
             _prepare_rebase_branch(gitwd, source, dest)
-            _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules)
+            _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
+                       bot_emails, update_go_modules)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
