@@ -149,8 +149,6 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
                             "--ancestry-path", f"{merge_base}..dest/{dest.branch}")
     logging.info("Picking commits: \n%s", commits)
 
-    go_mod_commits = []
-
     for commit in commits.splitlines():
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
@@ -158,12 +156,9 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
 
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
-            # We then replace <carry> flag for <drop> flag
             # and append such commit to a list of commits that we want to prune
-            if commit_message.find("UPSTREAM: <carry>: Updating and vendoring go modules "
-                                   "after an upstream rebase"):
-                commit_message.replace("<carry>", "<drop>")
-                go_mod_commits.append(sha)
+            if commit_message == "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase":
+                continue
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy):
             continue
@@ -173,16 +168,6 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
         except git.GitCommandError as ex:
             if not _resolve_rebase_conflicts(gitwd):
                 raise RepoException(f"Git rebase failed: {ex}") from ex
-
-    if update_go_modules:
-        # We have a list of all the bot commits with go mod updates
-        # We reset all these commits and delete them
-        # The flag `update_go_modules` will create new go mod updates commit
-        for commit in go_mod_commits:
-            gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
-        gitwd.git.reset("--hard", f"HEAD~{len(go_mod_commits)}")
-        gitwd.git.commit("-m", "UPSTREAM: <carry>: Updating and vendoring go modules "
-                         "after an upstream rebase")
 
 
 def _prepare_rebase_branch(gitwd, source, dest):
