@@ -157,7 +157,9 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
             # and append such commit to a list of commits that we want to prune
-            if commit_message == "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase":
+            if commit_message == "UPSTREAM: <carry>: Updating and vendoring " + \
+                                 "go modules after an upstream rebase":
+                logging.info("Dropping Go modules commit %s - %s", sha, commit_message)
                 continue
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy):
