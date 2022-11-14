@@ -157,8 +157,11 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
         sha, commit_message = commit.split(" - ")
 
         if update_go_modules:
+            # If we find a commit with such name, we know that it is a go mod update commit
+            # We then replace <carry> flag for <drop> flag
+            # and append such commit to a list of commits that we want to prune
             if commit_message.find("UPSTREAM: <carry>: Updating and vendoring go modules "
-                "after an upstream rebase"):
+                                   "after an upstream rebase"):
                 commit_message.replace("<carry>", "<drop>")
                 go_mod_commits.append(sha)
 
@@ -179,7 +182,7 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
             gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
         gitwd.git.reset("--hard", f"HEAD~{len(go_mod_commits)}")
         gitwd.git.commit("-m", "UPSTREAM: <carry>: Updating and vendoring go modules "
-                "after an upstream rebase")
+                         "after an upstream rebase")
 
 
 def _prepare_rebase_branch(gitwd, source, dest):
