@@ -137,7 +137,7 @@ def _add_to_rebase(commit_message, source_repo, tag_policy):
     return tag_policy == "soft"
 
 
-def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
+def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
     logging.info("Performing rebase")
 
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
@@ -149,10 +149,18 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
                             "--ancestry-path", f"{merge_base}..dest/{dest.branch}")
     logging.info("Picking commits: \n%s", commits)
 
+    go_mod_commits = []
+
     for commit in commits.splitlines():
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
         sha, commit_message = commit.split(" - ")
+
+        if update_go_modules:
+            if commit_message.find("UPSTREAM: <carry>: Updating and vendoring go modules "
+                "after an upstream rebase"):
+                commit_message.replace("<carry>", "<drop>")
+                go_mod_commits.append(sha)
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy):
             continue
@@ -162,6 +170,16 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
         except git.GitCommandError as ex:
             if not _resolve_rebase_conflicts(gitwd):
                 raise RepoException(f"Git rebase failed: {ex}") from ex
+
+    if update_go_modules:
+        # We have a list of all the bot commits with go mod updates
+        # We reset all these commits and delete them
+        # The flag `update_go_modules` will create new go mod updates commit
+        for commit in go_mod_commits:
+            gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+        gitwd.git.reset("--hard", f"HEAD~{len(go_mod_commits)}")
+        gitwd.git.commit("-m", "UPSTREAM: <carry>: Updating and vendoring go modules "
+                "after an upstream rebase")
 
 
 def _prepare_rebase_branch(gitwd, source, dest):
@@ -502,7 +520,7 @@ def run(
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
             _prepare_rebase_branch(gitwd, source, dest)
-            _do_rebase(gitwd, source, dest, source_repo, tag_policy)
+            _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
