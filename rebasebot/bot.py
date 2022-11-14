@@ -147,7 +147,8 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
     # This should be the list of commits we are carrying on top of the UPSTREAM
     commits = gitwd.git.log("--reverse", "--pretty=format:%H - %s", "--no-merges",
                             "--ancestry-path", f"{merge_base}..dest/{dest.branch}")
-    logging.info("Picking commits: \n%s", commits)
+
+    logging.info("Identified upstream commits:\n%s", commits)
 
     for commit in commits.splitlines():
         # Commit contains the message for logging purposes,
@@ -155,7 +156,10 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
         sha, commit_message = commit.split(" - ")
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy):
+            logging.info("Dropping commit: %s - %s", sha, commit_message)
             continue
+
+        logging.info("Picking commit: %s - %s", sha, commit_message)
 
         try:
             gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
