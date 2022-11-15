@@ -137,7 +137,7 @@ def _add_to_rebase(commit_message, source_repo, tag_policy):
     return tag_policy == "soft"
 
 
-def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
+def _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules):
     logging.info("Performing rebase")
 
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
@@ -154,6 +154,14 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy):
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
         sha, commit_message = commit.split(" - ")
+
+        if update_go_modules:
+            # If we find a commit with such name, we know that it is a go mod update commit
+            # and append such commit to a list of commits that we want to prune
+            if commit_message == "UPSTREAM: <carry>: Updating and vendoring " + \
+                                 "go modules after an upstream rebase":
+                logging.info("Dropping Go modules commit %s - %s", sha, commit_message)
+                continue
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy):
             logging.info("Dropping commit: %s - %s", sha, commit_message)
@@ -506,7 +514,7 @@ def run(
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
             _prepare_rebase_branch(gitwd, source, dest)
-            _do_rebase(gitwd, source, dest, source_repo, tag_policy)
+            _do_rebase(gitwd, source, dest, source_repo, tag_policy, update_go_modules)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
