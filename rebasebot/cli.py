@@ -186,7 +186,7 @@ def _parse_cli_arguments(testing_args=None):
         action="store_true",
         default=False,
         required=False,
-        help="When enabled, the bot will be able to squash some"
+        help="When enabled, the bot will be able to squash some "
              "bot's commits - provided a list of bot emails.",
     )
     parser.add_argument(
@@ -195,6 +195,13 @@ def _parse_cli_arguments(testing_args=None):
         nargs="+",
         required=False,
         help="Specify the bot emails to be able to squash their commits.",
+    )
+    parser.add_argument(
+        "--exclude-commits",
+        type=str,
+        nargs="+",
+        required=False,
+        help="List of commit sha hashes that will be excluded from rebase.",
     )
 
     if testing_args is not None:
@@ -245,6 +252,7 @@ def main():
         args.tag_policy,
         args.allow_bot_squash,
         args.bot_emails,
+        args.exclude_commits,
         update_go_modules=args.update_go_modules,
         dry_run=args.dry_run,
     )
