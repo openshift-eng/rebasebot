@@ -181,6 +181,21 @@ def _parse_cli_arguments(testing_args=None):
         choices=["none", "soft", "strict"],
         help="Option that shows how to handle UPSTREAM tags in "
              "commit messages. (default: %(default)s)")
+    parser.add_argument(
+        "--allow-bot-squash",
+        action="store_true",
+        default=False,
+        required=False,
+        help="When enabled, the bot will be able to squash some"
+             "bot's commits - provided a list of bot emails.",
+    )
+    parser.add_argument(
+        "--bot-emails",
+        type=str,
+        nargs="+",
+        required=False,
+        help="Specify the bot emails to be able to squash their commits.",
+    )
 
     if testing_args is not None:
         args = parser.parse_args(testing_args)
@@ -228,6 +243,8 @@ def main():
         gh_cloner_key,
         slack_webhook,
         args.tag_policy,
+        args.allow_bot_squash,
+        args.bot_emails,
         update_go_modules=args.update_go_modules,
         dry_run=args.dry_run,
     )
