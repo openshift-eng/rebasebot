@@ -98,7 +98,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.add(all=True)
         repo.git.commit("-m", "Initial commit")
 
-        source = cli.GitHubBranch(tmp_dir, "example", "foo", "master")
+        source = cli.GitHubBranch(tmp_dir, "example", "foo", "main")
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
@@ -135,7 +135,7 @@ class test_go_mod(unittest.TestCase):
         repo.git.add(all=True)
         repo.git.commit("-m", "Initial commit")
 
-        source = cli.GitHubBranch(tmp_dir, "example", "foo", "master")
+        source = cli.GitHubBranch(tmp_dir, "example", "foo", "main")
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
