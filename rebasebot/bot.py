@@ -146,9 +146,13 @@ def _in_excluded_commits(sha, excluded):
     return False
 
 
-def _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
+def _do_rebase(gitwd, source, dest, source_repo, tag_policy,
                bot_emails, exclude_commits, update_go_modules):
     logging.info("Performing rebase")
+
+    allow_bot_squash = len(bot_emails) > 0
+    if allow_bot_squash:
+        logging.info("Bot squashing is enabled.")
 
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
     logging.info("Rebasing from merge base: %s", merge_base)
@@ -183,21 +187,19 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
             logging.info("Dropping commit: %s - %s", sha, commit_message)
             continue
 
+        if allow_bot_squash:
+            # There is sometimes a prefix with number and a following + sign
+            # We have to get rid of that part to make sure to get
+            # only the email of the bot.
+            email = committer_email.split("+")[-1]
+            if email in bot_emails:
+                commits_to_squash[email].append({"sha": sha, "commit_message": commit_message})
+                continue
+
         logging.info("Picking commit: %s - %s", sha, commit_message)
 
         try:
-            if allow_bot_squash:
-                # There is sometimes a prefix with number and a following + sign
-                # We have to get rid of that part to make sure to get
-                # only the email of the bot
-                email = committer_email.split("+")[-1]
-                if email in bot_emails:
-                    commits_to_squash[email].append(sha)
-                else:
-                    logging.info("cherry-picking %s", sha)
-                    gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
-            else:
-                gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+            gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
         except git.GitCommandError as ex:
             if not _resolve_rebase_conflicts(gitwd):
                 raise RepoException(f"Git rebase failed: {ex}") from ex
@@ -207,16 +209,16 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
     if allow_bot_squash:
         for key, value in commits_to_squash.items():
             logging.info("Squashing commits for bot: %s: %s", key, value)
-            for sha in value:
+            for commit in value:
                 try:
-                    logging.info("cherry-picking %s", sha)
-                    gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+                    gitwd.git.cherry_pick(commit["sha"], "-Xtheirs")
                 except git.GitCommandError as ex:
                     if not _resolve_rebase_conflicts(gitwd):
                         raise RepoException(f"Git rebase failed: {ex}") from ex
             gitwd.git.reset("--soft", f"HEAD~{len(value)}")
-            newest_bot_commit_message = gitwd.git.log("-n 1", f"{value[len(value)-1]}",
-                                                      "--pretty=format:%s")
+
+            newest_bot_commit_message = value[-1]["commit_message"]
+
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
 
 
@@ -477,7 +479,6 @@ def run(
     gh_cloner_key,
     slack_webhook,
     tag_policy,
-    allow_bot_squash,
     bot_emails,
     exclude_commits,
     update_go_modules=False,
@@ -561,7 +562,7 @@ def run(
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
             _prepare_rebase_branch(gitwd, source, dest)
-            _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
+            _do_rebase(gitwd, source, dest, source_repo, tag_policy,
                        bot_emails, exclude_commits, update_go_modules)
 
             if update_go_modules:
