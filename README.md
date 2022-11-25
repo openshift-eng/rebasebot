@@ -127,6 +127,16 @@ By default the bot takes global git username and email to perform the rebase. If
 ...
 ```
 
+### Excplicitly excluding some commits from rebase
+
+If for some reason you don't want to include some commits in your rebase PR, you can explicitly do it with `--exclude-commits` option that specifies a list of excluded commit hash prefixes.
+
+```txt
+...
+--exclude-commits b359659 4a89f92 5f4130e \
+...
+```
+
 ## Examples of usage
 
 Example 1. Sync kubernetes/cloud-provider-aws with openshift/cloud-provider-aws using applications credentials. 

@@ -138,8 +138,16 @@ def _add_to_rebase(commit_message, source_repo, tag_policy):
     return tag_policy == "soft"
 
 
+def _in_excluded_commits(sha, excluded):
+    for excluded_sha in excluded:
+        if sha.startswith(excluded_sha):
+            return True
+
+    return False
+
+
 def _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
-               bot_emails, update_go_modules):
+               bot_emails, exclude_commits, update_go_modules):
     logging.info("Performing rebase")
 
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
@@ -158,6 +166,10 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
         sha, commit_message, committer_email = commit.split(" - ")
+
+        if _in_excluded_commits(sha, exclude_commits):
+            logging.info("Explicitly dropping commit from rebase: %s", sha)
+            continue
 
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
@@ -467,6 +479,7 @@ def run(
     tag_policy,
     allow_bot_squash,
     bot_emails,
+    exclude_commits,
     update_go_modules=False,
     dry_run=False,
 ):
@@ -549,7 +562,7 @@ def run(
         if needs_rebase:
             _prepare_rebase_branch(gitwd, source, dest)
             _do_rebase(gitwd, source, dest, source_repo, tag_policy, allow_bot_squash,
-                       bot_emails, update_go_modules)
+                       bot_emails, exclude_commits, update_go_modules)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
