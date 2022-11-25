@@ -192,6 +192,7 @@ def _parse_cli_arguments(testing_args=None):
     parser.add_argument(
         "--bot-emails",
         type=str,
+        default=(),
         nargs="+",
         required=False,
         help="Specify the bot emails to be able to squash their commits.",
@@ -199,6 +200,7 @@ def _parse_cli_arguments(testing_args=None):
     parser.add_argument(
         "--exclude-commits",
         type=str,
+        default=(),
         nargs="+",
         required=False,
         help="List of commit sha hashes that will be excluded from rebase.",
