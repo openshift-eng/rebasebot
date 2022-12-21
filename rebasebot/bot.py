@@ -468,6 +468,10 @@ def run(
             for label in pull_req.labels:
                 if label['name'] == 'rebase/manual':
                     prs_with_manual_rebase_label.append(pull_req)
+                    _message_slack(
+                        slack_webhook,
+                        f"The PR {pull_req.title} has a rebase/manual label"
+                    )
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
