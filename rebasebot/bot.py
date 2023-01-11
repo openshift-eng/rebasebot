@@ -18,15 +18,15 @@
 from collections import defaultdict
 import logging
 import os
-import shutil
 import subprocess
 import sys
 
 import git
 import git.compat
 import github3
-import github3.exceptions as gh_exceptions
 import requests
+
+from rebasebot.github import GithubAppProvider, GitHubBranch
 
 
 class RepoException(Exception):
@@ -41,10 +41,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-CREDENTIALS_DIR = "/dev/shm/credentials"
-app_credentials = os.path.join(CREDENTIALS_DIR, "app")
-cloner_credentials = os.path.join(CREDENTIALS_DIR, "cloner")
-user_credentials = os.path.join(CREDENTIALS_DIR, "user")
 
 MERGE_TMP_BRANCH = "merge-tmp"
 
@@ -55,7 +51,7 @@ def _message_slack(webhook_url, msg):
     requests.post(webhook_url, json={"text": msg}, timeout=5)
 
 
-def _commit_go_mod_updates(gitwd, source):
+def _commit_go_mod_updates(gitwd, source: GitHubBranch):
     logging.info("Performing go modules update")
 
     try:
@@ -88,11 +84,13 @@ def _commit_go_mod_updates(gitwd, source):
                 "after an upstream rebase"
             )
         except Exception as err:
-            err.extra_info = "Unable to commit go module changes in git"
+            # Temporary ignore type checking
+            # TODO: Fix, choose appropriate exception type here
+            err.extra_info = "Unable to commit go module changes in git"  # type: ignore
             raise err
 
 
-def _needs_rebase(gitwd, source, dest):
+def _needs_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch):
     try:
         branches_with_commit = gitwd.git.branch("-r", "--contains", f"source/{source.branch}")
         dest_branch = f"dest/{dest.branch}"
@@ -146,7 +144,7 @@ def _in_excluded_commits(sha, excluded):
     return False
 
 
-def _do_rebase(gitwd, source, dest, source_repo, tag_policy,
+def _do_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch, source_repo, tag_policy,
                bot_emails, exclude_commits, update_go_modules):
     logging.info("Performing rebase")
 
@@ -222,7 +220,7 @@ def _do_rebase(gitwd, source, dest, source_repo, tag_policy,
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
 
 
-def _prepare_rebase_branch(gitwd, source, dest):
+def _prepare_rebase_branch(gitwd, source: GitHubBranch, dest: GitHubBranch):
     logging.info("Preparing rebase branch")
 
     # Remove an old merge-tmp branch if it exists
@@ -312,7 +310,7 @@ def _resolve_rebase_conflicts(gitwd):
         return _resolve_rebase_conflicts(gitwd)
 
 
-def _is_push_required(gitwd, dest, source, rebase):
+def _is_push_required(gitwd, dest: GitHubBranch, source: GitHubBranch, rebase: GitHubBranch):
     # Check if the source head is already in dest
     if not _needs_rebase(gitwd, source, dest):
         return False
@@ -327,7 +325,7 @@ def _is_push_required(gitwd, dest, source, rebase):
     return True
 
 
-def _is_pr_available(dest_repo, rebase):
+def _is_pr_available(dest_repo, rebase: GitHubBranch):
     logging.info("Checking for existing pull request")
     try:
         gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
@@ -338,7 +336,12 @@ def _is_pr_available(dest_repo, rebase):
     return "", False
 
 
-def _create_pr(gh_app, dest, source, rebase):
+def _create_pr(
+        gh_app: github3.GitHub,
+        dest: GitHubBranch,
+        source: GitHubBranch,
+        rebase: GitHubBranch
+):
     logging.info("Creating a pull request")
 
     pull_request = gh_app.repository(dest.ns, dest.name).create_pull(
@@ -353,42 +356,11 @@ def _create_pr(gh_app, dest, source, rebase):
     return pull_request.html_url
 
 
-def _github_app_login(gh_app_id, gh_app_key):
-    logging.info("Logging to GitHub as an Application")
-    gh_app = github3.GitHub()
-    gh_app.login_as_app(gh_app_key, gh_app_id, expire_in=300)
-    return gh_app
-
-
-def _github_user_login(user_token):
-    logging.info("Logging to GitHub as a User")
-    gh_app = github3.GitHub()
-    gh_app.login(token=user_token)
-    return gh_app
-
-
-def _github_login_for_repo(gh_app, gh_account, gh_repo_name, gh_app_id, gh_app_key):
-    try:
-        install = gh_app.app_installation_for_repository(
-            owner=gh_account, repository=gh_repo_name
-        )
-    except gh_exceptions.NotFoundError as err:
-        msg = (
-            f"App has not been authorized by {gh_account}, or repo "
-            f"{gh_account}/{gh_repo_name} does not exist"
-        )
-        logging.error(msg)
-        raise Exception(msg) from err
-
-    gh_app.login_as_app_installation(gh_app_key, gh_app_id, install.id)
-    return gh_app
-
-
 def _init_working_dir(
-    source,
-    dest,
-    rebase,
-    user_auth,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+    github_app_provider: GithubAppProvider,
     git_username,
     git_email,
 ):
@@ -408,32 +380,21 @@ def _init_working_dir(
         config.set_value("credential", "username", "x-access-token")
         config.set_value("credential", "useHttpPath", "true")
 
-        if not user_auth:
-            for repo, credentials in [
-                (dest.url, app_credentials),
-                (rebase.url, cloner_credentials),
-            ]:
-                config.set_value(
-                    f'credential "{repo}"',
-                    "helper",
-                    f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
-                )
-        else:
-            for repo, credentials in [
-                (dest.url, user_credentials),
-                (rebase.url, user_credentials),
-            ]:
-                config.set_value(
-                    f'credential "{repo}"',
-                    "helper",
-                    f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
-                )
+        for repo, credentials in [
+            (dest.url, github_app_provider.get_app_token()),
+            (rebase.url, github_app_provider.get_cloner_token()),
+        ]:
+            config.set_value(
+                f'credential "{repo}"',
+                "helper",
+                f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
+            )
 
-        if git_email != "":
-            config.set_value("user", "email", git_email)
-        if git_username != "":
-            config.set_value("user", "name", git_username)
-        config.set_value("merge", "renameLimit", 999999)
+            if git_email != "":
+                config.set_value("user", "email", git_email)
+            if git_username != "":
+                config.set_value("user", "name", git_username)
+            config.set_value("merge", "renameLimit", 999999)
 
     logging.info("Fetching %s from dest", dest.branch)
     gitwd.remotes.dest.fetch(dest.branch)
@@ -466,17 +427,13 @@ def _init_working_dir(
 
 
 def run(
-    source,
-    dest,
-    rebase,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
     working_dir,
     git_username,
     git_email,
-    user_token,
-    gh_app_id,
-    gh_app_key,
-    gh_cloner_id,
-    gh_cloner_key,
+    github_app_provider: GithubAppProvider,
     slack_webhook,
     tag_policy,
     bot_emails,
@@ -485,40 +442,8 @@ def run(
     dry_run=False,
 ):
     """Run Rebase Bot."""
-    # We want to avoid writing app credentials to disk. We write them to
-    # files in /dev/shm/credentials and configure git to read them from
-    # there as required.
-    # This isn't perfect because /dev/shm can still be swapped, but this
-    # whole executable can be swapped, so it's no worse than that.
-    if os.path.exists(CREDENTIALS_DIR) and os.path.isdir(CREDENTIALS_DIR):
-        shutil.rmtree(CREDENTIALS_DIR)
-
-    os.mkdir(CREDENTIALS_DIR)
-
-    user_auth = user_token != ""
-
-    if user_auth:
-        gh_app = _github_user_login(user_token)
-        gh_cloner_app = _github_user_login(user_token)
-
-        with open(user_credentials, "w", encoding='utf-8') as user_credentials_file:
-            user_credentials_file.write(user_token)
-    else:
-        # App credentials for accessing the destination and opening a PR
-        gh_app = _github_app_login(gh_app_id, gh_app_key)
-        gh_app = _github_login_for_repo(
-            gh_app, dest.ns, dest.name, gh_app_id, gh_app_key)
-
-        # App credentials for writing to the rebase repo
-        gh_cloner_app = _github_app_login(gh_cloner_id, gh_cloner_key)
-        gh_cloner_app = _github_login_for_repo(
-            gh_cloner_app, rebase.ns, rebase.name, gh_cloner_id, gh_cloner_key
-        )
-
-        with open(app_credentials, "w", encoding='utf-8') as app_credentials_file:
-            app_credentials_file.write(gh_app.session.auth.token)
-        with open(cloner_credentials, "w", encoding='utf-8') as cloner_credentials_file:
-            cloner_credentials_file.write(gh_cloner_app.session.auth.token)
+    gh_app = github_app_provider.github_app
+    gh_cloner_app = github_app_provider.github_cloner_app
 
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)
@@ -546,7 +471,7 @@ def run(
             source,
             dest,
             rebase,
-            user_auth,
+            github_app_provider,
             git_username,
             git_email
         )

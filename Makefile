@@ -4,18 +4,16 @@ PYTHON=python3
 deps:
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -r requirements-hacking.txt
-	$(PYTHON) -m pip install -r requirements.txt
 
 .PHONY: unittests
 unittests:
-	$(PYTHON) -c 'import unittest; \
-		      suite=unittest.TestLoader().discover("./rebasebot"); \
-		      unittest.TextTestRunner().run(suite)'
+	hack/tests.sh
 
 .PHONY: lint
 lint:
-	$(PYTHON) -m flake8 --max-line-length=99 rebasebot
-	$(PYTHON) -m pylint rebasebot
+	$(PYTHON) -m flake8 --max-line-length=120 rebasebot tests
+	$(PYTHON) -m pylint rebasebot tests
+	$(PYTHON) -m mypy rebasebot tests --no-strict-optional --ignore-missing-imports
 
 .PHONY: venv
 venv:

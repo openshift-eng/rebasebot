@@ -17,14 +17,13 @@
 """This module parses CLI arguments for the Rebase Bot."""
 
 import argparse
-from collections import namedtuple
 import re
 import sys
+from urllib.parse import urlparse
+from typing import Optional
 
 from rebasebot import bot
-
-
-GitHubBranch = namedtuple("GitHubBranch", ["url", "ns", "name", "branch"])
+from rebasebot.github import GithubAppProvider, GitHubBranch
 
 
 class GitHubBranchAction(argparse.Action):
@@ -38,6 +37,9 @@ class GitHubBranchAction(argparse.Action):
     GITHUBBRANCH = re.compile("^(?P<ns>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
 
     def __call__(self, parser, namespace, values, option_string=None):
+        url = urlparse(values)
+        if url.scheme and url.netloc != "github.com":
+            parser.error("Only GitHub urls are supported right now")
         # For backward compatibility we need to ensure that the prefix was removed
         values = values.removeprefix("https://github.com/")
 
@@ -62,9 +64,7 @@ class GitHubBranchAction(argparse.Action):
 
 # parse_cli_arguments parses command line arguments using argparse and returns
 # an object representing the populated namespace, and a list of errors
-#
-# testing_args should be left empty, except for during testing
-def _parse_cli_arguments(testing_args=None):
+def _parse_cli_arguments():
     _form_text = (
         "in the form <user or organisation>/<repo>:<branch>, "
         "e.g. kubernetes/cloud-provider-openstack:master"
@@ -198,32 +198,52 @@ def _parse_cli_arguments(testing_args=None):
         help="List of commit sha hashes that will be excluded from rebase.",
     )
 
-    if testing_args is not None:
-        args = parser.parse_args(testing_args)
-    else:
-        args = parser.parse_args()
+    return parser.parse_args()
 
-    return args
+
+def _get_github_app_wrapper(
+        gh_app_id: Optional[int],
+        gh_app_key_path: Optional[str],
+        dest_branch: Optional[GitHubBranch],
+        gh_cloner_id: Optional[int],
+        gh_cloner_key_path: Optional[str],
+        rebase_branch: Optional[GitHubBranch],
+        gh_user_token_path: Optional[str],
+) -> GithubAppProvider:
+    if gh_user_token_path:
+        with open(gh_user_token_path, "r", encoding='utf-8') as token_file:
+            gh_user_token = token_file.read().strip().encode().decode('utf-8')
+        return GithubAppProvider(
+            user_auth=True, user_token=gh_user_token,
+        )
+
+    if all((gh_app_id, gh_app_key_path, gh_cloner_id, gh_cloner_key_path)):
+        with open(gh_app_key_path, "r", encoding='utf-8') as app_key_file:
+            app_key = app_key_file.read().strip().encode()
+        with open(gh_cloner_key_path, "r", encoding='utf-8') as cloner_key_file:
+            cloner_key = cloner_key_file.read().strip().encode()
+        return GithubAppProvider(
+            app_id=gh_app_id, app_key=app_key, dest_branch=dest_branch,
+            cloner_id=gh_cloner_id, cloner_key=cloner_key, rebase_branch=rebase_branch
+        )
+
+    print(
+        "'github-user-token' or 'github-app-key' along with 'github-cloner-key' "
+        "should be provided",
+        file=sys.stderr
+    )
+    sys.exit(2)
 
 
 def main():
     """Rebase Bot entry point function."""
     args = _parse_cli_arguments()
 
-    gh_app_key = ""
-    if args.github_app_key is not None:
-        with open(args.github_app_key, "r", encoding='utf-8') as app_key_file:
-            gh_app_key = app_key_file.read().strip().encode()
-
-    gh_cloner_key = ""
-    if args.github_cloner_key is not None:
-        with open(args.github_cloner_key, "r", encoding='utf-8') as app_key_file:
-            gh_cloner_key = app_key_file.read().strip().encode()
-
-    gh_user_token = ""
-    if args.github_user_token is not None:
-        with open(args.github_user_token, "r", encoding='utf-8') as app_key_file:
-            gh_user_token = app_key_file.read().strip().encode().decode('utf-8')
+    github_app_wrapper = _get_github_app_wrapper(
+        args.github_app_id, args.github_app_key, args.dest,
+        args.github_cloner_id, args.github_cloner_key, args.rebase,
+        args.github_user_token
+    )
 
     slack_webhook = None
     if args.slack_webhook is not None:
@@ -231,21 +251,17 @@ def main():
             slack_webhook = app_key_file.read().strip()
 
     success = bot.run(
-        args.source,
-        args.dest,
-        args.rebase,
-        args.working_dir,
-        args.git_username,
-        args.git_email,
-        gh_user_token,
-        args.github_app_id,
-        gh_app_key,
-        args.github_cloner_id,
-        gh_cloner_key,
-        slack_webhook,
-        args.tag_policy,
-        args.bot_emails,
-        args.exclude_commits,
+        source=args.source,
+        dest=args.dest,
+        rebase=args.rebase,
+        working_dir=args.working_dir,
+        git_username=args.git_username,
+        git_email=args.git_email,
+        github_app_provider=github_app_wrapper,
+        slack_webhook=slack_webhook,
+        tag_policy=args.tag_policy,
+        bot_emails=args.bot_emails,
+        exclude_commits=args.exclude_commits,
         update_go_modules=args.update_go_modules,
         dry_run=args.dry_run,
     )
