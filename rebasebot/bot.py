@@ -310,14 +310,9 @@ def _resolve_rebase_conflicts(gitwd):
         return _resolve_rebase_conflicts(gitwd)
 
 
-def _is_push_required(gitwd, dest: GitHubBranch, source: GitHubBranch, rebase, prs_manual_rebase):
+def _is_push_required(gitwd, dest: GitHubBranch, source: GitHubBranch, rebase: GitHubBranch):
     # Check if the source head is already in dest
     if not _needs_rebase(gitwd, source, dest):
-        return False
-
-    # If there is atleast one PR on the rebase branch
-    # with label rebase/manual. We don't want to rebase.
-    if len(prs_manual_rebase) > 1:
         return False
 
     # Check if there is nothing to update in the open rebase PR.
@@ -330,12 +325,10 @@ def _is_push_required(gitwd, dest: GitHubBranch, source: GitHubBranch, rebase, p
     return True
 
 
-def _is_pr_available(dest_repo, rebase: GitHubBranch, prs_manual_rebase):
+def _is_pr_available(dest_repo, rebase: GitHubBranch):
     logging.info("Checking for existing pull request")
     try:
         gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
-        if gh_pr in prs_manual_rebase:
-            return "", False
         return gh_pr.html_url, True
     except StopIteration:
         pass
@@ -433,6 +426,15 @@ def _init_working_dir(
     return gitwd
 
 
+def _manual_rebase_in_repo(rebase_repo) -> bool:
+    prs = rebase_repo.pull_requests()
+    for pull_req in prs:
+        for label in pull_req.labels:
+            if label['name'] == 'rebase/manual':
+                return True
+    return False
+
+
 def run(
     source: GitHubBranch,
     dest: GitHubBranch,
@@ -452,9 +454,6 @@ def run(
     gh_app = github_app_provider.github_app
     gh_cloner_app = github_app_provider.github_cloner_app
 
-    # list with all the pr's having the label rebase/manual
-    prs_with_manual_rebase_label = []
-
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)
         logging.info("Destination repository is %s", dest_repo.clone_url)
@@ -463,15 +462,14 @@ def run(
         source_repo = gh_app.repository(source.ns, source.name)
         logging.info("source repository is %s", source_repo.clone_url)
 
-        prs = rebase_repo.pull_requests()
-        for pull_req in prs:
-            for label in pull_req.labels:
-                if label['name'] == 'rebase/manual':
-                    prs_with_manual_rebase_label.append(pull_req)
-                    _message_slack(
-                        slack_webhook,
-                        f"The PR {pull_req.title} has a rebase/manual label"
-                    )
+        has_manual_rebase_label = _manual_rebase_in_repo(rebase_repo)
+        if has_manual_rebase_label:
+            _message_slack(
+                    slack_webhook,
+                    "A Pull Request has a rebase/manual label"
+            )
+            return True
+
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
@@ -538,8 +536,8 @@ def run(
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
-    push_required = _is_push_required(gitwd, dest, source, rebase, prs_with_manual_rebase_label)
-    pr_url, pr_available = _is_pr_available(dest_repo, rebase, prs_with_manual_rebase_label)
+    push_required = _is_push_required(gitwd, dest, source, rebase)
+    pr_url, pr_available = _is_pr_available(dest_repo, rebase)
 
     try:
         if push_required:
