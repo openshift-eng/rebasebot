@@ -426,8 +426,8 @@ def _init_working_dir(
     return gitwd
 
 
-def _manual_rebase_in_repo(rebase_repo) -> bool:
-    prs = rebase_repo.pull_requests()
+def _manual_rebase_in_repo(repo: github3.github.repo.Repository) -> bool:
+    prs = repo.pull_requests()
     for pull_req in prs:
         for label in pull_req.labels:
             if label['name'] == 'rebase/manual':
@@ -462,7 +462,7 @@ def run(
         source_repo = gh_app.repository(source.ns, source.name)
         logging.info("source repository is %s", source_repo.clone_url)
 
-        has_manual_rebase_label = _manual_rebase_in_repo(rebase_repo)
+        has_manual_rebase_label = _manual_rebase_in_repo(dest_repo)
         if has_manual_rebase_label:
             _message_slack(
                     slack_webhook,
