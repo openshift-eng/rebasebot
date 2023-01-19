@@ -387,7 +387,7 @@ def _init_working_dir(
             config.set_value(
                 f'credential "{repo}"',
                 "helper",
-                f'"!f() {{ echo "password=$(cat {credentials})"; }}; f"',
+                f'"!f() {{ echo "password={credentials}"; }}; f"',
             )
 
             if git_email != "":
