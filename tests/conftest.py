@@ -105,6 +105,6 @@ def init_test_repositories() -> YieldFixture[Tuple[GitHubBranch, GitHubBranch, G
 
 
 @pytest.fixture
-def fake_github_provider() -> YieldFixture[mock.MagicMock]:
+def fake_github_provider() -> mock.MagicMock:
     provider = mock.MagicMock(spec=GithubAppProvider)
     return provider

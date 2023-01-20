@@ -54,8 +54,8 @@ class TestBotInternalHelpers:
         assert len(commits) == 1
         assert commits[0].message == "Upstream commit\n"
 
-        working_repo_dir_content = [i.name for i in os.scandir(working_repo_path)]
-        assert working_repo_dir_content == ['test.go', '.git']
+        working_repo_dir_content = {i.name for i in os.scandir(working_repo_path)}
+        assert working_repo_dir_content == {'test.go', '.git'}
 
     def test_needs_rebase(self, working_repo_context):
         r_ctx = working_repo_context
