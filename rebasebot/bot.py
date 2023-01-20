@@ -363,8 +363,9 @@ def _init_working_dir(
     github_app_provider: GithubAppProvider,
     git_username,
     git_email,
-):
-    gitwd = git.Repo.init(path=".")
+    workdir: str = "."
+) -> git.Repo:
+    gitwd = git.Repo.init(path=workdir)
 
     for remote, url in [
         ("source", source.url),
