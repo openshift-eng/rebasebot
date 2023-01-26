@@ -137,6 +137,20 @@ If for some reason you don't want to include some commits in your rebase PR, you
 ...
 ```
 
+## Manual Override
+
+Sometimes on repositories where the bot is configured it might be necessary to
+selectively have the bot skip making a new rebase pull request or updating an
+existing one.
+
+In these cases you may add the label `rebase/manual` to the pull request created
+by the bot and this will make it stop creating/updating rebase pull requests on
+that repository indefinitely, until the label is removed.
+
+On the following runs, if the Slack integration is enabled, the bot will
+broadcast a message that it has found the `rebase/manual` label and thus
+ignored the repository.
+
 ## Examples of usage
 
 Example 1. Sync kubernetes/cloud-provider-aws with openshift/cloud-provider-aws using applications credentials. 
