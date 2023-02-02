@@ -345,8 +345,10 @@ def _create_pr(
 ):
     logging.info("Creating a pull request")
 
+    source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}")
+
     pull_request = gh_app.repository(dest.ns, dest.name).create_pull(
-        title=f"Merge {source.url}:{source.branch} into {dest.branch}",
+        title=f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}",
         head=f"{rebase.ns}:{rebase.branch}",
         base=dest.branch,
         maintainer_can_modify=False,
