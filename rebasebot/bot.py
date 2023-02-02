@@ -16,6 +16,7 @@
 """This module implements functions for the Rebase Bot."""
 
 from collections import defaultdict
+from typing import Optional
 import logging
 import os
 import subprocess
@@ -341,11 +342,13 @@ def _create_pr(
         gh_app: github3.GitHub,
         dest: GitHubBranch,
         source: GitHubBranch,
-        rebase: GitHubBranch
+        rebase: GitHubBranch,
+        workdir: str
 ):
-    logging.info("Creating a pull request")
-
+    gitwd = git.Repo.init(path=workdir)
     source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}")
+
+    logging.info("Creating a pull request")
 
     pull_request = gh_app.repository(dest.ns, dest.name).create_pull(
         title=f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}",
@@ -430,13 +433,13 @@ def _init_working_dir(
     return gitwd
 
 
-def _manual_rebase_in_repo(repo: github3.github.repo.Repository):
+def _manual_rebase_pr_in_repo(repo: github3.github.repo.Repository) -> Optional[github3.pulls.PullRequest]:
     prs = repo.pull_requests()
     for pull_req in prs:
         for label in pull_req.labels:
             if label['name'] == 'rebase/manual':
-                return True, pull_req
-    return False, None
+                return pull_req
+    return None
 
 
 def run(
@@ -466,12 +469,14 @@ def run(
         source_repo = gh_app.repository(source.ns, source.name)
         logging.info("source repository is %s", source_repo.clone_url)
 
-        has_manual_rebase_label, pr = _manual_rebase_in_repo(dest_repo)
-        if has_manual_rebase_label:
-            logging.info(f"Repo {dest_repo.clone_url} has a PR {pr.html_url} with 'rebase/manual' label, aborting rebase")
+        pull_req = _manual_rebase_pr_in_repo(dest_repo)
+        if pull_req is not None:
+            logging.info(
+                f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
+            )
             _message_slack(
                     slack_webhook,
-                    "Repo {dest_repo.clone_url} has a PR {pr.html_url} with 'rebase/manual' label, aborting rebase"
+                    f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
             )
             return True
 
@@ -563,7 +568,7 @@ def run(
 
     try:
         if push_required and not pr_available:
-            pr_url = _create_pr(gh_app, dest, source, rebase)
+            pr_url = _create_pr(gh_app, dest, source, rebase, working_dir)
             logging.info("Rebase PR is %s", pr_url)
     except Exception as ex:
         logging.exception(ex)
