@@ -97,7 +97,7 @@ def _needs_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch):
         for branch in branches_with_commit.splitlines():
             # Must strip the branch name as git branch adds an indent
             if branch.lstrip() == dest_branch:
-                logging.info("Dest branch already contains all latest changes.")
+                logging.info("Dest branch already contains all the latest changes.")
                 return False
     except git.GitCommandError as ex:
         # if the source head hasn't been found in the dest repo git returns an error.
@@ -333,6 +333,7 @@ def _is_pr_available(dest_repo, rebase: GitHubBranch):
     except StopIteration:
         pass
 
+    logging.info("No existing pull request")
     return "", False
 
 
@@ -575,22 +576,26 @@ def run(
         if not pr_available:
             # Case 1: either source or dest repos were updated and there is no PR yet.
             # We create a new PR then.
+            logging.info(f"I created a new rebase PR: {pr_url}")
             _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
         else:
             # Case 2: repos were updated recently, but we already have an open PR.
             # We updated the exiting PR.
+            logging.info(f"I updated existing rebase PR: {pr_url}")
             _message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
     else:
         if pr_url != "":
             # Case 3: we created a PR, but no changes were done to the repos after that.
             # Just infrom that the PR is in a good shape.
-            _message_slack(slack_webhook, f"PR {pr_url} already contains all latest changes.")
+            logging.info(f"PR {pr_url} already contains all the latest changes.")
+            _message_slack(slack_webhook, f"PR {pr_url} already contains all the latest changes.")
         else:
             # Case 4: source and dest repos are the same (git diff is empty), and there is no PR.
             # Just inform that there is nothing to update in the dest repository.
+            logging.info(f"Destination repo {dest.url} already contains all the latest changes.")
             _message_slack(
                 slack_webhook,
-                f"Destination repo {dest.url} already contains all latest changes."
+                f"Destination repo {dest.url} already contains all the latest changes."
             )
 
     return True
