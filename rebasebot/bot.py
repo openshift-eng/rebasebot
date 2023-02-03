@@ -98,7 +98,7 @@ def _needs_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch):
         for branch in branches_with_commit.splitlines():
             # Must strip the branch name as git branch adds an indent
             if branch.lstrip() == dest_branch:
-                logging.info("Dest branch already contains all the latest changes.")
+                logging.info("Dest branch already contains the latest changes.")
                 return False
     except git.GitCommandError as ex:
         # if the source head hasn't been found in the dest repo git returns an error.
@@ -334,7 +334,7 @@ def _is_pr_available(dest_repo, rebase: GitHubBranch):
     except StopIteration:
         pass
 
-    logging.info("No existing pull request")
+    logging.info("No existing pull request found")
     return "", False
 
 
