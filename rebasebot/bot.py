@@ -343,10 +343,9 @@ def _create_pr(
         dest: GitHubBranch,
         source: GitHubBranch,
         rebase: GitHubBranch,
-        workdir: str
+        gitwd: git.Repo
 ):
-    gitwd = git.Repo.init(path=workdir)
-    source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}")
+    source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
 
     logging.info("Creating a pull request")
 
