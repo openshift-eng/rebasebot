@@ -566,9 +566,8 @@ def run(
         return False
 
     try:
-        if push_required and not pr_available:
-            pr_url = _create_pr(gh_app, dest, source, rebase, working_dir)
-            logging.info("Rebase PR is %s", pr_url)
+        if not pr_available:
+            pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
     except Exception as ex:
         logging.exception(ex)
 
@@ -592,12 +591,18 @@ def run(
             _message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
     else:
         if pr_url != "":
-            # Case 3: we created a PR, but no changes were done to the repos after that.
-            # Just infrom that the PR is in a good shape.
-            logging.info(f"PR {pr_url} already contains all the latest changes.")
-            _message_slack(slack_webhook, f"PR {pr_url} already contains all the latest changes.")
+            if not pr_available:
+                # Case 3: the remote branch is already up to date, but there is no PR yet.
+                # We create a new PR then.
+                logging.info(f"I created a new rebase PR: {pr_url}")
+                _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
+            else:
+                # Case 4: we created a PR, but no changes were done to the repos after that.
+                # Just infrom that the PR is in a good shape.
+                logging.info(f"PR {pr_url} already contains all the latest changes.")
+                _message_slack(slack_webhook, f"PR {pr_url} already contains all the latest changes.")
         else:
-            # Case 4: source and dest repos are the same (git diff is empty), and there is no PR.
+            # Case 5: source and dest repos are the same (git diff is empty), and there is no PR.
             # Just inform that there is nothing to update in the dest repository.
             logging.info(f"Destination repo {dest.url} already contains all the latest changes.")
             _message_slack(
