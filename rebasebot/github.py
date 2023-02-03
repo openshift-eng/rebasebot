@@ -14,6 +14,7 @@
 """Contains GitHub related helper classes."""
 
 import logging
+import builtins
 from dataclasses import dataclass
 
 from functools import cached_property
@@ -170,7 +171,7 @@ class GithubAppProvider:
                 f"{gh_branch.ns}/{gh_branch.name} does not exist"
             )
             logging.error(msg)
-            raise Exception(msg) from err
+            raise builtins.Exception(msg) from err
 
         gh_app.login_as_app_installation(credentials.app_key, credentials.app_id, install.id)
         return gh_app

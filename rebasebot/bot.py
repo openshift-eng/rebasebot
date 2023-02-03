@@ -18,6 +18,7 @@
 from collections import defaultdict
 from typing import Optional
 import logging
+import builtins
 import os
 import subprocess
 import sys
@@ -130,7 +131,7 @@ def _add_to_rebase(commit_message, source_repo, tag_policy):
         if commit_tag.isnumeric():
             return not _is_pr_merged(int(commit_tag), source_repo)
 
-        raise Exception(f"Unknown commit message tag: {commit_tag}")
+        raise builtins.Exception(f"Unknown commit message tag: {commit_tag}")
 
     # We keep untagged commits with "soft" tag policy, and discard them
     # for "strict" one.
@@ -556,7 +557,7 @@ def run(
                 force=True
             )
             if result[0].flags & git.PushInfo.ERROR != 0:
-                raise Exception(f"Error pushing to {rebase}: {result[0].summary}")
+                raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
