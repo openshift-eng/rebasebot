@@ -600,15 +600,15 @@ def run(
             else:
                 # Case 4: we created a PR, but no changes were done to the repos after that.
                 # Just infrom that the PR is in a good shape.
-                logging.info(f"PR {pr_url} already contains all the latest changes.")
-                _message_slack(slack_webhook, f"PR {pr_url} already contains all the latest changes.")
+                logging.info(f"PR {pr_url} already contains the latest changes.")
+                _message_slack(slack_webhook, f"PR {pr_url} already contains the latest changes.")
         else:
             # Case 5: source and dest repos are the same (git diff is empty), and there is no PR.
             # Just inform that there is nothing to update in the dest repository.
-            logging.info(f"Destination repo {dest.url} already contains all the latest changes.")
+            logging.info(f"Destination repo {dest.url} already contains the latest changes.")
             _message_slack(
                 slack_webhook,
-                f"Destination repo {dest.url} already contains all the latest changes."
+                f"Destination repo {dest.url} already contains the latest changes."
             )
 
     return True
