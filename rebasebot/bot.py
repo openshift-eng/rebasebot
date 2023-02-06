@@ -37,6 +37,11 @@ class RepoException(Exception):
     """
 
 
+class PullRequestUpdateException(Exception):
+    """An error signaling an issue in updating a pull request
+    """
+
+
 logging.basicConfig(
     format="%(levelname)s - %(message)s",
     stream=sys.stdout,
@@ -331,12 +336,12 @@ def _is_pr_available(dest_repo, rebase: GitHubBranch):
     logging.info("Checking for existing pull request")
     try:
         gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
-        return gh_pr.html_url, True
+        return gh_pr, True
     except StopIteration:
         pass
 
     logging.info("No existing pull request found")
-    return "", False
+    return None, False
 
 
 def _create_pr(
@@ -547,7 +552,12 @@ def run(
         return True
 
     push_required = _is_push_required(gitwd, dest, source, rebase)
-    pr_url, pr_available = _is_pr_available(dest_repo, rebase)
+    pull_req, pr_available = _is_pr_available(dest_repo, rebase)
+
+    if pull_req is not None:
+        pr_url = pull_req.html_url
+    else:
+        pr_url = ""
 
     try:
         if push_required:
@@ -558,6 +568,22 @@ def run(
             )
             if result[0].flags & git.PushInfo.ERROR != 0:
                 raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
+
+            if pr_available:
+                # the branch was rebased, but the PR already exists, update its title.
+                source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
+                title = f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
+
+                if not pull_req.update(title=title):
+                    raise PullRequestUpdateException(f"Error updating title for pull request: {pr_url}")
+
+    except PullRequestUpdateException as ex:
+        logging.exception(ex)
+        _message_slack(
+            slack_webhook,
+            f"I got an error updating the title for pull request " f"{pr_url}",
+        )
+        return False
     except Exception as ex:
         logging.exception(ex)
         _message_slack(
