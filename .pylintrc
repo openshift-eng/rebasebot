@@ -286,6 +286,11 @@ single-line-if-stmt=no
 # formatting, `new` is for `{}` formatting.
 logging-format-style=old
 
+
+# logging-fstring-interpolation checks that no fstrings are used for logging.
+# Disable it to use fstrings for logging
+disable=logging-fstring-interpolation
+
 # Logging modules to check that the string format arguments are in logging
 # function parameter format.
 logging-modules=logging
