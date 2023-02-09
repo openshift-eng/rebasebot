@@ -23,6 +23,7 @@ import builtins
 import os
 import subprocess
 import sys
+import glob
 
 import git
 import git.compat
@@ -65,27 +66,30 @@ def _message_slack(webhook_url: str, msg: str) -> None:
 def _commit_go_mod_updates(gitwd: git.Repo, source: GitHubBranch) -> None:
     logging.info("Performing go modules update")
 
-    try:
-        # Reset go.mod and go.sum to make sure they are the same as in the source
-        for filename in ["go.mod", "go.sum"]:
-            if not os.path.exists(filename):
-                continue
-            gitwd.remotes.source.repo.git.checkout(f"source/{source.branch}", filename)
+    for filepath in glob.glob('./**/go.mod', recursive=True):
+        module_base_path = os.path.dirname(filepath)
 
-        proc = subprocess.run(
-            "go mod tidy", shell=True, check=True, capture_output=True
-        )
-        logging.debug("go mod tidy output: %s", proc.stdout.decode())
-        proc = subprocess.run(
-            "go mod vendor", shell=True, check=True, capture_output=True
-        )
-        logging.debug("go mod vendor output %s:", proc.stdout.decode())
+        try:
+            # Reset go.mod and go.sum to make sure they are the same as in the source
+            for filename in ["go.mod", "go.sum"]:
+                full_path = os.path.join(module_base_path, filename)
+                if not os.path.exists(full_path):
+                    continue
+                gitwd.remotes.source.repo.git.checkout(f"source/{source.branch}", full_path)
 
-        gitwd.git.add(all=True)
-    except subprocess.CalledProcessError as err:
-        raise RepoException(
-            f"Unable to update go modules: {err}: {err.stderr.decode()}"
-        ) from err
+            proc = subprocess.run(
+                "go mod tidy", cwd=module_base_path, shell=True, check=True, capture_output=True
+            )
+            logging.debug("go mod tidy output: %s", proc.stdout.decode())
+            proc = subprocess.run(
+                "go mod vendor", cwd=module_base_path, shell=True, check=True, capture_output=True
+            )
+            logging.debug("go mod vendor output %s:", proc.stdout.decode())
+
+        except subprocess.CalledProcessError as err:
+            raise RepoException(
+                f"Unable to update go modules: {err}: {err.stderr.decode()}"
+            ) from err
 
     if gitwd.is_dirty():
         try:
