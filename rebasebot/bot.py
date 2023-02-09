@@ -164,7 +164,7 @@ def _do_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch, source_repo, tag
 
     # Find the list of commits between the merge base and the destination head
     # This should be the list of commits we are carrying on top of the UPSTREAM
-    commits = gitwd.git.log("--reverse", "--pretty=format:%H - %s - %aE", "--no-merges",
+    commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE", "--no-merges",
                             "--ancestry-path", f"{merge_base}..dest/{dest.branch}")
 
     logging.info("Identified upstream commits:\n%s", commits)
@@ -174,7 +174,7 @@ def _do_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch, source_repo, tag
     for commit in commits.splitlines():
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
-        sha, commit_message, committer_email = commit.split(" - ")
+        sha, commit_message, committer_email = commit.split(" || ", 2)
 
         if _in_excluded_commits(sha, exclude_commits):
             logging.info("Explicitly dropping commit from rebase: %s", sha)
