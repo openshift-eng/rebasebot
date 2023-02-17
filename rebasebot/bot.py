@@ -367,6 +367,15 @@ def _create_pr(
     return pull_request.html_url
 
 
+def is_ref_a_tag(gitwd, ref):
+    """Returns True if a git ref is a tag. False otherwise."""
+    try:
+        gitwd.git.show_ref("--tags", ref)
+        return True
+    except git.GitCommandError:
+        return False
+
+
 def _init_working_dir(
     source: GitHubBranch,
     dest: GitHubBranch,
@@ -410,16 +419,26 @@ def _init_working_dir(
 
     logging.info("Fetching %s from dest", dest.branch)
     gitwd.remotes.dest.fetch(dest.branch)
+
     logging.info("Fetching %s from source", source.branch)
     gitwd.remotes.source.fetch(source.branch)
 
+    logging.info("Fetching all tags from source")
+    gitwd.remotes.source.fetch(refspec='refs/tags/*:refs/tags/*')
+
+    if is_ref_a_tag(gitwd, source.branch):
+        logging.info(f"{source.branch} is a tag, but we must work with branches, creating a branch")
+        gitwd.git.branch("-f", f"source/{source.branch}", source.branch)
+        logging.info(f"source/{source.branch} branch created")
+
     # For a cherry-pick, we must start with the source branch and pick
     # the carry commits on top.
-    working_branch = f"source/{source.branch}"
-    logging.info("Checking out %s", working_branch)
+    source_ref = f"source/{source.branch}"
+    logging.info("Checking out %s", source_ref)
 
     logging.info(
         "Checking for existing rebase branch %s in %s", rebase.branch, rebase.url)
+
     rebase_ref = gitwd.git.ls_remote("rebase", rebase.branch, heads=True)
     if len(rebase_ref) > 0:
         logging.info("Fetching existing rebase branch")
@@ -427,7 +446,7 @@ def _init_working_dir(
 
     # Reset the existing rebase branch to match the source branch
     # or create a new rebase branch based on the source branch.
-    head_commit = gitwd.git.rev_parse(f"source/{source.branch}")
+    head_commit = gitwd.git.rev_parse(source_ref)
     if "rebase" in gitwd.heads:
         gitwd.heads.rebase.set_commit(head_commit)
     else:
