@@ -1,5 +1,5 @@
 #!/bin/bash
-#    Copyright 2022 Red Hat, Inc.
+#    Copyright 2023 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -22,7 +22,7 @@ REPO_ROOT=$(dirname "${BASH_SOURCE}")/..
 OPENSHIFT_CI=${OPENSHIFT_CI:-""}
 ARTIFACT_DIR=${ARTIFACT_DIR:-""}
 
-PYTEST_ARGS=${PYTEST_ARGS:-"--cov=rebasebot"}
+PYTEST_ARGS=${PYTEST_ARGS:-"-vv --cov=rebasebot"}
 
 
 if [ "$OPENSHIFT_CI" == "true" ] && [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DIR" ]; then # detect ci environment there
@@ -33,9 +33,8 @@ if [ "$OPENSHIFT_CI" == "true" ] && [ -n "$ARTIFACT_DIR" ] && [ -d "$ARTIFACT_DI
   # point gopath to /tmp since go mod and go tidy is using during tests
   export GOPATH=/tmp/temp_gopath
 
-  PYTEST_ARGS="${PYTEST_ARGS} --junitxml=${ARTIFACT_DIR}/junit_rebasebot_tests.xml"
+  PYTEST_ARGS="${PYTEST_ARGS} --cov-report=term --cov-report=html:${ARTIFACT_DIR}/cov-report --junitxml=${ARTIFACT_DIR}/junit_rebasebot_tests.xml"
 fi
 
 set -x
 pytest $PYTEST_ARGS "$REPO_ROOT"
-
