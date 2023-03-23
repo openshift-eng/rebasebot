@@ -276,7 +276,8 @@ def _resolve_conflict(gitwd):
     # DU - Deleted/Modified
     # AU - Renamed/Deleted
     # UA - Deleted/Renamed
-    allowed_conflict_prefixes = ["UD ", "DU ", "AU ", "UA "]
+    # DD - Deleted/Deleted
+    allowed_conflict_prefixes = ["UD ", "DU ", "AU ", "UA ", "DD "]
 
     # Non-conflict status prefixes that we should ignore
     allowed_status_prefixes = ["M  ", "D  ", "A  "]
