@@ -16,10 +16,8 @@
 """This module implements functions for the Rebase Bot."""
 
 from typing import Optional, Tuple
-from github3.repos.repo import Repository
-from github3.pulls import ShortPullRequest
-
 from collections import defaultdict
+
 import logging
 import builtins
 import os
@@ -30,6 +28,8 @@ import git
 import git.compat
 import github3
 import requests
+from github3.repos.repo import Repository
+from github3.pulls import ShortPullRequest
 
 from rebasebot.github import GithubAppProvider, GitHubBranch
 
@@ -473,6 +473,7 @@ def _manual_rebase_pr_in_repo(repo: github3.github.repo.Repository) -> Optional[
                 return pull_req
     return None
 
+
 def _push_rebase_branch(gitwd, rebase) -> bool:
     result = gitwd.remotes.rebase.push(
         refspec=f"HEAD:{rebase.branch}",
@@ -483,6 +484,7 @@ def _push_rebase_branch(gitwd, rebase) -> bool:
         raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
 
     return True
+
 
 def _update_pr_title(gitwd, pull_req: ShortPullRequest, source, dest) -> None:
     source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
@@ -636,7 +638,7 @@ def run(
     if push_required:
         logging.info("Existing rebase branch needs to be updated.")
         try:
-            branch_pushed = _push_rebase_branch(gitwd, slack_webhook, rebase)
+            branch_pushed = _push_rebase_branch(gitwd, rebase)
         except Exception as ex:
             logging.exception(ex)
             _message_slack(
@@ -648,12 +650,12 @@ def run(
         if branch_pushed and pr_available:
             # the branch was rebased, but the PR already exists, update its title.
             try:
-                _update_pr_title(slack_webhook, gitwd, pull_req, source, dest)
+                _update_pr_title(gitwd, pull_req, source, dest)
             except Exception as ex:
-                logging.error(f"Error updating title for pull request: {pull_req.html_url}")
+                logging.exception(ex)
                 _message_slack(
                     slack_webhook,
-                    f"I got an error updating the title for pull request: {pull_req.html_url}",
+                    ex,
                 )
                 return False
 

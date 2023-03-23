@@ -71,27 +71,27 @@ class TestCliArgParser:
     @pytest.mark.parametrize(
         'github_ref,expected',
         (
-                (
-                        "https://github.com/kubernetes/autoscaler:master",
-                        GitHubBranch(
-                            url="https://github.com/kubernetes/autoscaler", ns="kubernetes",
-                            name="autoscaler", branch="master"
-                        )
-                ),
-                (
-                        "kubernetes/autoscaler:master",
-                        GitHubBranch(
-                            url="https://github.com/kubernetes/autoscaler", ns="kubernetes",
-                            name="autoscaler", branch="master"
-                        )
-                ),
-                (
-                        "foo/bar:baz",
-                        GitHubBranch(
-                            url="https://github.com/foo/bar", ns="foo",
-                            name="bar", branch="baz"
-                        )
-                ),
+            (
+                "https://github.com/kubernetes/autoscaler:master",
+                GitHubBranch(
+                    url="https://github.com/kubernetes/autoscaler", ns="kubernetes",
+                    name="autoscaler", branch="master"
+                )
+            ),
+            (
+                "kubernetes/autoscaler:master",
+                GitHubBranch(
+                    url="https://github.com/kubernetes/autoscaler", ns="kubernetes",
+                    name="autoscaler", branch="master"
+                )
+            ),
+            (
+                "foo/bar:baz",
+                GitHubBranch(
+                    url="https://github.com/foo/bar", ns="foo",
+                    name="bar", branch="baz"
+                )
+            ),
         )
     )
     @pytest.mark.parametrize("arg", ["source", "dest", "rebase"])
@@ -158,9 +158,11 @@ class TestCliArgParser:
         assert exit_exc.value.code == 0  # program finished successfully
 
         assert mocked_run.call_count == 1
-        passed_gh_app_provider = mocked_run.call_args.kwargs.get('github_app_provider')
+        passed_gh_app_provider = mocked_run.call_args.kwargs.get(
+            'github_app_provider')
         assert passed_gh_app_provider.user_auth is True
-        assert passed_gh_app_provider.user_token == 'some cool content'  # from tempfile, see fixture
+        # from tempfile, see fixture
+        assert passed_gh_app_provider.user_token == 'some cool content'
         assert passed_gh_app_provider._app_credentials is None
         assert passed_gh_app_provider._cloner_app_credentials is None
 
@@ -178,7 +180,8 @@ class TestCliArgParser:
         assert exit_exc.value.code == 0  # program finished successfully
 
         assert mocked_run.call_count == 1
-        passed_gh_app_provider = mocked_run.call_args.kwargs.get('github_app_provider')
+        passed_gh_app_provider = mocked_run.call_args.kwargs.get(
+            'github_app_provider')
         assert passed_gh_app_provider.user_auth is False
         assert passed_gh_app_provider.user_token is None  # from tempfile, see fixture
         assert passed_gh_app_provider._app_credentials.app_id == 137509  # default value
