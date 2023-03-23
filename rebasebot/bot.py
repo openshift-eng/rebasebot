@@ -15,8 +15,11 @@
 #    under the License.
 """This module implements functions for the Rebase Bot."""
 
+from typing import Optional, Tuple
+from github3.repos.repo import Repository
+from github3.pulls import ShortPullRequest
+
 from collections import defaultdict
-from typing import Optional
 import logging
 import builtins
 import os
@@ -337,7 +340,7 @@ def _is_push_required(gitwd, dest: GitHubBranch, source: GitHubBranch, rebase: G
     return True
 
 
-def _is_pr_available(dest_repo, rebase: GitHubBranch):
+def _is_pr_available(dest_repo: Repository, rebase: GitHubBranch) -> Tuple[ShortPullRequest, bool]:
     logging.info("Checking for existing pull request")
     try:
         gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
@@ -470,6 +473,56 @@ def _manual_rebase_pr_in_repo(repo: github3.github.repo.Repository) -> Optional[
                 return pull_req
     return None
 
+def _push_rebase_branch(gitwd, rebase) -> bool:
+    result = gitwd.remotes.rebase.push(
+        refspec=f"HEAD:{rebase.branch}",
+        force=True
+    )
+
+    if result[0].flags & git.PushInfo.ERROR != 0:
+        raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
+
+    return True
+
+def _update_pr_title(gitwd, pull_req: ShortPullRequest, source, dest) -> None:
+    source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
+    title = f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
+
+    if not pull_req.update(title=title):
+        raise builtins.Exception(f"Error updating title for pull request: {pull_req.html_url}")
+
+
+def _report_result(push_required: bool, pr_available: bool, pr_url: str, dest_url: str, slack_webhook: str) -> None:
+    """Reports the result of sucessful rebasebot run to slack and log."""
+    message = None
+    if push_required:
+        if not pr_available:
+            # Case 1: either source or dest repos were updated and there is no PR yet.
+            # We create a new PR then.
+            message = f"I created a new rebase PR: {pr_url}"
+        else:
+            # Case 2: repos were updated recently, but we already have an open PR.
+            # We updated the exiting PR.
+            message = f"I updated existing rebase PR: {pr_url}"
+    else:
+        if pr_url != "":
+            if not pr_available:
+                # Case 3: the remote branch is already up to date, but there is no PR yet.
+                # We create a new PR then.
+                message = f"I created a new rebase PR: {pr_url}"
+            else:
+                # Case 4: we created a PR, but no changes were done to the repos after that.
+                # Just infrom that the PR is in a good shape.
+                message = f"PR {pr_url} already contains the latest changes"
+        else:
+            # Case 5: source and dest repos are the same (git diff is empty), and there is no PR.
+            # Just inform that there is nothing to update in the dest repository.
+            message = f"Destination repo {dest_url} already contains the latest changes"
+
+    if message is not None:
+        logging.info(message)
+        _message_slack(slack_webhook, message)
+
 
 def run(
     source: GitHubBranch,
@@ -577,44 +630,32 @@ def run(
 
     push_required = _is_push_required(gitwd, dest, source, rebase)
     pull_req, pr_available = _is_pr_available(dest_repo, rebase)
+    pr_url = pull_req.html_url if pull_req is not None else ""
 
-    if pull_req is not None:
-        pr_url = pull_req.html_url
-    else:
-        pr_url = ""
-
-    try:
-        if push_required:
-            logging.info("Existing rebase branch needs to be updated.")
-            result = gitwd.remotes.rebase.push(
-                refspec=f"HEAD:{rebase.branch}",
-                force=True
+    # Push the rebase branch to the remote repository.
+    if push_required:
+        logging.info("Existing rebase branch needs to be updated.")
+        try:
+            branch_pushed = _push_rebase_branch(gitwd, slack_webhook, rebase)
+        except Exception as ex:
+            logging.exception(ex)
+            _message_slack(
+                slack_webhook,
+                f"I got an error pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}",
             )
-            if result[0].flags & git.PushInfo.ERROR != 0:
-                raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
+            return False
 
-            if pr_available:
-                # the branch was rebased, but the PR already exists, update its title.
-                source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
-                title = f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
-
-                if not pull_req.update(title=title):
-                    raise PullRequestUpdateException(f"Error updating title for pull request: {pr_url}")
-
-    except PullRequestUpdateException as ex:
-        logging.exception(ex)
-        _message_slack(
-            slack_webhook,
-            f"I got an error updating the title for pull request " f"{pr_url}",
-        )
-        return False
-    except Exception as ex:
-        logging.exception(ex)
-        _message_slack(
-            slack_webhook,
-            f"I got an error pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}",
-        )
-        return False
+        if branch_pushed and pr_available:
+            # the branch was rebased, but the PR already exists, update its title.
+            try:
+                _update_pr_title(slack_webhook, gitwd, pull_req, source, dest)
+            except Exception as ex:
+                logging.error(f"Error updating title for pull request: {pull_req.html_url}")
+                _message_slack(
+                    slack_webhook,
+                    f"I got an error updating the title for pull request: {pull_req.html_url}",
+                )
+                return False
 
     try:
         if not pr_available:
@@ -629,36 +670,5 @@ def run(
 
         return False
 
-    if push_required:
-        if not pr_available:
-            # Case 1: either source or dest repos were updated and there is no PR yet.
-            # We create a new PR then.
-            logging.info(f"I created a new rebase PR: {pr_url}")
-            _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
-        else:
-            # Case 2: repos were updated recently, but we already have an open PR.
-            # We updated the exiting PR.
-            logging.info(f"I updated existing rebase PR: {pr_url}")
-            _message_slack(slack_webhook, f"I updated existing rebase PR: {pr_url}")
-    else:
-        if pr_url != "":
-            if not pr_available:
-                # Case 3: the remote branch is already up to date, but there is no PR yet.
-                # We create a new PR then.
-                logging.info(f"I created a new rebase PR: {pr_url}")
-                _message_slack(slack_webhook, f"I created a new rebase PR: {pr_url}")
-            else:
-                # Case 4: we created a PR, but no changes were done to the repos after that.
-                # Just infrom that the PR is in a good shape.
-                logging.info(f"PR {pr_url} already contains the latest changes.")
-                _message_slack(slack_webhook, f"PR {pr_url} already contains the latest changes.")
-        else:
-            # Case 5: source and dest repos are the same (git diff is empty), and there is no PR.
-            # Just inform that there is nothing to update in the dest repository.
-            logging.info(f"Destination repo {dest.url} already contains the latest changes.")
-            _message_slack(
-                slack_webhook,
-                f"Destination repo {dest.url} already contains the latest changes."
-            )
-
+    _report_result(push_required, pr_available, pr_url, dest.url, slack_webhook)
     return True
