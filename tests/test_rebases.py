@@ -1,3 +1,4 @@
+from __future__ import annotations
 from dataclasses import dataclass
 import os
 
@@ -14,7 +15,7 @@ from rebasebot.bot import (
     run as rebasebot_run
 )
 
-from .conftest import commit_file_with_content
+from .conftest import CommitBuilder
 
 
 @dataclass
@@ -62,11 +63,11 @@ class TestBotInternalHelpers:
         gitwd, source, dest = r_ctx.working_repo, r_ctx.source, r_ctx.dest
         assert not _needs_rebase(gitwd, source, dest)
 
-        commit_file_with_content("foo", "bar.txt", "UPSTREAM: <carry>: carry patch", dest)
+        CommitBuilder(dest).add_file("bar.txt", "foo").commit("UPSTREAM: <carry>: carry patch")
         working_repo_context.fetch_remotes()
         assert not _needs_rebase(gitwd, source, dest)
 
-        commit_file_with_content("fiz", "baz.txt", "some other upstream commit", source)
+        CommitBuilder(source).add_file("baz.txt", "fiz").commit("some other upstream commit")
         working_repo_context.fetch_remotes()
         assert _needs_rebase(gitwd, source, dest)
 
@@ -88,7 +89,7 @@ class TestRebases:
 
     def test_simple_dry_run(self, init_test_repositories, fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
-        commit_file_with_content("fiz", "baz.txt", "other upstream commit", source)
+        CommitBuilder(source).add_file("baz.txt", "fiz").commit("other upstream commit")
 
         result = rebasebot_run(
             source=source,
