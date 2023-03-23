@@ -71,7 +71,7 @@ class TestGoMod:
 class TestCommitMessageTags:
 
     @pytest.mark.parametrize(
-        'pr_is_merged,commit_message,tag_strategy,expected',
+        'pr_is_merged,commit_message,tag_policy,expected',
         (
                 (False, "UPSTREAM: <carry>: something", "soft", True),
                 (False, "UPSTREAM: <drop>: something", "soft", False),  # Drop commit with drop tag
@@ -90,14 +90,22 @@ class TestCommitMessageTags:
                 (False, "NO TAG: something", "strict", False),
                 (False, "fooo fooo fooo", "strict", False),
 
-                # random strategy behaves like "strict"
-                # TODO add strategy check, throw error if random stuff was passed
-                (False, "NO TAG: <carry>: something", "asdkjqwe", False),
-                (False, "NO TAG: something", "123123", False),
-                (False, "fooo fooo fooo", "fufufu", False),
+                # With invalid tag policy
+                (False, "NO TAG: <carry>: something", "asdkjqwe", Exception("Unknown tag policy: asdkjqwe")),
+                (False, "NO TAG: something", "123123", Exception("Unknown tag policy: 123123")),
+                (False, "fooo fooo fooo", "fufufu", Exception("Unknown tag policy: fufufu")),
+
+                # Unknown commit tag
+                (False, "UPSTREAM: <invalid>: something", "strict", Exception("Unknown commit message tag: <invalid>")),
+                (False, "UPSTREAM: commit message", "strict", Exception("Unknown commit message tag: commit message")),
         )
     )
     @patch('rebasebot.bot._is_pr_merged')
-    def test_commit_messages_tags(self, mocked_is_pr_merged, pr_is_merged, commit_message, tag_strategy, expected):
+    def test_commit_messages_tags(self, mocked_is_pr_merged, pr_is_merged, commit_message, tag_policy, expected):
         mocked_is_pr_merged.return_value = pr_is_merged
-        assert _add_to_rebase(commit_message, None, tag_strategy) is expected
+        if isinstance(expected, Exception):
+            with pytest.raises(Exception, match=str(expected)):
+                _add_to_rebase(commit_message, None, tag_policy)
+        else:
+            assert _add_to_rebase(commit_message, None, tag_policy) == expected
+            

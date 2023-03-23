@@ -120,6 +120,10 @@ def _is_pr_merged(pr_number, source_repo):
 
 
 def _add_to_rebase(commit_message, source_repo, tag_policy):
+    valid_tag_policy = ["soft", "strict", "none"]
+    if tag_policy not in valid_tag_policy:
+        raise builtins.Exception(f"Unknown tag policy: {tag_policy}")
+
     # We always add commits to rebase PR in case of "none" tag policy
     if tag_policy == "none":
         return True
