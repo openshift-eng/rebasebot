@@ -105,6 +105,7 @@ def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> 
     try:
         branches_with_commit = gitwd.git.branch("-r", "--contains", f"source/{source.branch}")
         dest_branch = f"dest/{dest.branch}"
+        logging.info("Branches with commit:\n%s", branches_with_commit)
         for branch in branches_with_commit.splitlines():
             # Must strip the branch name as git branch adds an indent
             if branch.lstrip() == dest_branch:
@@ -345,6 +346,7 @@ def _is_pr_available(dest_repo: Repository, rebase: GitHubBranch) -> Tuple[Short
     logging.info("Checking for existing pull request")
     try:
         gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
+        logging.info("Found existing pull request: %s", gh_pr.html_url)
         return gh_pr, True
     except StopIteration:
         pass
@@ -567,7 +569,7 @@ def run(
             return True
 
     except Exception as ex:
-        logging.exception(ex)
+        logging.exception(f"error fetching repo information from GitHub: {ex}")
         _message_slack(
             slack_webhook,
             f"I got an error fetching repo information from GitHub: {ex}"
@@ -590,7 +592,7 @@ def run(
             git_email
         )
     except Exception as ex:
-        logging.exception(ex)
+        logging.exception(f"error initializing the git directory: {ex}", extra={"working_dir": working_dir})
         _message_slack(
             slack_webhook,
             f"I got an error initializing the git directory: {ex}"
@@ -608,7 +610,8 @@ def run(
                 _commit_go_mod_updates(gitwd, source)
 
     except RepoException as ex:
-        logging.error(ex)
+        logging.exception(f"Manual intervention is needed to rebase {source.url}:{source.branch} into",
+                          f"{dest.ns}/{dest.name}:{dest.branch}", ex)
         _message_slack(
             slack_webhook,
             f"Manual intervention is needed to rebase "
@@ -618,7 +621,9 @@ def run(
         )
         return True
     except Exception as ex:
-        logging.exception(ex)
+        logging.exception(f"exception when trying to rebase {source.url}:{source.branch} into",
+                          f"{dest.ns}/{dest.name}:{dest.branch}: {ex}")
+
         _message_slack(
             slack_webhook,
             f"I got an error trying to rebase "
@@ -642,7 +647,7 @@ def run(
         try:
             _push_rebase_branch(gitwd, rebase)
         except Exception as ex:
-            logging.exception(ex)
+            logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}: {ex}")
             _message_slack(
                 slack_webhook,
                 f"I got an error pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}",
@@ -654,10 +659,10 @@ def run(
             try:
                 _update_pr_title(gitwd, pull_req, source, dest)
             except Exception as ex:
-                logging.exception(ex)
+                logging.exception(f"error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}")
                 _message_slack(
                     slack_webhook,
-                    ex,
+                    f"I got an error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}",
                 )
                 return False
 
@@ -665,11 +670,10 @@ def run(
         if not pr_available:
             pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
     except Exception as ex:
-        logging.exception(ex)
-
+        logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}: {ex}")
         _message_slack(
             slack_webhook,
-            f"I got an error creating a rebase PR: {ex}"
+            f"I got an error creating a rebase PR in {dest.ns}/{dest.name}: {ex}"
         )
 
         return False
