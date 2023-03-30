@@ -55,13 +55,14 @@ logging.basicConfig(
 MERGE_TMP_BRANCH = "merge-tmp"
 
 
-def _message_slack(webhook_url, msg):
+def _message_slack(webhook_url: str, msg: str) -> None:
+    """Send a message to Slack via a webhook if one is configured."""
     if webhook_url is None:
         return
     requests.post(webhook_url, json={"text": msg}, timeout=5)
 
 
-def _commit_go_mod_updates(gitwd, source: GitHubBranch):
+def _commit_go_mod_updates(gitwd: git.Repo, source: GitHubBranch) -> None:
     logging.info("Performing go modules update")
 
     try:
@@ -100,7 +101,7 @@ def _commit_go_mod_updates(gitwd, source: GitHubBranch):
             raise err
 
 
-def _needs_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch):
+def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> bool:
     try:
         branches_with_commit = gitwd.git.branch("-r", "--contains", f"source/{source.branch}")
         dest_branch = f"dest/{dest.branch}"
@@ -116,13 +117,13 @@ def _needs_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch):
     return True
 
 
-def _is_pr_merged(pr_number, source_repo):
+def _is_pr_merged(pr_number: int, source_repo: Repository) -> bool:
     logging.info("Checking that PR %s has been merged", pr_number)
     gh_pr = source_repo.pull_request(pr_number)
     return gh_pr.is_merged()
 
 
-def _add_to_rebase(commit_message, source_repo, tag_policy):
+def _add_to_rebase(commit_message: str, source_repo: Repository, tag_policy: str) -> bool:
     valid_tag_policy = ["soft", "strict", "none"]
     if tag_policy not in valid_tag_policy:
         raise builtins.Exception(f"Unknown tag policy: {tag_policy}")
@@ -150,16 +151,16 @@ def _add_to_rebase(commit_message, source_repo, tag_policy):
     return tag_policy == "soft"
 
 
-def _in_excluded_commits(sha, excluded):
-    for excluded_sha in excluded:
+def _in_excluded_commits(sha: str, exclude_commits: list) -> bool:
+    for excluded_sha in exclude_commits:
         if sha.startswith(excluded_sha):
             return True
 
     return False
 
 
-def _do_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch, source_repo, tag_policy,
-               bot_emails, exclude_commits, update_go_modules):
+def _do_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, source_repo: Repository, tag_policy: str,
+               bot_emails: list, exclude_commits: list, update_go_modules: bool) -> None:
     logging.info("Performing rebase")
 
     allow_bot_squash = len(bot_emails) > 0
@@ -234,7 +235,7 @@ def _do_rebase(gitwd, source: GitHubBranch, dest: GitHubBranch, source_repo, tag
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
 
 
-def _prepare_rebase_branch(gitwd, source: GitHubBranch, dest: GitHubBranch):
+def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
     logging.info("Preparing rebase branch")
 
     # Remove an old merge-tmp branch if it exists
@@ -265,7 +266,7 @@ def _prepare_rebase_branch(gitwd, source: GitHubBranch, dest: GitHubBranch):
     gitwd.git.checkout("-b", "rebase", commit)
 
 
-def _resolve_conflict(gitwd):
+def _resolve_conflict(gitwd: git.Repo) -> bool:
     status = gitwd.git.status(porcelain=True)
 
     if not status:
@@ -313,7 +314,7 @@ def _resolve_conflict(gitwd):
     return True
 
 
-def _resolve_rebase_conflicts(gitwd):
+def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
     try:
         if not _resolve_conflict(gitwd):
             return False
@@ -325,7 +326,7 @@ def _resolve_rebase_conflicts(gitwd):
         return _resolve_rebase_conflicts(gitwd)
 
 
-def _is_push_required(gitwd, dest: GitHubBranch, source: GitHubBranch, rebase: GitHubBranch):
+def _is_push_required(gitwd: git.Repo, dest: GitHubBranch, source: GitHubBranch, rebase: GitHubBranch) -> bool:
     # Check if the source head is already in dest
     if not _needs_rebase(gitwd, source, dest):
         return False
@@ -358,7 +359,7 @@ def _create_pr(
         source: GitHubBranch,
         rebase: GitHubBranch,
         gitwd: git.Repo
-):
+) -> str:
     source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
 
     logging.info("Creating a pull request")
@@ -375,7 +376,7 @@ def _create_pr(
     return pull_request.html_url
 
 
-def is_ref_a_tag(gitwd, ref):
+def is_ref_a_tag(gitwd: git.Repo, ref: str) -> bool:
     """Returns True if a git ref is a tag. False otherwise."""
     try:
         gitwd.git.show_ref("--tags", ref)
@@ -389,8 +390,8 @@ def _init_working_dir(
     dest: GitHubBranch,
     rebase: GitHubBranch,
     github_app_provider: GithubAppProvider,
-    git_username,
-    git_email,
+    git_username: str,
+    git_email: str,
     workdir: str = "."
 ) -> git.Repo:
     gitwd = git.Repo.init(path=workdir)
@@ -465,7 +466,8 @@ def _init_working_dir(
     return gitwd
 
 
-def _manual_rebase_pr_in_repo(repo: github3.github.repo.Repository) -> Optional[github3.pulls.PullRequest]:
+def _manual_rebase_pr_in_repo(repo: Repository) -> Optional[ShortPullRequest]:
+    """Checks for the presence of a rebase/manual label on the pull request."""
     prs = repo.pull_requests()
     for pull_req in prs:
         for label in pull_req.labels:
@@ -474,7 +476,8 @@ def _manual_rebase_pr_in_repo(repo: github3.github.repo.Repository) -> Optional[
     return None
 
 
-def _push_rebase_branch(gitwd, rebase) -> bool:
+def _push_rebase_branch(gitwd: git.Repo, rebase: GitHubBranch) -> None:
+    """Force pushes current rebase branch to remote rebase branch."""
     result = gitwd.remotes.rebase.push(
         refspec=f"HEAD:{rebase.branch}",
         force=True
@@ -483,10 +486,9 @@ def _push_rebase_branch(gitwd, rebase) -> bool:
     if result[0].flags & git.PushInfo.ERROR != 0:
         raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
 
-    return True
 
-
-def _update_pr_title(gitwd, pull_req: ShortPullRequest, source, dest) -> None:
+def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHubBranch, dest: GitHubBranch) -> None:
+    """Updates the pull request title to match the current state of the rebase branch."""
     source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
     title = f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
 
@@ -530,17 +532,17 @@ def run(
     source: GitHubBranch,
     dest: GitHubBranch,
     rebase: GitHubBranch,
-    working_dir,
-    git_username,
-    git_email,
+    working_dir: str,
+    git_username: str,
+    git_email: str,
     github_app_provider: GithubAppProvider,
-    slack_webhook,
-    tag_policy,
-    bot_emails,
-    exclude_commits,
-    update_go_modules=False,
-    dry_run=False,
-):
+    slack_webhook: str,
+    tag_policy: str,
+    bot_emails: list,
+    exclude_commits: list,
+    update_go_modules: bool = False,
+    dry_run: bool = False,
+) -> bool:
     """Run Rebase Bot."""
     gh_app = github_app_provider.github_app
     gh_cloner_app = github_app_provider.github_cloner_app
@@ -638,7 +640,7 @@ def run(
     if push_required:
         logging.info("Existing rebase branch needs to be updated.")
         try:
-            branch_pushed = _push_rebase_branch(gitwd, rebase)
+            _push_rebase_branch(gitwd, rebase)
         except Exception as ex:
             logging.exception(ex)
             _message_slack(
@@ -647,7 +649,7 @@ def run(
             )
             return False
 
-        if branch_pushed and pr_available:
+        if pr_available:
             # the branch was rebased, but the PR already exists, update its title.
             try:
                 _update_pr_title(gitwd, pull_req, source, dest)

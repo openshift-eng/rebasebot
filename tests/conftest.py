@@ -12,7 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 from __future__ import annotations
-from dataclasses import dataclass
 from collections import deque
 import os
 import shutil
@@ -23,6 +22,7 @@ import pytest
 from unittest import mock
 
 from git import Repo, GitCommandError
+from git.objects import Commit
 
 from rebasebot.github import GitHubBranch, GithubAppProvider
 
@@ -71,69 +71,89 @@ def tmpdir() -> YieldFixture[str]:
         yield tmpdir
 
 
-@dataclass
 class CommitBuilderAction:
-    def __init__(self, func, args: list):
+    """Stores a function and its arguments to be called later"""
+    def __init__(self: CommitBuilderAction, func, args) -> None:
         self.func = func
         self.args = args
 
 
 class CommitBuilder:
+    """
+    CommitBuilder builds commits containing changes to multiple files.
+    Changes are stored in action_plan and applied all at once when commit() is called.
+    This prevents uncommited changes being added to the next commit.
+    """
 
-    def __init__(self, branch: GitHubBranch):
+    def __init__(self: CommitBuilder, branch: GitHubBranch) -> None:
+        """Initializes a new CommitBuilder on the given branch"""
         if not os.path.exists(branch.url):
             raise NotADirectoryError("temp repo does not exists")
-        self.repo = Repo.init(branch.url)
         self.branch = branch
         self.commited = False
         self.action_plan: deque[CommitBuilderAction] = deque()
-        try:
-            self.repo.git.checkout(self.branch.branch)
-        except GitCommandError:
-            self.repo.git.checkout("-b", self.branch.branch)
 
-    def add_file(self, filename: str, content: str) -> CommitBuilder:
+    def add_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
+        """Adds a file to the commit"""
         self.action_plan.append(CommitBuilderAction(
             self._add_file, [filename, content]))
         return self
 
-    def _add_file(self, filename: str, content: str):
+    def _add_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
+        """Internal method to add a file to the commit"""
         with open(os.path.join(self.repo.working_dir, filename), "x", encoding="utf8") as file:
             file.write(content)
         self.repo.git.add(filename)
         return self
 
-    def update_file(self, filename: str, content: str) -> CommitBuilder:
+    def update_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
+        """Updates file in the commit"""
         self.action_plan.append(CommitBuilderAction(
             self._update_file, [filename, content]))
         return self
 
-    def _update_file(self, filename: str, content: str):
+    def _update_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
+        """Internal method to update a file in the commit"""
         with open(os.path.join(self.repo.working_dir, filename), "w", encoding="utf8") as file:
             file.write(content)
         self.repo.git.add(filename)
         return self
 
-    def remove_file(self, filename: str) -> CommitBuilder:
+    def remove_file(self: CommitBuilder, filename: str) -> CommitBuilder:
+        """Removes a file from the commit"""
         self.action_plan.append(CommitBuilderAction(
             self._remove_file, [filename]))
         return self
 
-    def _remove_file(self, filename: str):
+    def _remove_file(self: CommitBuilder, filename: str) -> CommitBuilder:
+        """Internal method to remove a file from the commit"""
         os.remove(os.path.join(self.repo.working_dir, filename))
         self.repo.git.rm(filename)
         return self
 
-    def move_file(self, oldName, newName) -> CommitBuilder:
+    def move_file(self: CommitBuilder, oldName: str, newName: str) -> CommitBuilder:
+        """Moves a file in the commit"""
         self.action_plan.append(CommitBuilderAction(
             self._move_file, [oldName, newName]))
         return self
 
-    def _move_file(self, oldName, newName):
+    def _move_file(self: CommitBuilder, oldName: str, newName: str) -> CommitBuilder:
+        """Internal method to move a file in the commit"""
         self.repo.git.mv(oldName, newName)
         return self
 
-    def commit(self, commit_msg: str, committer_email=None):
+    def commit(self: CommitBuilder, commit_msg: str, committer_email: str = None) -> Commit:
+        """Finalizes the commit and adds it to the branch
+
+        :param commit_msg: Commit message
+        :param committer_email: optional email of the committer, defaults to {branch.name}_author@{branch.ns}.org
+        """
+        self.repo = Repo.init(self.branch.url)
+        try:
+            self.repo.git.checkout(self.branch.branch)
+        except GitCommandError:
+            self.repo.git.checkout("-b", self.branch.branch)
+
         for action in self.action_plan:
             action.func(*action.args)
 
@@ -150,10 +170,10 @@ class CommitBuilder:
         self.repo.git.commit("--allow-empty", "-m", commit_msg)
         return self.repo.head.commit
 
-    def __enter__(self):
+    def __enter__(self: CommitBuilder) -> CommitBuilder:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self: CommitBuilder, exc_type, exc_val, exc_tb) -> None:
         pass
 
 
