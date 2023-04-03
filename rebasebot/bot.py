@@ -667,8 +667,16 @@ def run(
                 return False
 
     try:
-        if not pr_available:
+        if not pr_available and push_required:
             pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
+    except github3.exceptions.UnprocessableEntity as ex:
+        logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
+        _message_slack(
+            slack_webhook,
+            f"Failed to create a pull request: {ex}\n Response: {ex.response.text}"
+        )
+
+        return False
     except Exception as ex:
         logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}: {ex}")
         _message_slack(
