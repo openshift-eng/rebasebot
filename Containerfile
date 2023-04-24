@@ -2,9 +2,9 @@ FROM registry.access.redhat.com/ubi9/python-39
 
 USER root
 
-ENV GO_VERSION=1.19
+ENV GO_VERSION=1.20.3
 RUN curl -Ls https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz | \
-    tar -C /usr/local -zxvf - go/bin go/pkg/linux_amd64 go/pkg/tool
+    tar -C /usr/local -zxvf - go/bin go/pkg/tool
 ENV PATH="/usr/local/go/bin:$PATH"
 
 WORKDIR /src
