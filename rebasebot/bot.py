@@ -490,12 +490,21 @@ def _push_rebase_branch(gitwd: git.Repo, rebase: GitHubBranch) -> None:
 
 
 def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHubBranch, dest: GitHubBranch) -> None:
-    """Updates the pull request title to match the current state of the rebase branch."""
+    """Updates the pull request title to match the current state of the rebase branch
+    Only updates the title if the title contains the word Merge.
+    Keeping everything before "Merge" and updating everything after.
+    This prevents jira link or tags from being removed.
+    """
     source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
-    title = f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
 
-    if not pull_req.update(title=title):
-        raise builtins.Exception(f"Error updating title for pull request: {pull_req.html_url}")
+    if pull_req.title.count("Merge") == 1:
+        tags = pull_req.title.split("Merge")[0]
+        title = f"{tags}Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
+        if not pull_req.update(title=title):
+            raise builtins.Exception(f"Error updating title for pull request: {pull_req.html_url}")
+    else:
+        logging.info(f"Open pull request title \"{pull_req.title}\" does not match rebasebot format."
+                     "Keeping the current title.")
 
 
 def _report_result(push_required: bool, pr_available: bool, pr_url: str, dest_url: str, slack_webhook: str) -> None:
