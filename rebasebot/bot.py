@@ -553,6 +553,7 @@ def run(
     exclude_commits: list,
     update_go_modules: bool = False,
     dry_run: bool = False,
+    ignore_manual_label: bool = False
 ) -> bool:
     """Run Rebase Bot."""
     gh_app = github_app_provider.github_app
@@ -566,16 +567,17 @@ def run(
         source_repo = gh_app.repository(source.ns, source.name)
         logging.info("source repository is %s", source_repo.clone_url)
 
-        pull_req = _manual_rebase_pr_in_repo(dest_repo)
-        if pull_req is not None:
-            logging.info(
-                f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
-            )
-            _message_slack(
-                    slack_webhook,
+        if not ignore_manual_label:
+            pull_req = _manual_rebase_pr_in_repo(dest_repo)
+            if pull_req is not None:
+                logging.info(
                     f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
-            )
-            return True
+                )
+                _message_slack(
+                        slack_webhook,
+                        f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
+                )
+                return True
 
     except Exception as ex:
         logging.exception(f"error fetching repo information from GitHub: {ex}")

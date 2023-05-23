@@ -197,6 +197,13 @@ def _parse_cli_arguments():
         required=False,
         help="List of commit sha hashes that will be excluded from rebase.",
     )
+    parser.add_argument(
+        "--ignore-manual-label",
+        action="store_true",
+        default=False,
+        required=False,
+        help="When enabled, the bot will not check for presence of rebase/manual label on pull requests",
+    )
 
     return parser.parse_args()
 
@@ -264,6 +271,7 @@ def main():
         exclude_commits=args.exclude_commits,
         update_go_modules=args.update_go_modules,
         dry_run=args.dry_run,
+        ignore_manual_label=args.ignore_manual_label
     )
 
     if success:
