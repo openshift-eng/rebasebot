@@ -168,13 +168,31 @@ def _do_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, source
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
+    # Merge base is the last shared commit of source branch and destination branch
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
     logging.info("Rebasing from merge base: %s", merge_base)
 
+    # downstream_commits are commits on ancestry path from merge base and destination branch
+    downstream_commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE",
+                                       "--ancestry-path", f"{merge_base}..dest/{dest.branch}").splitlines()
+    if len(downstream_commits) < 1:
+        logging.error("Downstream commits are empty")
+    # downstream_child is the direct descendand of merge_base on the destination branch
+    downstream_child = downstream_commits[0]
+    sha, commit_message, committer_email = downstream_child.split(" || ", 2)
+    downstream_child_commit = gitwd.commit(sha)
+
+    # downstream_child_parents are the last commits on source branch and destination branch or
+    # the last commit on destination branch if this is the first rebase for the repository.
+    # These comits and their parents must be excluded from commits we carry.
+    downstream_child_parents = []
+    for parent in downstream_child_commit.parents:
+        downstream_child_parents.append(f"^{parent.hexsha}")
+
     # Find the list of commits between the merge base and the destination head
     # This should be the list of commits we are carrying on top of the UPSTREAM
-    commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE", "--no-merges",
-                            "--ancestry-path", f"{merge_base}..dest/{dest.branch}")
+    commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE", "--no-merges", "--author-date-order",
+                            *downstream_child_parents, f"^source/{source.branch}", f"dest/{dest.branch}")
 
     logging.info("Identified upstream commits:\n%s", commits)
 
