@@ -151,6 +151,20 @@ On the following runs, if the Slack integration is enabled, the bot will
 broadcast a message that it has found the `rebase/manual` label and thus
 ignored the repository.
 
+## Retitling of Pull Requests
+
+For convenience, the bot will not retitle a pull request that has been completely
+modified. It will attempt to retitle in situations where the beginning of the
+pull request has been retitled, for example:
+
+A pull request with a title like `My special pull request created by the bot`
+will not be modified by the bot on further runs.
+
+However, a pull request title like
+`JIRABUG-XXXX: Merge https://github.com/kubernetes/autoscaler:master (d3ec0c4) into master`
+will be updated by the bot on subsequent runs to reflect the new commit hash,
+but the `JIRABUG-XXXX: ` portion will not be modified.
+
 ## Examples of usage
 
 Example 1. Sync kubernetes/cloud-provider-aws with openshift/cloud-provider-aws using applications credentials. 
