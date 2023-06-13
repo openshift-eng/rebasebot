@@ -165,6 +165,12 @@ However, a pull request title like
 will be updated by the bot on subsequent runs to reflect the new commit hash,
 but the `JIRABUG-XXXX: ` portion will not be modified.
 
+## Automatic ART pull request inclusion
+Often when a new version of Go comes out, the ART pull request that updates the build image cannot merge without changes from upstream,
+ and the rebase cannot merge with the old Go version, requiring manual user intervention.
+
+For convenience, the bot will look for an open ART pull request and cherry-pick it into the rebase branch.
+
 ## Examples of usage
 
 Example 1. Sync kubernetes/cloud-provider-aws with openshift/cloud-provider-aws using applications credentials. 

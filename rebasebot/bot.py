@@ -29,6 +29,7 @@ import git.compat
 import github3
 import requests
 from github3.repos.repo import Repository
+from github3.repos.commit import ShortCommit
 from github3.pulls import ShortPullRequest
 
 from rebasebot.github import GithubAppProvider, GitHubBranch
@@ -345,6 +346,30 @@ def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
         return _resolve_rebase_conflicts(gitwd)
 
 
+def _cherrypick_art_pull_request(gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch) -> None:
+    """
+    Looks at the destination repository and if there is an open ART pull request
+    that updates the build image, it includes it in the rebase.
+    """
+    logging.info("Checking for ART pull request")
+    for pull_request in dest_repo.pull_requests(state="open", base=f"{dest.branch}"):
+        assert isinstance(pull_request, ShortPullRequest)  # type hint
+        if "consistent with ART" in pull_request.title and pull_request.user.login == "openshift-bot":
+            logging.info(f"Found open ART image update pull requst: {pull_request.title}")
+            remote = pull_request.head.repository
+            remote_name = remote.name
+            if remote_name in gitwd.remotes:
+                gitwd.remotes[remote_name].set_url(remote.html_url)
+            else:
+                gitwd.create_remote(remote_name, remote.html_url)
+
+            gitwd.remotes[remote_name].fetch(pull_request.head.ref)
+
+            for commit in pull_request.commits():
+                assert isinstance(commit, ShortCommit)
+                gitwd.git.cherry_pick(commit.sha, "-Xtheirs")
+
+
 def _is_push_required(gitwd: git.Repo, dest: GitHubBranch, source: GitHubBranch, rebase: GitHubBranch) -> bool:
     # Check if the source head is already in dest
     if not _needs_rebase(gitwd, source, dest):
@@ -634,6 +659,7 @@ def run(
             _prepare_rebase_branch(gitwd, source, dest)
             _do_rebase(gitwd, source, dest, source_repo, tag_policy,
                        bot_emails, exclude_commits, update_go_modules)
+            _cherrypick_art_pull_request(gitwd, dest_repo, dest)
 
             if update_go_modules:
                 _commit_go_mod_updates(gitwd, source)
