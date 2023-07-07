@@ -83,19 +83,17 @@ def _commit_go_mod_updates(gitwd: git.Repo, source: GitHubBranch) -> None:
             )
             logging.debug("go mod tidy output: %s", proc.stdout.decode())
 
-            # Only run go mod vendor if a vendor folder already exists
-            if os.path.exists(os.path.join(module_base_path, "vendor")):
-                proc = subprocess.run(
-                    "go mod vendor", cwd=module_base_path, shell=True, check=True, capture_output=True
-                )
-                logging.debug("go mod vendor output %s:", proc.stdout.decode())
+            proc = subprocess.run(
+                "go mod vendor", cwd=module_base_path, shell=True, check=True, capture_output=True
+            )
+            logging.debug("go mod vendor output %s:", proc.stdout.decode())
 
         except subprocess.CalledProcessError as err:
             raise RepoException(
                 f"Unable to update go modules: {err}: {err.stderr.decode()}"
             ) from err
 
-    if gitwd.is_dirty():
+    if gitwd.is_dirty(untracked_files=True):
         try:
             gitwd.git.add(all=True)
             gitwd.git.commit(
