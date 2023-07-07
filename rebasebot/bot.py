@@ -93,7 +93,7 @@ def _commit_go_mod_updates(gitwd: git.Repo, source: GitHubBranch) -> None:
                 f"Unable to update go modules: {err}: {err.stderr.decode()}"
             ) from err
 
-    if gitwd.is_dirty():
+    if gitwd.is_dirty(untracked_files=True):
         try:
             gitwd.git.add(all=True)
             gitwd.git.commit(
