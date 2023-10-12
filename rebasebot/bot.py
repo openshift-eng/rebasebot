@@ -372,7 +372,11 @@ def _cherrypick_art_pull_request(gitwd: git.Repo, dest_repo: Repository, dest: G
 
             for commit in pull_request.commits():
                 assert isinstance(commit, ShortCommit)
-                gitwd.git.cherry_pick(commit.sha, "-Xtheirs")
+                try:
+                    gitwd.git.cherry_pick(commit.sha, "-Xtheirs")
+                except git.GitCommandError as ex:
+                    if not _resolve_rebase_conflicts(gitwd):
+                        raise RepoException(f"Git rebase failed: {ex}") from ex
 
 
 def _is_push_required(gitwd: git.Repo, dest: GitHubBranch, source: GitHubBranch, rebase: GitHubBranch) -> bool:
