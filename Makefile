@@ -18,3 +18,6 @@ lint:
 .PHONY: venv
 venv:
 	$(PYTHON) -m venv env
+
+install:
+	$(PYTHON) -m pip install --user .
