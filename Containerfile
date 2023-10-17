@@ -4,7 +4,7 @@ USER root
 
 ENV GO_VERSION=1.21.1
 RUN curl -Ls https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz | \
-    tar -C /usr/local -zxvf - go/bin go/pkg/tool
+    tar -C /usr/local -zxvf - go/bin go/pkg/tool go/go.env
 ENV PATH="/usr/local/go/bin:$PATH"
 
 WORKDIR /src
