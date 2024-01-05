@@ -76,7 +76,11 @@ def _commit_go_mod_updates(gitwd: git.Repo, source: GitHubBranch) -> None:
                 full_path = os.path.join(module_base_path, filename)
                 if not os.path.exists(full_path):
                     continue
-                gitwd.remotes.source.repo.git.checkout(f"source/{source.branch}", full_path)
+                try:
+                    gitwd.remotes.source.repo.git.checkout(f"source/{source.branch}", full_path)
+                except git.GitCommandError:
+                    logging.debug("go module at %s is downstream only, skip its resetting", module_base_path)
+                    break
 
             proc = subprocess.run(
                 "go mod tidy", cwd=module_base_path, shell=True, check=True, capture_output=True
