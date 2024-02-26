@@ -16,6 +16,7 @@
 
 """This module parses CLI arguments for the Rebase Bot."""
 
+import logging
 import argparse
 import re
 import sys
@@ -245,6 +246,10 @@ def _get_github_app_wrapper(
 def main():
     """Rebase Bot entry point function."""
     args = _parse_cli_arguments()
+
+    # Silence info logs from github3
+    logger = logging.getLogger("github3")
+    logger.setLevel(logging.WARN)
 
     github_app_wrapper = _get_github_app_wrapper(
         args.github_app_id, args.github_app_key, args.dest,

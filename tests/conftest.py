@@ -148,7 +148,7 @@ class CommitBuilder:
         :param commit_msg: Commit message
         :param committer_email: optional email of the committer, defaults to {branch.name}_author@{branch.ns}.org
         """
-        self.repo = Repo.init(self.branch.url)
+        self.repo = Repo(self.branch.url)
         try:
             self.repo.git.checkout(self.branch.branch)
         except GitCommandError:
@@ -187,6 +187,7 @@ def init_test_repositories() -> YieldFixture[Tuple[GitHubBranch, GitHubBranch, G
     """
 
     source = TemporaryDirectory(prefix="rebasebot_tests_source_repo_")
+    Repo.init(source.name)
     source_gh_branch = GitHubBranch(
         url=source.name, ns="source", name="source", branch="main")
     CommitBuilder(source_gh_branch).add_file(
