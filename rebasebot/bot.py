@@ -29,6 +29,7 @@ import git
 import git.compat
 import github3
 import requests
+from git.objects import Commit
 from github3.repos.repo import Repository
 from github3.repos.commit import ShortCommit
 from github3.pulls import ShortPullRequest
@@ -170,6 +171,71 @@ def _in_excluded_commits(sha: str, exclude_commits: list) -> bool:
     return False
 
 
+def _find_last_rebase_merge_commit(gitwd: git.Repo, source_repo: Repository, ancestry_path_merges) -> Commit:
+    logging.info("Searching for merge commit from previous rebasebot run to identify downstream commits")
+    for merge_line in ancestry_path_merges:
+        sha, commit_message, committer_email = merge_line.split(" || ", 2)
+        logging.info(f"Checking: \"{commit_message}\"")
+        if "openshift-merge-bot[bot]@users.noreply.github.com" in committer_email:
+            logging.info("Skipping this downstream (PR) merge commit as we are only interested in the rebase merges")
+            # We can skip all merges from this bot because it only merges downstream pull requests.
+            # This skip is not required and is here only to improve performance.
+            continue
+        merge = gitwd.commit(sha)
+
+        # Now we get both parents of the merge commit and check if one of them is on an upstream branch.
+        # If it is, we know that this merge commit is the last rebase merge commit
+        for parent in merge.parents:
+            branches = gitwd.git.branch('--contains', parent.hexsha, format='%(refname:short)').split('\n')
+            for upstream_branch in source_repo.branches():
+                if upstream_branch.name in branches:
+                    logging.info("Found merge commit from previous rebase: %s", sha)
+                    logging.info("Its parent %s is on upstream branch %s", parent.hexsha, upstream_branch.name)
+                    return merge
+    return None
+
+
+def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch,
+                                 source_repo: Repository) -> str:
+    # Merge base is the last shared commit of source branch and destination branch
+    merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
+    logging.info(f"Merge base of source/{source.branch} and dest/{dest.branch}: %s", merge_base)
+
+    # ancestry_path_merges are merge commits on ancestry path from merge base to destination branch
+    ancestry_path_merges = gitwd.git.log("--pretty=format:%H || %s || %aE", "--ancestry-path", "-r", "--merges",
+                                         f"{merge_base}..dest/{dest.branch}").splitlines()
+
+    val = '\n'.join(ancestry_path_merges)
+    logging.info(f"""Merges on ancestry-path from merge_base=({merge_base}) to dest/{dest.branch} branch:\n{val}""")
+
+    last_rebase_merge_commit = _find_last_rebase_merge_commit(gitwd, source_repo, ancestry_path_merges)
+    cutoff_commits = []
+
+    if last_rebase_merge_commit is None:
+        # if last_rebase_merge_commit is None, it means that we didn't find any merge commit that is the last rebase
+        # merge commit. We assume that the reason for this is that we are doing first rebase.
+        # This assumption can be wrong when the previous rebase was from a commit that is no longer reachable from any
+        # of the source branches.
+        # This is not possible to fix with current design.
+        logging.info(f"Didn't find last rebase merge commit. Likely this is the first upstream rebase for the\
+                     repository. If that's not the case, something is wrong with the last rebase identification.\
+                     Using {merge_base} as cutoff commit")
+        cutoff_commits.append(f"^{merge_base}")
+    else:
+        for parent in last_rebase_merge_commit.parents:
+            # These are the commits that were head of dest and head of source during the previous rebase.
+            cutoff_commits.append(f"^{parent.hexsha}")
+
+    logging.info("Cutoff commits: %s", cutoff_commits)
+    # List all commits on dest/branch and stop at cutoff commits
+    # This should be the list of commits we are carrying on top of the UPSTREAM
+    downstream_commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE", "--no-merges",
+                                       "--author-date-order", *cutoff_commits, f"dest/{dest.branch}")
+
+    logging.info("Identified downstream commits:\n%s", downstream_commits)
+    return downstream_commits
+
+
 def _do_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, source_repo: Repository, tag_policy: str,
                bot_emails: list, exclude_commits: list, update_go_modules: bool) -> None:
     logging.info("Performing rebase")
@@ -178,40 +244,14 @@ def _do_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, source
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
-    # Merge base is the last shared commit of source branch and destination branch
-    merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
-    logging.info("Rebasing from merge base: %s", merge_base)
-
-    # downstream_commits are commits on ancestry path from merge base and destination branch
-    downstream_commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE",
-                                       "--ancestry-path", f"{merge_base}..dest/{dest.branch}").splitlines()
-    if len(downstream_commits) < 1:
-        logging.error("Downstream commits are empty")
-    # downstream_child is the direct descendand of merge_base on the destination branch
-    downstream_child = downstream_commits[0]
-    sha, commit_message, committer_email = downstream_child.split(" || ", 2)
-    downstream_child_commit = gitwd.commit(sha)
-
-    # downstream_child_parents are the last commits on source branch and destination branch or
-    # the last commit on destination branch if this is the first rebase for the repository.
-    # These comits and their parents must be excluded from commits we carry.
-    downstream_child_parents = []
-    for parent in downstream_child_commit.parents:
-        downstream_child_parents.append(f"^{parent.hexsha}")
-
-    # Find the list of commits between the merge base and the destination head
-    # This should be the list of commits we are carrying on top of the UPSTREAM
-    commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE", "--no-merges", "--author-date-order",
-                            *downstream_child_parents, f"^source/{source.branch}", f"dest/{dest.branch}")
-
-    logging.info("Identified upstream commits:\n%s", commits)
+    downstream_commits = _identify_downstream_commits(gitwd, source, dest, source_repo)
 
     commits_to_squash = defaultdict(list)
 
-    for commit in commits.splitlines():
+    for commit_line in downstream_commits.splitlines():
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
-        sha, commit_message, committer_email = commit.split(" || ", 2)
+        sha, commit_message, committer_email = commit_line.split(" || ", 2)
 
         if _in_excluded_commits(sha, exclude_commits):
             logging.info("Explicitly dropping commit from rebase: %s", sha)
@@ -284,6 +324,7 @@ def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBr
     commit = gitwd.git.commit_tree(f"{MERGE_TMP_BRANCH}^{{tree}}",
                                    "-p", "HEAD", "-p", MERGE_TMP_BRANCH, "-m",
                                    f"merge upstream/{source.branch} into {dest.branch}")
+    logging.info(f"Merging upstream/{source.branch} into {dest.branch}")
 
     # Remove an old rebase branch if it exists
     try:
@@ -491,7 +532,10 @@ def _init_working_dir(
     gitwd.remotes.source.fetch(source.branch)
 
     logging.info("Fetching all tags from source")
-    gitwd.remotes.source.fetch(refspec='refs/tags/*:refs/tags/*')
+    gitwd.remotes.source.fetch(refspec='refs/tags/*:refs/tags/*', filter="blob:none")
+
+    logging.info("Fetching all branches from source")
+    gitwd.remotes.source.fetch(refspec='refs/heads/*:refs/heads/*', update_head_ok=True, filter="blob:none")
 
     if is_ref_a_tag(gitwd, source.branch):
         logging.info(f"{source.branch} is a tag, but we must work with branches, creating a branch")

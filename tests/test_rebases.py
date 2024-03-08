@@ -184,6 +184,76 @@ class TestRebases:
 * '<source_author>, Upstream commit'
 """.strip()  # noqa: W291
 
+    def test_first_run_dest_has_merges_dry_run(self, init_test_repositories, fake_github_provider, tmpdir):
+        source, rebase, dest = init_test_repositories
+        with CommitBuilder(source) as cb:
+            cb.add_file("baz.txt", "fiz")
+            cb.commit("other upstream commit")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("generated-test", "content")
+            cb.commit("commit #1 from genbot",
+                      committer_email="genbot@example.com")
+        # make branch
+        dest_feature_branch = GitHubBranch(url=dest.url, ns="dest", name="dest", branch="feature")
+        with CommitBuilder(dest_feature_branch) as cb:
+            cb.add_file("feature-file", "feature content")
+            cb.commit("commit on dest feature branch")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("generated-test2", "content")
+            cb.commit("commit #2 from genbot",
+                      committer_email="genbot@example.com")
+        # merge feature branch to dest
+        repo = Repo(dest.url)
+        repo.git.checkout(dest.branch)
+        repo.git.merge(repo.heads.feature)
+        with CommitBuilder(dest) as cb:
+            cb.add_file("generated-test3", "content")
+            cb.commit("commit #1 from anotherbot",
+                      committer_email="anotherbot@example.com")
+
+        result = rebasebot_run(
+            source=source,
+            dest=dest,
+            rebase=rebase,
+            working_dir=tmpdir,
+            git_username="test_rebasebot",
+            git_email="test@rebasebot.ocp",
+            github_app_provider=fake_github_provider,
+            slack_webhook=None,
+            tag_policy="soft",
+            bot_emails=[],
+            exclude_commits=[],
+            update_go_modules=False,
+            dry_run=True,
+        )
+        assert (result)
+
+        working_repo = Repo.init(tmpdir)
+        assert working_repo.head.ref.name == "rebase"
+        log_graph = working_repo.git.log(
+            "--graph", "--oneline", "--pretty='<%an>, %s'")
+
+        assert log_graph == r"""
+* '<dest_anotherbot@example.com>, commit #1 from anotherbot'
+* '<dest_genbot@example.com>, commit #2 from genbot'
+* '<dest_author>, commit on dest feature branch'
+* '<dest_genbot@example.com>, commit #1 from genbot'
+* '<dest_author>, UPSTREAM: <carry>: our cool addition'
+*   '<test_rebasebot>, merge upstream/main into main'
+|\  
+| * '<source_author>, other upstream commit'
+* | '<dest_anotherbot@example.com>, commit #1 from anotherbot'
+* |   '<dest_genbot@example.com>, Merge branch 'feature''
+|\ \  
+| * | '<dest_author>, commit on dest feature branch'
+* | | '<dest_genbot@example.com>, commit #2 from genbot'
+|/ /  
+* | '<dest_genbot@example.com>, commit #1 from genbot'
+* | '<dest_author>, UPSTREAM: <carry>: our cool addition'
+|/  
+* '<source_author>, Upstream commit'
+""".strip()  # noqa: W291
+
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.bot._message_slack")
