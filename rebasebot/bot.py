@@ -465,7 +465,7 @@ def _create_pr(
 
     pull_request = gh_app.repository(dest.ns, dest.name).create_pull(
         title=f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}",
-        head=f"{rebase.ns}:{rebase.branch}",
+        head=f"{rebase.ns}:{rebase.name}:{rebase.branch}",
         base=dest.branch,
         maintainer_can_modify=False,
     )
