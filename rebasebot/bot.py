@@ -466,17 +466,30 @@ def _create_pr(
 
     logging.info("Creating a pull request")
 
-    pull_request = gh_app.repository(dest.ns, dest.name).create_pull(
-        title=f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}",
-        head=rebase.branch,
-        head_repo=f"{rebase.ns}/{rebase.name}",
-        base=dest.branch,
-        maintainer_can_modify=False,
+    # FIXME(rmanak): This hack is because github3 doesn't support setting
+    # head_repo param when creating a PR.
+    #
+    # This param is required when creating cross-repository pull requests if both repositories
+    # are owned by the same organization.
+    #
+    # https://github.com/sigmavirus24/github3.py/issues/1190
+
+    gh_pr: requests.Response = gh_app._post(  # pylint: disable=W0212
+        f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
+        data={
+            "title": f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}",
+            "head": rebase.branch,
+            "head_repo": f"{rebase.ns}/{rebase.name}",
+            "base": dest.branch,
+            "maintainer_can_modify": False,
+        },
+        json=True,
     )
 
-    logging.debug(pull_request.as_json())
+    logging.debug(gh_pr.json())
+    gh_pr.raise_for_status()
 
-    return pull_request.html_url
+    return gh_pr.json()["html_url"]
 
 
 def is_ref_a_tag(gitwd: git.Repo, ref: str) -> bool:
@@ -785,7 +798,7 @@ def run(
     try:
         if not pr_available and push_required:
             pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
-    except github3.exceptions.UnprocessableEntity as ex:
+    except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
         _message_slack(
             slack_webhook,
