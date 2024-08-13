@@ -424,11 +424,7 @@ def _cherrypick_art_pull_request(gitwd: git.Repo, dest_repo: Repository, dest: G
                         raise RepoException(f"Git rebase failed: {ex}") from ex
 
 
-def _is_push_required(gitwd: git.Repo, dest: GitHubBranch, source: GitHubBranch, rebase: GitHubBranch) -> bool:
-    # Check if the source head is already in dest
-    if not _needs_rebase(gitwd, source, dest):
-        return False
-
+def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
     # Check if there is nothing to update in the open rebase PR.
     if rebase.branch in gitwd.remotes.rebase.refs:
         diff_index = gitwd.git.diff(f"rebase/{rebase.branch}")
@@ -616,18 +612,24 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
 
     if pull_req.title.count("Merge") == 1:
         tags = pull_req.title.split("Merge")[0]
-        title = f"{tags}Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
-        if not pull_req.update(title=title):
+        computed_title = f"{tags}Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
+
+        if computed_title == pull_req.title:
+            # No update required
+            return
+
+        logging.info(f"Updating pull request title: {computed_title}")
+        if not pull_req.update(title=computed_title):
             raise builtins.Exception(f"Error updating title for pull request: {pull_req.html_url}")
     else:
         logging.info(f"Open pull request title \"{pull_req.title}\" does not match rebasebot format."
                      "Keeping the current title.")
 
 
-def _report_result(push_required: bool, pr_available: bool, pr_url: str, dest_url: str, slack_webhook: str) -> None:
+def _report_result(needs_rebase: bool, pr_available: bool, pr_url: str, dest_url: str, slack_webhook: str) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
     message = None
-    if push_required:
+    if needs_rebase:
         if not pr_available:
             # Case 1: either source or dest repos were updated and there is no PR yet.
             # We create a new PR then.
@@ -766,7 +768,7 @@ def run(
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
-    push_required = _is_push_required(gitwd, dest, source, rebase)
+    push_required = _is_push_required(gitwd, rebase) if needs_rebase else False
     pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
     pr_url = pull_req.html_url if pull_req is not None else ""
 
@@ -783,20 +785,20 @@ def run(
             )
             return False
 
-        if pr_available:
-            # the branch was rebased, but the PR already exists, update its title.
-            try:
-                _update_pr_title(gitwd, pull_req, source, dest)
-            except Exception as ex:
-                logging.exception(f"error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}")
-                _message_slack(
-                    slack_webhook,
-                    f"I got an error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}",
-                )
-                return False
+    if pr_available:
+        # the branch was rebased, but the PR already exists, update its title.
+        try:
+            _update_pr_title(gitwd, pull_req, source, dest)
+        except Exception as ex:
+            logging.exception(f"error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}")
+            _message_slack(
+                slack_webhook,
+                f"I got an error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}",
+            )
+            return False
 
     try:
-        if not pr_available and push_required:
+        if not pr_available and needs_rebase:
             pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
@@ -815,5 +817,5 @@ def run(
 
         return False
 
-    _report_result(push_required, pr_available, pr_url, dest.url, slack_webhook)
+    _report_result(needs_rebase, pr_available, pr_url, dest.url, slack_webhook)
     return True
