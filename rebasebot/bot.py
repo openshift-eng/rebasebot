@@ -439,14 +439,17 @@ def _is_push_required(gitwd: git.Repo, dest: GitHubBranch, source: GitHubBranch,
     return True
 
 
-def _is_pr_available(dest_repo: Repository, rebase: GitHubBranch) -> Tuple[ShortPullRequest, bool]:
+def _is_pr_available(dest_repo: Repository, dest: GitHubBranch, rebase: GitHubBranch) -> Tuple[ShortPullRequest, bool]:
     logging.info("Checking for existing pull request")
-    try:
-        gh_pr = dest_repo.pull_requests(head=f"{rebase.ns}:{rebase.branch}").next()
-        logging.info("Found existing pull request: %s", gh_pr.html_url)
-        return gh_pr, True
-    except StopIteration:
-        pass
+
+    pull_requests = dest_repo.pull_requests(base=dest.branch)
+    # Github does not support filtering cross-repository pull requests if both repositories
+    # are owned by the same organization. We must filter client side.
+    for pr in pull_requests:
+        pr_repo = pr.as_dict()["head"]["repo"]["full_name"]
+        if pr_repo == f"{rebase.ns}/{rebase.name}" and pr.head.ref == rebase.branch:
+            logging.info("Found existing pull request: \"%s\" %s", pr.title, pr.html_url)
+            return pr, True
 
     logging.info("No existing pull request found")
     return None, False
@@ -465,7 +468,8 @@ def _create_pr(
 
     pull_request = gh_app.repository(dest.ns, dest.name).create_pull(
         title=f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}",
-        head=f"{rebase.ns}:{rebase.name}:{rebase.branch}",
+        head=rebase.branch,
+        head_repo=f"{rebase.ns}/{rebase.name}",
         base=dest.branch,
         maintainer_can_modify=False,
     )
@@ -750,7 +754,7 @@ def run(
         return True
 
     push_required = _is_push_required(gitwd, dest, source, rebase)
-    pull_req, pr_available = _is_pr_available(dest_repo, rebase)
+    pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
     pr_url = pull_req.html_url if pull_req is not None else ""
 
     # Push the rebase branch to the remote repository.

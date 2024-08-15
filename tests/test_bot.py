@@ -129,28 +129,46 @@ class TestIsPrAvailable:
         return MagicMock()
 
     @pytest.fixture
+    def dest(self):
+        dest = MagicMock()
+        dest.ns = "test-namespace"
+        dest.name = "dest-repo"
+        dest.branch = "dest-branch"
+        return dest
+
+    @pytest.fixture
     def rebase(self):
         rebase = MagicMock()
-        rebase.ns = "my-namespace"
-        rebase.branch = "my-branch"
+        rebase.ns = "test-namespace"
+        rebase.name = "rebase-repo"
+        rebase.branch = "rebase-branch"
         return rebase
 
-    def test_is_pr_available(self, dest_repo, rebase):
+    def test_is_pr_available(self, dest_repo, dest, rebase):
         # Test when pull request exists
         gh_pr = MagicMock()
-        dest_repo.pull_requests.return_value.next.return_value = gh_pr
-        pr, pr_available = _is_pr_available(dest_repo, rebase)
+        gh_pr.as_dict.return_value = {
+            "head": {
+                "repo": {
+                    "full_name": "test-namespace/rebase-repo"
+                }
+            }
+        }
+        gh_pr.head.ref = rebase.branch
+        dest_repo.pull_requests.return_value = [gh_pr]
+
+        pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
         dest_repo.pull_requests.assert_called_once_with(
-            head="my-namespace:my-branch")
+            base="dest-branch")
         assert pr == gh_pr
         assert pr_available is True
 
-    def test_is_pr_available_not_found(self, dest_repo, rebase):
+    def test_is_pr_available_not_found(self, dest_repo, dest, rebase):
         # Test when pull request doesn't exist
-        dest_repo.pull_requests.return_value.next.side_effect = StopIteration
-        pr, pr_available = _is_pr_available(dest_repo, rebase)
+        dest_repo.pull_requests.return_value = []
+        pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
         dest_repo.pull_requests.assert_called_with(
-            head="my-namespace:my-branch")
+            base="dest-branch")
         assert pr is None
         assert pr_available is False
 
