@@ -1,3 +1,4 @@
+# pylint: skip-file
 import setuptools
 
 setuptools.setup(
@@ -8,5 +9,7 @@ setuptools.setup(
    author_email='mfedosin@redhat.com',
    packages=['rebasebot'],
    install_requires=['cryptography', 'gitpython', 'github3.py', 'requests', 'validators'], #external packages as dependencies
-   scripts=['rebasebot/cli.py']
+   scripts=['rebasebot/cli.py'],
+   include_package_data=True,
+   package_data={'rebasebot': ['builtin-hooks/*']}
 )

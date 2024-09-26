@@ -7,6 +7,7 @@ import pytest
 
 from git import Repo
 
+from rebasebot import lifecycle_hooks
 from rebasebot.github import GitHubBranch
 from rebasebot.bot import (
     _init_working_dir,
@@ -38,7 +39,13 @@ class TestBotInternalHelpers:
     def working_repo_context(self, init_test_repositories, fake_github_provider, tmpdir) -> WorkingRepoContext:
         source, rebase, dest = init_test_repositories
         working_repo = _init_working_dir(
-            source, dest, rebase, fake_github_provider, "foo", "foo@example.com", workdir=tmpdir
+            source=source,
+            dest=dest,
+            rebase=rebase,
+            github_app_provider=fake_github_provider,
+            git_username="foo",
+            git_email="foo@example.com",
+            workdir=tmpdir
         )
         return WorkingRepoContext(
             source, rebase, dest, working_repo, tmpdir
@@ -388,3 +395,67 @@ class TestRebases:
 |/  
 * '<source_author>, Upstream commit'
 """.strip()  # noqa: W291
+
+    def test_lifecyclehooks(self, init_test_repositories, fake_github_provider, tmpdir):
+        source, rebase, dest = init_test_repositories
+        with CommitBuilder(source) as cb:
+            cb.add_file("baz.txt", "fiz")
+            cb.commit("other upstream commit")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("carry-file1", "content")
+            cb.commit("UPSTREAM: <carry>: carry commit #1")
+        with CommitBuilder(dest) as cb:
+            cb.add_file(
+                "test-hook-script.sh",
+                r"""#!/bin/bash
+                touch test-hook-script.success
+                git add test-hook-script.success
+                git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'""")
+            cb.commit("UPSTREAM: <carry>: add test hook script")
+
+        args = MagicMock()
+        args.source = source
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.post_rebase_hook = [f"git:dest/{dest.branch}:test-hook-script.sh"]
+
+        hooks = lifecycle_hooks.LifecycleHooks(args)
+
+        result = rebasebot_run(
+            source=source,
+            dest=dest,
+            rebase=rebase,
+            working_dir=tmpdir,
+            git_username=args.git_username,
+            git_email=args.git_email,
+            github_app_provider=fake_github_provider,
+            slack_webhook=None,
+            tag_policy="strict",
+            bot_emails=["genbot@example.com", "anotherbot@example.com"],
+            exclude_commits=[],
+            update_go_modules=False,
+            dry_run=True,
+            hooks=hooks
+        )
+        assert (result)
+
+        working_repo = Repo.init(tmpdir)
+        assert working_repo.head.ref.name == "rebase"
+        log_graph = working_repo.git.log(
+            "--graph", "--oneline", "--pretty='<%an>, %s'")
+        assert os.path.exists(os.path.join(tmpdir, "test-hook-script.success"))
+        assert log_graph == r"""* '<test_rebasebot>, UPSTREAM: <drop>: test-hook-script generated files'
+* '<dest_author>, UPSTREAM: <carry>: add test hook script'
+* '<dest_author>, UPSTREAM: <carry>: carry commit #1'
+* '<dest_author>, UPSTREAM: <carry>: our cool addition'
+*   '<test_rebasebot>, merge upstream/main into main'
+|\  
+| * '<source_author>, other upstream commit'
+* | '<dest_author>, UPSTREAM: <carry>: add test hook script'
+* | '<dest_author>, UPSTREAM: <carry>: carry commit #1'
+* | '<dest_author>, UPSTREAM: <carry>: our cool addition'
+|/  
+* '<source_author>, Upstream commit'"""  # noqa: W291

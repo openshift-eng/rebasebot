@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from typing import Optional
 
 from rebasebot import bot
+from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
 
 
@@ -205,11 +206,47 @@ def _parse_cli_arguments():
         required=False,
         help="When enabled, the bot will not check for presence of rebase/manual label on pull requests",
     )
+    parser.add_argument(
+        "--pre-rebase-hook",
+        type=str,
+        required=False,
+        nargs="+",
+        help="The location of the pre-rebase lifecycle hook script.",
+    )
+    parser.add_argument(
+        "--pre-carry-commit-hook",
+        type=str,
+        required=False,
+        nargs="+",
+        help="The location of the pre-carry-commit lifecycle hook script.",
+    )
+    parser.add_argument(
+        "--post-rebase-hook",
+        type=str,
+        required=False,
+        nargs="+",
+        help="The location of the post-rebase lifecycle hook script.",
+    )
+    parser.add_argument(
+        "--pre-push-rebase-branch-hook",
+        type=str,
+        required=False,
+        nargs="+",
+        help="The location of the pre-push-rebase-branch lifecycle hook script.",
+    )
+    parser.add_argument(
+        "--pre-create-pr-hook",
+        type=str,
+        required=False,
+        nargs="+",
+        help="The location of the pre-create-pr lifecycle hook script.",
+    )
 
     return parser.parse_args()
 
 
 def _get_github_app_wrapper(
+        *,
         gh_app_id: Optional[int],
         gh_app_key_path: Optional[str],
         dest_branch: Optional[GitHubBranch],
@@ -252,15 +289,21 @@ def main():
     logger.setLevel(logging.WARN)
 
     github_app_wrapper = _get_github_app_wrapper(
-        args.github_app_id, args.github_app_key, args.dest,
-        args.github_cloner_id, args.github_cloner_key, args.rebase,
-        args.github_user_token
+        gh_app_id=args.github_app_id, gh_app_key_path=args.github_app_key, dest_branch=args.dest,
+        gh_cloner_id=args.github_cloner_id, gh_cloner_key_path=args.github_cloner_key, rebase_branch=args.rebase,
+        gh_user_token_path=args.github_user_token
     )
 
     slack_webhook = None
     if args.slack_webhook is not None:
         with open(args.slack_webhook, "r", encoding='utf-8') as app_key_file:
             slack_webhook = app_key_file.read().strip()
+
+    try:
+        hooks = lifecycle_hooks.LifecycleHooks(args)
+    except Exception as e:
+        logger.error(f"Error occurred while initalizing lifecycle hooks: {str(e)}")
+        sys.exit(1)
 
     success = bot.run(
         source=args.source,
@@ -276,7 +319,8 @@ def main():
         exclude_commits=args.exclude_commits,
         update_go_modules=args.update_go_modules,
         dry_run=args.dry_run,
-        ignore_manual_label=args.ignore_manual_label
+        ignore_manual_label=args.ignore_manual_label,
+        hooks=hooks
     )
 
     if success:

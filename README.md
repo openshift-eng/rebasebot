@@ -94,6 +94,8 @@ By default the bot clones everything in `.rebase` folder. You can specify anothe
 
 It's useful only with Golang repositories, which require a `vendor` folder with all dependencies. If `--update-go-modules` flag is set, then the bot will create another commit on top of the rebase, which contains changes in the `vendor` folder.
 
+*Note: Internally this is implemented using lifecycle hook script and is equivalent to passing `--post-rebase-hook _BUILTIN_/update_go_modules.sh` parameter.*
+
 ### Slack Webhook
 
 If you want to be notified in Slack about the status of recent rebases, you can set ``--slack-webhook` option. The value here is the path to a local file with the webhook url.
@@ -170,6 +172,72 @@ Often when a new version of Go comes out, the ART pull request that updates the 
  and the rebase cannot merge with the old Go version, requiring manual user intervention.
 
 For convenience, the bot will look for an open ART pull request and cherry-pick it into the rebase branch.
+
+## Lifecycle hooks
+
+User-provided scripts can be configured to execute at specific points of the bot's lifecycle. 
+You can specify a path to the script you want to run using the following parameters. These scripts can be any executable file. The same lifecycle hook arguments can be specified multiple times to attach multiple scripts to the same hook. If multiple scripts are attached to the same lifecycle hook, they will execute in the order they are provided.
+
+- **`--pre-rebase-hook`**: Executed when repository is setup with `rebase` branch checked out on `source/branch` before rebase.
+- **`--pre-carry-commit-hook`**: Executed before carrying each commit during the rebase process. The upstream is merged into the rebase branch.
+- **`--post-rebase-hook`**: Executed after the rebase process is completed.
+- **`--pre-push-rebase-branch-hook`**: Executed before pushing the rebase branch to the remote repository.
+- **`--pre-create-pr-hook`**: Executed before creating the pull request.
+
+### Script sources
+
+Scripts can be loaded from local filesystem, from one of the remotes, or from the builtin scripts directory.
+
+#### Local file scripts
+
+Local file scripts can be specified either by their absolute path or by their relative path to the current working directory.
+
+##### Example
+
+```sh
+rebasebot ... \
+    --pre-rebase-hook /home/user/script.sh \
+    --pre-rebase-hook script.sh
+```
+
+#### Scripts stored inside the repository
+
+To ensure scripts stored within the repository are available in all stages of the rebase process specify their path as `git:gitRef:repo/relative/path/to/script`. This approach makes the scripts accessible throughout the rebase.
+
+*Note: `gitRef` can be a branch name, tag name, or commit hash.*
+
+##### Example
+    
+The following example will attach script to be run after rebase from `rebasebot/generate-script.sh` file stored on the `dest/main` branch.
+
+```sh
+rebasebot --post-rebase-hook git:dest/main:rebasebot/generate-script.sh
+```
+
+#### Builtin lifecycle hook scripts
+
+Some scripts are included in the bot repository itself. They are stored in the `rebasebot/builtin-hooks` directory.
+
+Builtin scripts are available via the `_BUILTIN_/` path prefix.
+
+##### Example
+
+```sh
+rebasebot --pre-create-pr-hook _BUILTIN_/example.sh
+```
+
+### Environment variables in Hooks
+
+Some rebasebot arguments are available in lifecycle hook scripts as environment variables:
+
+- **`REBASEBOT_SOURCE`**: Name of the target branch on source remote.
+- **`REBASEBOT_DEST`**: Name of the target branch on dest remote.
+- **`REBASEBOT_REBASE`**: Name of the target branch on rebase remote.
+- **`REBASEBOT_WORKING_DIR`**: Path to the repository working directory.
+- **`REBASEBOT_GIT_USERNAME`**: Committer username from `--git-username`.
+- **`REBASEBOT_GIT_EMAIL`**: Committer email from `--git-email`.
+
+*Note: Remotes are always `source`, `dest`, and `rebase`. The local branch is called rebase.*
 
 ## Examples of usage
 
