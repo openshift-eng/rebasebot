@@ -21,9 +21,7 @@ from collections import defaultdict
 import logging
 import builtins
 import os
-import subprocess
 import sys
-import glob
 
 import git
 import git.compat
@@ -34,6 +32,7 @@ from github3.repos.repo import Repository
 from github3.repos.commit import ShortCommit
 from github3.pulls import ShortPullRequest
 
+from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
 
 
@@ -63,53 +62,6 @@ def _message_slack(webhook_url: str, msg: str) -> None:
     if webhook_url is None:
         return
     requests.post(webhook_url, json={"text": msg}, timeout=5)
-
-
-def _commit_go_mod_updates(gitwd: git.Repo, source: GitHubBranch) -> None:
-    logging.info("Performing go modules update")
-
-    for filepath in glob.glob('./**/go.mod', recursive=True):
-        module_base_path = os.path.dirname(filepath)
-
-        try:
-            # Reset go.mod and go.sum to make sure they are the same as in the source
-            for filename in ["go.mod", "go.sum"]:
-                full_path = os.path.join(module_base_path, filename)
-                if not os.path.exists(full_path):
-                    continue
-                try:
-                    gitwd.remotes.source.repo.git.checkout(f"source/{source.branch}", full_path)
-                except git.GitCommandError:
-                    logging.debug("go module at %s is downstream only, skip its resetting", module_base_path)
-                    break
-
-            proc = subprocess.run(
-                "go mod tidy", cwd=module_base_path, shell=True, check=True, capture_output=True
-            )
-            logging.debug("go mod tidy output: %s", proc.stdout.decode())
-
-            proc = subprocess.run(
-                "go mod vendor", cwd=module_base_path, shell=True, check=True, capture_output=True
-            )
-            logging.debug("go mod vendor output %s:", proc.stdout.decode())
-
-        except subprocess.CalledProcessError as err:
-            raise RepoException(
-                f"Unable to update go modules: {err}: {err.stderr.decode()}"
-            ) from err
-
-    if gitwd.is_dirty(untracked_files=True):
-        try:
-            gitwd.git.add(all=True)
-            gitwd.git.commit(
-                "-m", "UPSTREAM: <carry>: Updating and vendoring go modules "
-                "after an upstream rebase"
-            )
-        except Exception as err:
-            # Temporary ignore type checking
-            # TODO: Fix, choose appropriate exception type here
-            err.extra_info = "Unable to commit go module changes in git"  # type: ignore
-            raise err
 
 
 def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> bool:
@@ -236,7 +188,7 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
     return downstream_commits
 
 
-def _do_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, source_repo: Repository, tag_policy: str,
+def _do_rebase(*, gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, source_repo: Repository, tag_policy: str,
                bot_emails: list, exclude_commits: list, update_go_modules: bool) -> None:
     logging.info("Performing rebase")
 
@@ -498,6 +450,7 @@ def is_ref_a_tag(gitwd: git.Repo, ref: str) -> bool:
 
 
 def _init_working_dir(
+    *,
     source: GitHubBranch,
     dest: GitHubBranch,
     rebase: GitHubBranch,
@@ -577,6 +530,8 @@ def _init_working_dir(
         gitwd.create_head("rebase", head_commit)
     gitwd.git.checkout("rebase")
     gitwd.head.reset(index=True, working_tree=True)
+    # Clean any untracked files when reusing rebase directory
+    gitwd.git.clean('-fd')
 
     return gitwd
 
@@ -659,6 +614,7 @@ def _report_result(needs_rebase: bool, pr_available: bool, pr_url: str, dest_url
 
 
 def run(
+    *,
     source: GitHubBranch,
     dest: GitHubBranch,
     rebase: GitHubBranch,
@@ -670,6 +626,7 @@ def run(
     tag_policy: str,
     bot_emails: list,
     exclude_commits: list,
+    hooks: lifecycle_hooks.LifecycleHooks = None,
     update_go_modules: bool = False,
     dry_run: bool = False,
     ignore_manual_label: bool = False
@@ -677,6 +634,9 @@ def run(
     """Run Rebase Bot."""
     gh_app = github_app_provider.github_app
     gh_cloner_app = github_app_provider.github_cloner_app
+
+    if hooks is None:
+        hooks = lifecycle_hooks.LifecycleHooks()
 
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)
@@ -714,12 +674,12 @@ def run(
     try:
         os.chdir(working_dir)
         gitwd = _init_working_dir(
-            source,
-            dest,
-            rebase,
-            github_app_provider,
-            git_username,
-            git_email
+            source=source,
+            dest=dest,
+            rebase=rebase,
+            github_app_provider=github_app_provider,
+            git_username=git_username,
+            git_email=git_email
         )
     except Exception as ex:
         logging.exception(f"error initializing the git directory: {ex}", extra={"working_dir": working_dir})
@@ -729,16 +689,26 @@ def run(
         )
         return False
 
+    hooks.fetch_hook_scripts(gitwd)
+
     try:
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             _prepare_rebase_branch(gitwd, source, dest)
-            _do_rebase(gitwd, source, dest, source_repo, tag_policy,
-                       bot_emails, exclude_commits, update_go_modules)
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
+            _do_rebase(
+                gitwd=gitwd,
+                source=source,
+                dest=dest,
+                source_repo=source_repo,
+                tag_policy=tag_policy,
+                bot_emails=bot_emails,
+                exclude_commits=exclude_commits,
+                update_go_modules=update_go_modules
+            )
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
             _cherrypick_art_pull_request(gitwd, dest_repo, dest)
-
-            if update_go_modules:
-                _commit_go_mod_updates(gitwd, source)
 
     except RepoException as ex:
         logging.exception(f"Manual intervention is needed to rebase {source.url}:{source.branch} into",
@@ -776,6 +746,7 @@ def run(
     if push_required:
         logging.info("Existing rebase branch needs to be updated.")
         try:
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
             _push_rebase_branch(gitwd, rebase)
         except Exception as ex:
             logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}: {ex}")
@@ -799,6 +770,7 @@ def run(
 
     try:
         if not pr_available and needs_rebase:
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
             pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)

@@ -76,6 +76,7 @@ class GithubAppProvider:
 
     def __init__(
             self,
+            *,
             app_id: Optional[int] = None,
             app_key: Optional[bytes] = None,
             dest_branch: Optional[GitHubBranch] = None,

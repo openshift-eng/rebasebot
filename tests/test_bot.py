@@ -18,15 +18,25 @@ import pytest
 
 from rebasebot.github import GitHubBranch
 from rebasebot.bot import (
-    _commit_go_mod_updates,
     _add_to_rebase,
     _is_pr_available,
     _report_result,
     _update_pr_title
 )
+from rebasebot import lifecycle_hooks
 
 
 class TestGoMod:
+
+    def _args_stub(_, repo_dir, source) -> MagicMock:
+        args = MagicMock()
+        args.source = source
+        args.dest = GitHubBranch(repo_dir, "example", "foo", "dest")
+        args.rebase = GitHubBranch(repo_dir, "example", "foo", "rebase")
+        args.working_dir = repo_dir
+        args.git_username = "unittest"
+        args.git_email = "unit@test.org"
+        return args
 
     def test_update_and_commit(self, tmp_go_app_repo):
         repo_dir, repo = tmp_go_app_repo
@@ -41,7 +51,9 @@ class TestGoMod:
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
-        _commit_go_mod_updates(repo, source)
+        lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
+        update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
+        update_go_modules_script()
 
         commits = list(repo.iter_commits())
 
@@ -65,7 +77,9 @@ class TestGoMod:
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
-        _commit_go_mod_updates(repo, source)
+        lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
+        update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
+        update_go_modules_script()
 
         commits = list(repo.iter_commits())
 
