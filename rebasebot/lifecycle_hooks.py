@@ -26,6 +26,10 @@ from enum import Enum
 import git
 
 
+class LifecycleHookScriptException(Exception):
+    """LifecycleHookScriptException is a exception raised as a result of lifecycle hook script failure."""
+
+
 class LifecycleHook(Enum):
     """LifecycleHook is an enum of points of the rebase process where scripts can be attached."""
     PRE_REBASE = "preRebaseHook"
@@ -37,10 +41,9 @@ class LifecycleHook(Enum):
 
 class LifecycleHookScript:
     """LifecycleHookScript represents a script file that can be executed."""
-    script_location: str  # The user-defined location of the script
-    script_file_path: str  # The resolved absolute path to the script
 
     def __init__(self, script_location: str):
+        self.script_file_path = None
         self.script_location = script_location
         if script_location.startswith("git:"):
             return
@@ -65,7 +68,7 @@ class LifecycleHookScript:
             # 5-digit hash to avoid name conflicts with other scripts that have the same name
             hash_suffix = str(abs(hash(git_location)))[:5]
             basename, ext = os.path.splitext(os.path.basename(file_path))
-            self.script_file_path = f"{temp_hook_dir}{basename}-{hash_suffix}{ext}"
+            self.script_file_path = f"{temp_hook_dir}/{basename}-{hash_suffix}{ext}"
             try:
                 with open(f"{self.script_file_path}", "w", encoding='latin1') as f:
                     f.write(gitwd.git.show(f"{git_ref}:{file_path}"))
@@ -77,37 +80,33 @@ class LifecycleHookScript:
         return self.script_location
 
     def __call__(self):
-        try:
-            with subprocess.Popen(
-                [self.script_file_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            ) as process:
+        with subprocess.Popen(
+            [self.script_file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        ) as process:
 
-                streams = [process.stdout, process.stderr]
+            streams = [process.stdout, process.stderr]
 
-                while streams:
-                    # Wait for output from both stdout and stderr
-                    readable, _, _ = select.select(streams, [], [])
-                    for stream in readable:
-                        line = stream.readline()
-                        if line:
-                            if stream == process.stderr:
-                                print(line, file=sys.stderr, end='')
-                            else:
-                                print(line, end='')
+            while streams:
+                # Wait for output from both stdout and stderr
+                readable, _, _ = select.select(streams, [], [])
+                for stream in readable:
+                    line = stream.readline()
+                    if line:
+                        if stream == process.stderr:
+                            print(line, file=sys.stderr, end='')
                         else:
-                            # Remove closed stream from the list
-                            streams.remove(stream)
+                            print(line, end='')
+                    else:
+                        # Remove closed stream from the list
+                        streams.remove(stream)
 
-                # Wait for the process to finish
-                return_code = process.poll()
-                if return_code != 0:
-                    raise subprocess.CalledProcessError(return_code, self.script_file_path)
-
-        except subprocess.CalledProcessError as e:
-            print(f"Script failed with error:\n{e}")
+            # Wait for the process to finish
+            return_code = process.poll()
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, self.script_file_path)
 
 
 def _setup_environment_variables(args):
@@ -122,16 +121,11 @@ def _setup_environment_variables(args):
 
 class LifecycleHooks:
     """LifecycleHooks stores lifecycle hook scripts and handles setup and teardown of temporary script files."""
-    hooks: dict[LifecycleHook, list[LifecycleHookScript]] = {}
-    tmp_hook_scripts_dir: str = None
-
-    def attach_script_to_hook(self, hook: LifecycleHook, script: LifecycleHookScript):
-        """Adds a script to the specified hook."""
-        if hook not in self.hooks:
-            self.hooks[hook] = []
-        self.hooks[hook].append(script)
 
     def __init__(self, args=None):
+        self.hooks: dict[LifecycleHook, list[LifecycleHookScript]] = {}
+        self.tmp_hook_scripts_dir: str = None
+
         if args is None:
             return
 
@@ -155,6 +149,12 @@ class LifecycleHooks:
             for script_file_path in args.pre_create_pr_hook:
                 self.attach_script_to_hook(LifecycleHook.PRE_CREATE_PR, LifecycleHookScript(script_file_path))
 
+    def attach_script_to_hook(self, hook: LifecycleHook, script: LifecycleHookScript):
+        """Adds a script to the specified hook."""
+        if hook not in self.hooks:
+            self.hooks[hook] = []
+        self.hooks[hook].append(script)
+
     def __del__(self):
         """Cleans up temporary script directory"""
         if self.tmp_hook_scripts_dir is not None:
@@ -171,4 +171,9 @@ class LifecycleHooks:
         """Executes all scripts in the given lifecycle hook."""
         for script in self.hooks.get(hook, []):
             logging.info(f"Running {hook} lifecycle hook {script}")
-            script()
+            try:
+                script()
+            except subprocess.CalledProcessError as err:
+                logging.error(f"Script {script} failed with exit code {err.returncode}")
+                message = f"{hook} script {script} failed with exit-code {err.returncode}"
+                raise LifecycleHookScriptException(message) from err

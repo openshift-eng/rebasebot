@@ -15,22 +15,22 @@
 #    under the License.
 """This module implements functions for the Rebase Bot."""
 
-from typing import Optional, Tuple
-from collections import defaultdict
-
-import logging
 import builtins
+import logging
 import os
 import sys
+from collections import defaultdict
+from typing import Optional, Tuple
 
 import git
 import git.compat
 import github3
 import requests
 from git.objects import Commit
-from github3.repos.repo import Repository
-from github3.repos.commit import ShortCommit
 from github3.pulls import ShortPullRequest
+from github3.repos.commit import ShortCommit
+from github3.repos.repo import Repository
+from rebasebot.lifecycle_hooks import LifecycleHookScriptException
 
 from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
@@ -659,7 +659,7 @@ def run(
                 return True
 
     except Exception as ex:
-        logging.exception(f"error fetching repo information from GitHub: {ex}")
+        logging.exception("error fetching repo information from GitHub")
         _message_slack(
             slack_webhook,
             f"I got an error fetching repo information from GitHub: {ex}"
@@ -682,7 +682,7 @@ def run(
             git_email=git_email
         )
     except Exception as ex:
-        logging.exception(f"error initializing the git directory: {ex}", extra={"working_dir": working_dir})
+        logging.exception("error initializing the git directory", extra={"working_dir": working_dir})
         _message_slack(
             slack_webhook,
             f"I got an error initializing the git directory: {ex}"
@@ -710,9 +710,9 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
             _cherrypick_art_pull_request(gitwd, dest_repo, dest)
 
-    except RepoException as ex:
-        logging.exception(f"Manual intervention is needed to rebase {source.url}:{source.branch} into",
-                          f"{dest.ns}/{dest.name}:{dest.branch}", ex)
+    except (RepoException, LifecycleHookScriptException) as ex:
+        logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
+                      f"into {dest.ns}/{dest.name}:{dest.branch}")
         _message_slack(
             slack_webhook,
             f"Manual intervention is needed to rebase "
@@ -720,14 +720,14 @@ def run(
             f"into {dest.ns}/{dest.name}:{dest.branch}: "
             f"{ex}",
         )
-        return True
+        return False
     except Exception as ex:
-        logging.exception(f"exception when trying to rebase {source.url}:{source.branch} into",
-                          f"{dest.ns}/{dest.name}:{dest.branch}: {ex}")
+        logging.exception(f"exception when trying to rebase {source.url}:{source.branch} "
+                          f"into {dest.ns}/{dest.name}:{dest.branch}")
 
         _message_slack(
             slack_webhook,
-            f"I got an error trying to rebase "
+            f"I got an exception trying to rebase "
             f"{source.url}:{source.branch} "
             f"into {dest.ns}/{dest.name}:{dest.branch}: "
             f"{ex}",
@@ -748,11 +748,23 @@ def run(
         try:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
             _push_rebase_branch(gitwd, rebase)
-        except Exception as ex:
-            logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}: {ex}")
+
+        except LifecycleHookScriptException as ex:
+            logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
+                          f"into {dest.ns}/{dest.name}:{dest.branch}")
             _message_slack(
                 slack_webhook,
-                f"I got an error pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}",
+                f"Manual intervention is needed to rebase "
+                f"{source.url}:{source.branch} "
+                f"into {dest.ns}/{dest.name}:{dest.branch}: "
+                f"{ex}",
+            )
+            return False
+        except Exception as ex:
+            logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
+            _message_slack(
+                slack_webhook,
+                f"I got an exception pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}: {ex}",
             )
             return False
 
@@ -761,7 +773,7 @@ def run(
         try:
             _update_pr_title(gitwd, pull_req, source, dest)
         except Exception as ex:
-            logging.exception(f"error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}")
+            logging.exception(f"error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}")
             _message_slack(
                 slack_webhook,
                 f"I got an error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}",
@@ -772,6 +784,17 @@ def run(
         if not pr_available and needs_rebase:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
             pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
+    except LifecycleHookScriptException as ex:
+        logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
+                      f"into {dest.ns}/{dest.name}:{dest.branch}")
+        _message_slack(
+            slack_webhook,
+            f"Manual intervention is needed to rebase "
+            f"{source.url}:{source.branch} "
+            f"into {dest.ns}/{dest.name}:{dest.branch}: "
+            f"{ex}",
+        )
+        return False
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
         _message_slack(
@@ -781,7 +804,7 @@ def run(
 
         return False
     except Exception as ex:
-        logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}: {ex}")
+        logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}")
         _message_slack(
             slack_webhook,
             f"I got an error creating a rebase PR in {dest.ns}/{dest.name}: {ex}"
