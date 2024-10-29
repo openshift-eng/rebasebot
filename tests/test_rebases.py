@@ -459,3 +459,52 @@ class TestRebases:
 * | '<dest_author>, UPSTREAM: <carry>: our cool addition'
 |/  
 * '<source_author>, Upstream commit'"""  # noqa: W291
+
+    def test_lifecyclehook_fail(self, init_test_repositories, fake_github_provider, tmpdir, caplog):
+        source, rebase, dest = init_test_repositories
+        with CommitBuilder(source) as cb:
+            cb.add_file("baz.txt", "fiz")
+            cb.commit("other upstream commit")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("carry-file1", "content")
+            cb.commit("UPSTREAM: <carry>: carry commit #1")
+        with CommitBuilder(dest) as cb:
+            cb.add_file(
+                "test-failure-hook-script.sh",
+                r"""#!/bin/bash
+                exit 5""")
+            cb.commit("UPSTREAM: <carry>: add test hook script")
+
+        args = MagicMock()
+        args.source = source
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.pre_rebase_hook = [f"git:dest/{dest.branch}:test-failure-hook-script.sh"]
+
+        hooks = lifecycle_hooks.LifecycleHooks(args)
+
+        result = rebasebot_run(
+            source=source,
+            dest=dest,
+            rebase=rebase,
+            working_dir=tmpdir,
+            git_username=args.git_username,
+            git_email=args.git_email,
+            github_app_provider=fake_github_provider,
+            slack_webhook=None,
+            tag_policy="strict",
+            bot_emails=["genbot@example.com", "anotherbot@example.com"],
+            exclude_commits=[],
+            update_go_modules=False,
+            dry_run=True,
+            hooks=hooks
+        )
+
+        assert "Script git:dest/main:test-failure-hook-script.sh failed with exit code 5" in caplog.text
+        assert "Manual intervention is needed to rebase" in caplog.text
+
+        # Rebase did not succeed
+        assert result is False
