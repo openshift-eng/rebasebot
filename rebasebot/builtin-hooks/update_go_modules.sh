@@ -36,17 +36,21 @@ process_go_mod_updates() {
             fi
         done
 
-        echo "go mod tidy output for $full_path"
+        pushd "$module_base_path"
+
+        echo "go mod tidy output for $module_base_path"
         if ! go mod tidy; then
             echo "Unable to run 'go mod tidy' in $module_base_path" >&2
             exit 1
         fi
 
-        echo "go mod vendor output for $full_path"
+        echo "go mod vendor output for $module_base_path"
         if ! go mod vendor; then
             echo "Unable to run 'go mod vendor' in $module_base_path" >&2
             exit 1
         fi
+
+        popd
     done
 
     stage_and_commit
