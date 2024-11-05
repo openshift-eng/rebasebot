@@ -58,7 +58,7 @@ class TestGoMod:
         commits = list(repo.iter_commits())
 
         assert len(commits) == 3
-        assert commits[0].message == "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase\n"
+        assert commits[0].message == "UPSTREAM: <drop>: Updating and vendoring go modules after an upstream rebase\n"
 
     # Test how the function handles an empty commit.
     # This should not error out and exit if working properly.

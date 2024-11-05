@@ -176,7 +176,8 @@ For convenience, the bot will look for an open ART pull request and cherry-pick 
 ## Lifecycle hooks
 
 User-provided scripts can be configured to execute at specific points of the bot's lifecycle. 
-You can specify a path to the script you want to run using the following parameters. These scripts can be any executable file. The same lifecycle hook arguments can be specified multiple times to attach multiple scripts to the same hook. If multiple scripts are attached to the same lifecycle hook, they will execute in the order they are provided.
+You can specify a path to the script you want to run using the following parameters. The script can be any executable file.
+Lifecycle hook parameters accept one or more script location arguments, which are executed in the order they are provided.
 
 - **`--pre-rebase-hook`**: Executed when repository is setup with `rebase` branch checked out on `source/branch` before rebase.
 - **`--pre-carry-commit-hook`**: Executed before carrying each commit during the rebase process. The upstream is merged into the rebase branch.
@@ -197,7 +198,11 @@ Local file scripts can be specified either by their absolute path or by their re
 ```sh
 rebasebot ... \
     --pre-rebase-hook /home/user/script.sh \
-    --pre-rebase-hook script.sh
+```
+
+```sh
+rebasebot ... \
+    --pre-rebase-hook script.sh second-script.sh \
 ```
 
 #### Scripts stored inside the repository
@@ -208,7 +213,7 @@ To ensure scripts stored within the repository are available in all stages of th
 
 ##### Example
     
-The following example will attach script to be run after rebase from `rebasebot/generate-script.sh` file stored on the `dest/main` branch.
+The following example will attach script to be run the last during POST_REBASE_HOOK from `rebasebot/generate-script.sh` file stored on the `dest/main` branch.
 
 ```sh
 rebasebot --post-rebase-hook git:dest/main:rebasebot/generate-script.sh

@@ -306,9 +306,10 @@ def _resolve_conflict(gitwd: git.Repo) -> bool:
     allowed_conflict_prefixes = ["UD ", "DU ", "AU ", "UA ", "DD "]
 
     # Non-conflict status prefixes that we should ignore
-    allowed_status_prefixes = ["M  ", "D  ", "A  "]
+    allowed_status_prefixes = ["M  ", "D  ", "A  ", "R  ", "C  "]
 
-    ud_files = []
+    unresolvable = False
+    files_to_delete = []
     for line in status.splitlines():
         logging.info("Resolving conflict: %s", line)
         file_status = line[:3]
@@ -317,7 +318,8 @@ def _resolve_conflict(gitwd: git.Repo) -> bool:
             continue
         if file_status not in allowed_conflict_prefixes:
             # There is a conflict we can't resolve
-            return False
+            logging.info("Unresolvable conflict: %s", line)
+            unresolvable = True
         filename = line[3:].rstrip('\n')
         # Special characters are escaped
         if filename[0] == filename[-1] == '"':
@@ -326,10 +328,17 @@ def _resolve_conflict(gitwd: git.Repo) -> bool:
                 decode('unicode_escape').\
                 encode('latin1').\
                 decode(git.compat.defenc)
-        ud_files.append(filename)
+        files_to_delete.append(filename)
+        logging.info("Deleting conflicting file: %s", filename)
 
-    for ud_file in ud_files:
+    for ud_file in files_to_delete:
         gitwd.git.rm(ud_file)
+
+    if unresolvable:
+        # Abort the rebase after handling the resolvable conflicts.
+        # Leaving only the ones that are not possible to be resolved automatically.
+        logging.error("Unresolvable conflict. Aborting rebase.")
+        return False
 
     gitwd.git.commit("--no-edit")
 
@@ -528,7 +537,7 @@ def _init_working_dir(
         gitwd.heads.rebase.set_commit(head_commit)
     else:
         gitwd.create_head("rebase", head_commit)
-    gitwd.git.checkout("rebase")
+    gitwd.git.checkout("rebase", force=True)
     gitwd.head.reset(index=True, working_tree=True)
     # Clean any untracked files when reusing rebase directory
     gitwd.git.clean('-fd')
