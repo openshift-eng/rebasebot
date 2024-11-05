@@ -537,7 +537,7 @@ def _init_working_dir(
         gitwd.heads.rebase.set_commit(head_commit)
     else:
         gitwd.create_head("rebase", head_commit)
-    gitwd.git.checkout("rebase")
+    gitwd.git.checkout("rebase", force=True)
     gitwd.head.reset(index=True, working_tree=True)
     # Clean any untracked files when reusing rebase directory
     gitwd.git.clean('-fd')
