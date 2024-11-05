@@ -13,7 +13,7 @@ stage_and_commit(){
 
     if [[ -n $(git status --porcelain) ]]; then
         git add -A
-        git commit "${author_flag[@]}" -q -m "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase"
+        git commit "${author_flag[@]}" -q -m "UPSTREAM: <drop>: Updating and vendoring go modules after an upstream rebase"
     fi
 }
 
