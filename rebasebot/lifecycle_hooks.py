@@ -16,6 +16,7 @@
 
 import logging
 import os
+import re
 import select
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ import tempfile
 from enum import Enum
 
 import git
+import git.repo
 
 
 class LifecycleHookScriptException(Exception):
@@ -59,22 +61,50 @@ class LifecycleHookScript:
 
     def fetch_from_git(self, gitwd: git.Repo, temp_hook_dir: str):
         """Fetches the script from a git repository and stores it in a temporary directory."""
-        # Checks if the script path references a git branch
-        # The format is git:<git_reference>:<file_path>
-        if self.script_location.startswith("git:"):
-            git_location = self.script_location[4:]
-            git_ref, file_path = git_location.split(":", 1)
+        if not self.script_location.startswith("git:"):
+            return
 
-            # 5-digit hash to avoid name conflicts with other scripts that have the same name
-            hash_suffix = str(abs(hash(git_location)))[:5]
-            basename, ext = os.path.splitext(os.path.basename(file_path))
-            self.script_file_path = f"{temp_hook_dir}/{basename}-{hash_suffix}{ext}"
+        git_location = self.script_location[4:]
+        git_ref, file_path = git_location.split(":", 1)
+
+        # 5-digit hash to avoid name conflicts with other scripts that have the same name
+        hash_suffix = str(abs(hash(git_location)))[:5]
+        basename, ext = os.path.splitext(os.path.basename(file_path))
+        self.script_file_path = f"{temp_hook_dir}/{basename}-{hash_suffix}{ext}"
+
+        remote_git_pattern_match = re.match("^git:(https://([^/]+)/([^/]+)/([^/]+))/([^/]*?):(.*)$",
+                                            self.script_location)
+        local_git_pattern_match = re.match("^git:([^:]+):([^:]+)$", self.script_location)
+        if remote_git_pattern_match:
+            repo_url, domain, organization, name, branch, path_to_script = remote_git_pattern_match.groups()
+
+            # Add the remote if it doesn't already exist
+            if not any(remote.name == f"{domain}/{organization}/{name}" for remote in gitwd.remotes):
+                try:
+                    gitwd.create_remote(f"{domain}/{organization}/{name}", repo_url)
+                except git.GitCommandError as e:
+                    raise ValueError(f"Failed to add remote domain/{organization}/{name}") from e
+
+            # Blobless fetch of the branch
             try:
-                with open(f"{self.script_file_path}", "w", encoding='latin1') as f:
-                    f.write(gitwd.git.show(f"{git_ref}:{file_path}"))
+                _fetch_branch(gitwd, f"{domain}/{organization}/{name}", branch, ref_filter="blob:none")
             except git.GitCommandError as e:
-                raise ValueError(f"Failed to retrieve script from git reference {git_ref}") from e
-            os.chmod(f"{self.script_file_path}", 0o755)  # Make it executable
+                raise ValueError(f"Failed to fetch branch {branch}") from e
+
+            git_path = f"{domain}/{organization}/{name}/{branch}:{path_to_script}"
+        elif local_git_pattern_match:
+            git_path = f"{git_ref}:{file_path}"
+        else:
+            raise ValueError(f"LifecycleHook script is not in valid format: {self.script_location}")
+
+        # Create the script file
+        try:
+            with open(f"{self.script_file_path}", "w", encoding='latin1') as f:
+                file = _retrieve_file_from_git(gitwd, git_path)
+                f.write(file)
+        except git.GitCommandError as e:
+            raise ValueError(f"Failed to retrieve script from git reference {git_ref}") from e
+        os.chmod(f"{self.script_file_path}", 0o755)  # Make it executable
 
     def __str__(self):
         return self.script_location
@@ -107,6 +137,14 @@ class LifecycleHookScript:
             return_code = process.poll()
             if return_code != 0:
                 raise subprocess.CalledProcessError(return_code, self.script_file_path)
+
+
+def _fetch_branch(gitwd: git.Repo, remote: str, branch: str, ref_filter: str = None):
+    return gitwd.git.fetch(remote, branch, filter=ref_filter)
+
+
+def _retrieve_file_from_git(gitwd: git.Repo, git_path: str) -> str:
+    return gitwd.git.show(git_path)
 
 
 def _setup_environment_variables(args):
