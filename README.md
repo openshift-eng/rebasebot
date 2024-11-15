@@ -187,7 +187,7 @@ Lifecycle hook parameters accept one or more script location arguments, which ar
 
 ### Script sources
 
-Scripts can be loaded from local filesystem, from one of the remotes, or from the builtin scripts directory.
+Scripts can be loaded from local filesystem, remotes, or from the builtin scripts directory.
 
 #### Local file scripts
 
@@ -217,6 +217,16 @@ The following example will attach script to be run the last during POST_REBASE_H
 
 ```sh
 rebasebot --post-rebase-hook git:dest/main:rebasebot/generate-script.sh
+```
+
+#### Scripts from remote repository
+
+The hook script can be fetched from any remote Git repository. Use this option if you are storing the script in a different repository than the one you are rebasing, or if you are storing it on a branch that is not typically fetched during normal rebasebot operations. Only the repository metadata and the script file is downloaded to minimize required data transfer. The path is in this format: `git:https_repository_clone_url/branch:repo/relative/path/to/script`
+
+##### Example
+
+```sh
+--post-rebase-hook=git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-hook-script.sh
 ```
 
 #### Builtin lifecycle hook scripts

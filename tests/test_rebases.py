@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 
 import pytest
 
@@ -395,6 +395,73 @@ class TestRebases:
 |/  
 * '<source_author>, Upstream commit'
 """.strip()  # noqa: W291
+
+    @patch("rebasebot.lifecycle_hooks._fetch_branch")
+    @patch("rebasebot.lifecycle_hooks._retrieve_file_from_git")
+    def test_lifecyclehooks_remote(self, mock_retrieve_file_from_git, mock_fetch_branch, init_test_repositories,
+                                   fake_github_provider, tmpdir):
+        source, rebase, dest = init_test_repositories
+        with CommitBuilder(source) as cb:
+            cb.add_file("baz.txt", "fiz")
+            cb.commit("other upstream commit")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("carry-file1", "content")
+            cb.commit("UPSTREAM: <carry>: carry commit #1")
+
+        args = MagicMock()
+        args.source = source
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.post_rebase_hook = ["git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-hook-script.sh"]  # noqa: E501
+
+        hooks = lifecycle_hooks.LifecycleHooks(args)
+
+        mock_retrieve_file_from_git.return_value = r"""#!/bin/bash
+touch test-hook-script.success
+git add test-hook-script.success
+git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
+"""
+
+        result = rebasebot_run(
+            source=source,
+            dest=dest,
+            rebase=rebase,
+            working_dir=tmpdir,
+            git_username=args.git_username,
+            git_email=args.git_email,
+            github_app_provider=fake_github_provider,
+            slack_webhook=None,
+            tag_policy="strict",
+            bot_emails=["genbot@example.com", "anotherbot@example.com"],
+            exclude_commits=[],
+            update_go_modules=False,
+            dry_run=True,
+            hooks=hooks
+        )
+        mock_retrieve_file_from_git.assert_called_once_with(
+            ANY, "github.com/openshift-eng/rebasebot/main:tests/data/test-hook-script.sh")
+        mock_fetch_branch.assert_called_once_with(
+            ANY, "github.com/openshift-eng/rebasebot", "main", ref_filter="blob:none")
+        assert (result)
+        working_repo = Repo.init(tmpdir)
+        assert working_repo.head.ref.name == "rebase"
+        log_graph = working_repo.git.log(
+            "--graph", "--oneline", "--pretty='<%an>, %s'")
+
+        assert os.path.exists(os.path.join(tmpdir, "test-hook-script.success"))
+        assert log_graph == r"""* '<test_rebasebot>, UPSTREAM: <drop>: test-hook-script generated files'
+* '<dest_author>, UPSTREAM: <carry>: carry commit #1'
+* '<dest_author>, UPSTREAM: <carry>: our cool addition'
+*   '<test_rebasebot>, merge upstream/main into main'
+|\  
+| * '<source_author>, other upstream commit'
+* | '<dest_author>, UPSTREAM: <carry>: carry commit #1'
+* | '<dest_author>, UPSTREAM: <carry>: our cool addition'
+|/  
+* '<source_author>, Upstream commit'"""  # noqa: W291
 
     def test_lifecyclehooks(self, init_test_repositories, fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories

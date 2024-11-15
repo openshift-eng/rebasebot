@@ -698,7 +698,15 @@ def run(
         )
         return False
 
-    hooks.fetch_hook_scripts(gitwd)
+    try:
+        hooks.fetch_hook_scripts(gitwd)
+    except Exception as ex:
+        logging.exception("error fetching lifecycle hook scripts")
+        _message_slack(
+            slack_webhook,
+            f"Failed to fetch lifecycle hook scripts: {ex}"
+        )
+        return False
 
     try:
         needs_rebase = _needs_rebase(gitwd, source, dest)
