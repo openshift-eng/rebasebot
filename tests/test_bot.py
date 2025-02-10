@@ -51,8 +51,10 @@ class TestGoMod:
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
-        lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
-        update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
+        lifecycle_hooks._setup_environment_variables(
+            self._args_stub(repo_dir, source))
+        update_go_modules_script = lifecycle_hooks.LifecycleHookScript(
+            "_BUILTIN_/update_go_modules.sh")
         update_go_modules_script()
 
         commits = list(repo.iter_commits())
@@ -77,8 +79,10 @@ class TestGoMod:
         repo.create_remote("source", source.url)
         repo.remotes.source.fetch(source.branch)
 
-        lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
-        update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
+        lifecycle_hooks._setup_environment_variables(
+            self._args_stub(repo_dir, source))
+        update_go_modules_script = lifecycle_hooks.LifecycleHookScript(
+            "_BUILTIN_/update_go_modules.sh")
         update_go_modules_script()
 
         commits = list(repo.iter_commits())
@@ -127,7 +131,8 @@ class TestCommitMessageTags:
         )
     )
     @patch('rebasebot.bot._is_pr_merged')
-    def test_commit_messages_tags(self, mocked_is_pr_merged, pr_is_merged, commit_message, tag_policy, expected):
+    def test_commit_messages_tags(
+            self, mocked_is_pr_merged, pr_is_merged, commit_message, tag_policy, expected):
         mocked_is_pr_merged.return_value = pr_is_merged
         if isinstance(expected, Exception):
             with pytest.raises(Exception, match=str(expected)):

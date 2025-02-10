@@ -2,8 +2,6 @@
 
 Rebase Bot is a tool that allows you to synchronize code between repositories using `git rebase` command and then create a PR in GitHub. The work is based on ShiftStack's [merge bot](https://github.com/shiftstack/merge-bot/tree/main/src/merge_bot).
 
-# Usage
-
 ## Dest and Source parameters
 The bot takes a desired branch in `dest` repository and rebases it onto a branch in the `source` repository.
 The `source` can be any git repository, but `dest` must belong to GitHub. Therefore the format for `--source` and `--dest` is slightly different.
@@ -254,6 +252,42 @@ Some rebasebot arguments are available in lifecycle hook scripts as environment 
 
 *Note: Remotes are always `source`, `dest`, and `rebase`. The local branch is called rebase.*
 
+## Dynamic source git reference selection
+
+Rebasebot offers the capability to dynamically determine the source branch or tag for rebasing, enabling integration into CI/CD pipelines. This is especially valuable when rebasing from release tags or dynamically created branches.
+
+Instead of statically specifying the `--source` parameter, utilize `--source-repo` in conjunction with `--source-ref-hook`. The script provided to `--source-ref-hook` is executed before the rebasebot git workspace setup.
+
+Possible formats for path to the script:
+* Local filepath
+* Builtin with `_BUILTIN_/source-ref-hooks/` prefix
+* A script stored in a GitHub repository using the `git:` prefix.
+    * Format: `git:https_repository_clone_url/branch:repo/relative/path/to/script`
+
+### Script requirements
+
+- The script must exit with code `0` on success. Any non-zero exit code indicates failure, and the bot will not proceed with the rebase.
+- On failure, the bot will log the script's `stderr`.
+- On success, the script must print a **single line** to `stdout` containing only the **branch or tag name** to be used as the rebase source.
+
+You may include any logic to determine the source ref (e.g. call Github APIs).
+
+### Environment variables available in the source branch hook script
+
+- **`REBASEBOT_SOURCE_REPO`** - Source repository in the format `namespace/repository`.
+
+### Built-in source reference hook scripts
+
+The bot includes built-in source reference hook scripts in the `rebasebot/builtin-hooks/source-ref-hooks/` directory. They are available for use via the `_BUILTIN_/source-ref-hooks/` path prefix or they can be used as a reference for custom scripts.
+
+### Example
+
+```sh
+rebasebot ... \
+    --source-repo https://github.com/namespace/repository \
+    --source-ref-hook git:https://github.com/namespace/repository/branch:path-to-branch-hook-script.sh
+```
+
 ## Examples of usage
 
 Example 1. Sync kubernetes/cloud-provider-aws with openshift/cloud-provider-aws using applications credentials. 
@@ -279,3 +313,7 @@ rebasebot --source https://github.com/kubernetes/cloud-provider-azure:master \
           --update-go-modules \
           --github-user-token ~/my-github-token.txt
 ```
+
+Example 3. Rebasebot usage in OpenShift CI pipeline.
+
+https://github.com/openshift/release/blob/master/ci-operator/config/openshift-eng/rebasebot/openshift-eng-rebasebot-main.yaml
