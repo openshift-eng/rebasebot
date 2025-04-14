@@ -7,14 +7,12 @@ import pytest
 
 from git import Repo
 
-from rebasebot import lifecycle_hooks
-from rebasebot.github import GitHubBranch
+from rebasebot import cli
+from rebasebot.github import GitHubBranch, parse_github_branch
 from rebasebot.bot import (
     _init_working_dir,
     _needs_rebase,
     _prepare_rebase_branch,
-
-    run as rebasebot_run
 )
 
 from .conftest import CommitBuilder
@@ -36,7 +34,8 @@ class WorkingRepoContext:
 class TestBotInternalHelpers:
 
     @pytest.fixture
-    def working_repo_context(self, init_test_repositories, fake_github_provider, tmpdir) -> WorkingRepoContext:
+    def working_repo_context(self, init_test_repositories,
+                             fake_github_provider, tmpdir) -> WorkingRepoContext:
         source, rebase, dest = init_test_repositories
         working_repo = _init_working_dir(
             source=source,
@@ -98,27 +97,29 @@ class TestBotInternalHelpers:
 
 class TestRebases:
 
-    def test_simple_dry_run(self, init_test_repositories, fake_github_provider, tmpdir):
+    def test_simple_dry_run(self, init_test_repositories,
+                            fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
         CommitBuilder(source).add_file(
             "baz.txt", "fiz").commit("other upstream commit")
 
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username="test_rebasebot",
-            git_email="test@rebasebot.ocp",
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="soft",
-            bot_emails=[],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=True,
-        )
-        assert result
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.ignore_manual_label = False
+        args.dry_run = True
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+        assert (result)
 
         working_repo = Repo.init(tmpdir)
         assert working_repo.head.ref.name == "rebase"
@@ -136,7 +137,8 @@ class TestRebases:
 
     # Tests that all commits from bots are squashed into one for each bot
 
-    def test_squash_bot_dry_run(self, init_test_repositories, fake_github_provider, tmpdir):
+    def test_squash_bot_dry_run(
+            self, init_test_repositories, fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
         with CommitBuilder(source) as cb:
             cb.add_file("baz.txt", "fiz")
@@ -154,21 +156,22 @@ class TestRebases:
             cb.commit("commit #1 from anotherbot",
                       committer_email="anotherbot@example.com")
 
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username="test_rebasebot",
-            git_email="test@rebasebot.ocp",
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="soft",
-            bot_emails=["genbot@example.com", "anotherbot@example.com"],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=True,
-        )
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.ignore_manual_label = False
+        args.dry_run = True
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
         assert (result)
 
         working_repo = Repo.init(tmpdir)
@@ -191,7 +194,8 @@ class TestRebases:
 * '<source_author>, Upstream commit'
 """.strip()  # noqa: W291
 
-    def test_first_run_dest_has_merges_dry_run(self, init_test_repositories, fake_github_provider, tmpdir):
+    def test_first_run_dest_has_merges_dry_run(
+            self, init_test_repositories, fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
         with CommitBuilder(source) as cb:
             cb.add_file("baz.txt", "fiz")
@@ -201,7 +205,8 @@ class TestRebases:
             cb.commit("commit #1 from genbot",
                       committer_email="genbot@example.com")
         # make branch
-        dest_feature_branch = GitHubBranch(url=dest.url, ns="dest", name="dest", branch="feature")
+        dest_feature_branch = GitHubBranch(
+            url=dest.url, ns="dest", name="dest", branch="feature")
         with CommitBuilder(dest_feature_branch) as cb:
             cb.add_file("feature-file", "feature content")
             cb.commit("commit on dest feature branch")
@@ -218,21 +223,22 @@ class TestRebases:
             cb.commit("commit #1 from anotherbot",
                       committer_email="anotherbot@example.com")
 
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username="test_rebasebot",
-            git_email="test@rebasebot.ocp",
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="soft",
-            bot_emails=[],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=True,
-        )
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = [],
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.ignore_manual_label = False
+        args.dry_run = True
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
         assert (result)
 
         working_repo = Repo.init(tmpdir)
@@ -275,21 +281,23 @@ class TestRebases:
         with CommitBuilder(dest) as cb:
             cb.commit("Empty commit")
 
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username="test_rebasebot",
-            git_email="test@rebasebot.ocp",
-            github_app_provider=fake_github_provider,
-            slack_webhook="test://webhook",
-            tag_policy="soft",
-            bot_emails=["genbot@example.com", "anotherbot@example.com"],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=False,
-        )
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.ignore_manual_label = False
+        args.dry_run = False
+
+        result = cli.rebasebot_run(
+            args, slack_webhook="test://webhook", github_app_wrapper=fake_github_provider)
         assert (result)
 
         working_repo = Repo.init(tmpdir)
@@ -315,36 +323,48 @@ class TestRebases:
 """.strip()  # noqa: W291
 
     @patch("rebasebot.bot._message_slack")
-    def test_has_manual_rebase_pr(self, mocked_message_slack, init_test_repositories, fake_github_provider, tmpdir):
-        source, rebase, _ = init_test_repositories
-        dest = MagicMock()
+    @patch("rebasebot.bot._manual_rebase_pr_in_repo")
+    def test_has_manual_rebase_pr(self, mocked_manual_rebase_pr_in_repo,
+                                  mocked_message_slack, init_test_repositories, fake_github_provider, tmpdir):
+        source, rebase, dest = init_test_repositories
+        dest.clone_url = "https://github.com/dest/dest"
+
         pr = MagicMock()
         pr.labels = [{'name': 'rebase/manual'}]
-        pr.html_url = "https://github.com/rg/test/pull/1"
-        dest.pull_requests.return_value = [pr]
-        fake_github_provider.github_app.repository.return_value = dest
+        pr.html_url = "https://github.com/dest/dest/pull/1"
+        mocked_manual_rebase_pr_in_repo.return_value = pr
 
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username="test_rebasebot",
-            git_email="test@rebasebot.ocp",
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="soft",
-            bot_emails=[],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=False,
-        )
+        # Mock GitHub repository lookup function
+        def fake_repository_func(namespace, name):
+            repository = MagicMock()
+            repository.clone_url = f"https://github.com/{namespace}/{name}"
+            return repository
 
+        fake_github_provider.github_app.repository = fake_repository_func
+
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.ignore_manual_label = False
+        args.dry_run = False
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
         mocked_message_slack.assert_called_once_with(
             None, f"Repo {dest.clone_url} has PR {pr.html_url} with 'rebase/manual' label, aborting")
+
         assert (result)
 
-    def test_strict_and_excluded_commits(self, init_test_repositories, fake_github_provider, tmpdir):
+    def test_strict_and_excluded_commits(
+            self, init_test_repositories, fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
         with CommitBuilder(source) as cb:
             cb.add_file("baz.txt", "fiz")
@@ -360,21 +380,21 @@ class TestRebases:
             drop_commit = cb.commit(
                 "UPSTREAM: <carry>: dropped by exclude_commits")
 
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username="test_rebasebot",
-            git_email="test@rebasebot.ocp",
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="strict",
-            bot_emails=["genbot@example.com", "anotherbot@example.com"],
-            exclude_commits=[drop_commit.hexsha],
-            update_go_modules=False,
-            dry_run=True,
-        )
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "strict"
+        args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
+        args.exclude_commits = [drop_commit.hexsha]
+        args.update_go_modules = False
+        args.dry_run = True
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
         assert (result)
 
         working_repo = Repo.init(tmpdir)
@@ -396,11 +416,17 @@ class TestRebases:
 * '<source_author>, Upstream commit'
 """.strip()  # noqa: W291
 
-    @patch("rebasebot.lifecycle_hooks._fetch_branch")
-    @patch("rebasebot.lifecycle_hooks._retrieve_file_from_git")
-    def test_lifecyclehooks_remote(self, mock_retrieve_file_from_git, mock_fetch_branch, init_test_repositories,
-                                   fake_github_provider, tmpdir):
+    @patch("rebasebot.lifecycle_hooks._fetch_file_from_github")
+    def test_lifecyclehooks_remote(self, mock_fetch_file_from_github, init_test_repositories,
+                                   fake_github_provider, tmpdir, caplog):
         source, rebase, dest = init_test_repositories
+
+        mock_fetch_file_from_github.return_value.decoded = rb"""#!/bin/bash
+touch test-hook-script.success
+git add test-hook-script.success
+git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
+"""
+
         with CommitBuilder(source) as cb:
             cb.add_file("baz.txt", "fiz")
             cb.commit("other upstream commit")
@@ -410,42 +436,27 @@ class TestRebases:
 
         args = MagicMock()
         args.source = source
+        args.source_repo = None
         args.dest = dest
         args.rebase = rebase
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "strict"
+        args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.dry_run = True
         args.post_rebase_hook = ["git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-hook-script.sh"]  # noqa: E501
 
-        hooks = lifecycle_hooks.LifecycleHooks(args)
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
 
-        mock_retrieve_file_from_git.return_value = r"""#!/bin/bash
-touch test-hook-script.success
-git add test-hook-script.success
-git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
-"""
-
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username=args.git_username,
-            git_email=args.git_email,
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="strict",
-            bot_emails=["genbot@example.com", "anotherbot@example.com"],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=True,
-            hooks=hooks
-        )
-        mock_retrieve_file_from_git.assert_called_once_with(
-            ANY, "github.com/openshift-eng/rebasebot/main:tests/data/test-hook-script.sh")
-        mock_fetch_branch.assert_called_once_with(
-            ANY, "github.com/openshift-eng/rebasebot", "main", ref_filter="blob:none")
-        assert (result)
+        mock_fetch_file_from_github.assert_called_once_with(
+            ANY, "openshift-eng", "rebasebot", "main", "tests/data/test-hook-script.sh")
+        # mock_fetch_branch.assert_called_once_with(
+        # ANY, "github.com/openshift-eng/rebasebot", "main",
+        # ref_filter="blob:none")
         working_repo = Repo.init(tmpdir)
         assert working_repo.head.ref.name == "rebase"
         log_graph = working_repo.git.log(
@@ -462,8 +473,10 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
 * | '<dest_author>, UPSTREAM: <carry>: our cool addition'
 |/  
 * '<source_author>, Upstream commit'"""  # noqa: W291
+        assert (result)
 
-    def test_lifecyclehooks(self, init_test_repositories, fake_github_provider, tmpdir):
+    def test_lifecyclehooks(self, init_test_repositories,
+                            fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
         with CommitBuilder(source) as cb:
             cb.add_file("baz.txt", "fiz")
@@ -487,27 +500,16 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "strict"
+        args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.dry_run = True,
         args.post_rebase_hook = [f"git:dest/{dest.branch}:test-hook-script.sh"]
+        args.source_repo = None
 
-        hooks = lifecycle_hooks.LifecycleHooks(args)
-
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username=args.git_username,
-            git_email=args.git_email,
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="strict",
-            bot_emails=["genbot@example.com", "anotherbot@example.com"],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=True,
-            hooks=hooks
-        )
-        assert (result)
+        assert (cli.rebasebot_run(args, slack_webhook=None,
+                github_app_wrapper=fake_github_provider))
 
         working_repo = Repo.init(tmpdir)
         assert working_repo.head.ref.name == "rebase"
@@ -527,7 +529,8 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
 |/  
 * '<source_author>, Upstream commit'"""  # noqa: W291
 
-    def test_lifecyclehook_fail(self, init_test_repositories, fake_github_provider, tmpdir, caplog):
+    def test_lifecyclehook_fail(
+            self, init_test_repositories, fake_github_provider, tmpdir, caplog):
         source, rebase, dest = init_test_repositories
         with CommitBuilder(source) as cb:
             cb.add_file("baz.txt", "fiz")
@@ -539,39 +542,79 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
             cb.add_file(
                 "test-failure-hook-script.sh",
                 r"""#!/bin/bash
-                exit 5""")
+exit 5""")
             cb.commit("UPSTREAM: <carry>: add test hook script")
 
         args = MagicMock()
         args.source = source
+        args.source_repo = None
         args.dest = dest
         args.rebase = rebase
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
-        args.pre_rebase_hook = [f"git:dest/{dest.branch}:test-failure-hook-script.sh"]
+        args.pre_rebase_hook = [
+            f"git:dest/{dest.branch}:test-failure-hook-script.sh"]
+        args.tag_policy = "strict"
+        args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.dry_run = True
 
-        hooks = lifecycle_hooks.LifecycleHooks(args)
-
-        result = rebasebot_run(
-            source=source,
-            dest=dest,
-            rebase=rebase,
-            working_dir=tmpdir,
-            git_username=args.git_username,
-            git_email=args.git_email,
-            github_app_provider=fake_github_provider,
-            slack_webhook=None,
-            tag_policy="strict",
-            bot_emails=["genbot@example.com", "anotherbot@example.com"],
-            exclude_commits=[],
-            update_go_modules=False,
-            dry_run=True,
-            hooks=hooks
-        )
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
 
         assert "Script git:dest/main:test-failure-hook-script.sh failed with exit code 5" in caplog.text
         assert "Manual intervention is needed to rebase" in caplog.text
 
         # Rebase did not succeed
         assert result is False
+
+    @patch('rebasebot.cli.parse_github_branch')
+    @patch('rebasebot.lifecycle_hooks.parse_github_branch')
+    @patch("rebasebot.lifecycle_hooks._fetch_file_from_github")
+    def test_source_branch_hook(
+            self, mock_fetch_file_from_github, mock_parse_github_branch_hooks, mock_parse_github_branch_cli,
+            init_test_repositories, fake_github_provider, tmpdir):
+        source, rebase, dest = init_test_repositories
+        with CommitBuilder(source) as cb:
+            cb.add_file("baz.txt", "fiz")
+            cb.commit("other upstream commit")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("carry-file1", "content")
+            cb.commit("UPSTREAM: <carry>: carry commit #1")
+
+            mock_fetch_file_from_github.return_value.decoded = rb"""#!/bin/sh
+echo main
+"""
+
+        def fake_parse_github_branch(location):
+            branch = parse_github_branch(location)
+            assert location == "source/source:main"
+            branch.url = source.url
+            return branch
+
+        mock_parse_github_branch_hooks.side_effect = fake_parse_github_branch
+        mock_parse_github_branch_cli.side_effect = fake_parse_github_branch
+
+        args = MagicMock()
+        args.source = None
+        args.source_repo = f"{source.ns}/{source.name}"
+        url = "git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-source-ref-hook-script.sh"
+        args.source_branch_hook = url
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "strict"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.dry_run = True
+
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert args.source == source
+        assert result

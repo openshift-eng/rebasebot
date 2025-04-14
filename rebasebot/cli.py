@@ -18,67 +18,44 @@
 
 import logging
 import argparse
-import re
 import sys
-from urllib.parse import urlparse
+import tempfile
 from typing import Optional
 
 from rebasebot import bot
 from rebasebot import lifecycle_hooks
-from rebasebot.github import GithubAppProvider, GitHubBranch
+from rebasebot.github import GithubAppProvider, GitHubBranch, parse_github_branch
 
 
 class GitHubBranchAction(argparse.Action):
-    """An action to take a GitHub branch argument in the form:
-
-      <user or organisation>/<repo>:<branch>
-
-    The argument will be returned as a GitHubBranch object.
+    """
+    GitHubBranchAction handles parsing github branch argument and converting to GithubBranch object.
+    The format is <user or organization>/<repo>:<branch>
     """
 
-    GITHUBBRANCH = re.compile("^(?P<ns>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
-
     def __call__(self, parser, namespace, values, option_string=None):
-        url = urlparse(values)
-        if url.scheme and url.netloc != "github.com":
-            parser.error("Only GitHub urls are supported right now")
-        # For backward compatibility we need to ensure that the prefix was removed
-        values = values.removeprefix("https://github.com/")
-
-        match = self.GITHUBBRANCH.match(values)
-        if match is None:
-            parser.error(
-                f"GitHub branch value for {option_string} must be in "
-                f"the form <user or organisation>/<repo>:<branch>"
-            )
-
-        setattr(
-            namespace,
-            self.dest,
-            GitHubBranch(
-                f"https://github.com/{match.group('ns')}/{match.group('name')}",
-                match.group("ns"),
-                match.group("name"),
-                match.group("branch")
-            ),
-        )
+        try:
+            setattr(namespace, self.dest, parse_github_branch(values))
+        except ValueError as e:
+            parser.error(str(e))
 
 
 # parse_cli_arguments parses command line arguments using argparse and returns
 # an object representing the populated namespace, and a list of errors
 def _parse_cli_arguments():
     _form_text = (
-        "in the form <user or organisation>/<repo>:<branch>, "
+        "in the form <user or organization>/<repo>:<branch>, "
         "e.g. kubernetes/cloud-provider-openstack:master"
     )
 
     parser = argparse.ArgumentParser(
         description="Rebase on changes from an upstream repo")
-    parser.add_argument(
+    source_group = parser.add_mutually_exclusive_group(required=True)
+
+    source_group.add_argument(
         "--source",
         "-s",
         type=str,
-        required=True,
         action=GitHubBranchAction,
         help=(
             "The source/upstream git repo to rebase changes onto in the form "
@@ -86,6 +63,31 @@ def _parse_cli_arguments():
             "not need to be a GitHub url, hence its syntax is different."
         ),
     )
+
+    source_group.add_argument(
+        "--source-repo",
+        type=str,
+        help="The source repository specification when using dynamic branch hook script",
+    )
+
+    parser.add_argument(
+        "--source-ref-hook",
+        type=str,
+        help=("The script to run to determine the source reference to rebase from."
+              "file path or git:https://github.com/namespace/repository/branch:path/to/script.sh"),
+    )
+
+    def check_source_repo_args(namespace):
+        if namespace.source_repo and not namespace.source_branch_hook:
+            parser.error(
+                "--source-ref-hook must also be specified when --source-repo is used.")
+        if namespace.source_branch_hook and not namespace.source_repo:
+            parser.error(
+                "--source-repo must also be specified when --source-ref-hook is used.")
+
+    # set function to check for errors
+    parser.set_defaults(func=check_source_repo_args)
+
     parser.add_argument(
         "--dest",
         "-d",
@@ -280,6 +282,49 @@ def _get_github_app_wrapper(
     sys.exit(2)
 
 
+def rebasebot_run(args, slack_webhook, github_app_wrapper):
+    """
+    rebasebot_run handles lifecycle hook setup and runs rebasebot
+    """
+    with tempfile.TemporaryDirectory() as temp_script_dir:
+        try:
+            if args.source_repo is not None:
+                lifecycle_hooks.run_source_repo_hook(args=args,
+                                                     github_app_wrapper=github_app_wrapper,
+                                                     temp_script_dir=temp_script_dir)
+        except Exception as e:
+            logging.error(
+                f"Error running source repo hook: {str(e)}",
+                exc_info=True)  # Log the full stack trace
+            sys.exit(1)
+
+        try:
+            hooks = lifecycle_hooks.LifecycleHooks(
+                tmp_script_dir=temp_script_dir, args=args)
+        except Exception as e:
+            logging.error(
+                f"Error occurred while initializing lifecycle hooks: {str(e)}", exc_info=True)
+            sys.exit(1)
+
+        return bot.run(
+            source=args.source,
+            dest=args.dest,
+            rebase=args.rebase,
+            working_dir=args.working_dir,
+            git_username=args.git_username,
+            git_email=args.git_email,
+            github_app_provider=github_app_wrapper,
+            slack_webhook=slack_webhook,
+            tag_policy=args.tag_policy,
+            bot_emails=args.bot_emails,
+            exclude_commits=args.exclude_commits,
+            update_go_modules=args.update_go_modules,
+            dry_run=args.dry_run,
+            ignore_manual_label=args.ignore_manual_label,
+            hooks=hooks
+        )
+
+
 def main():
     """Rebase Bot entry point function."""
     args = _parse_cli_arguments()
@@ -288,42 +333,18 @@ def main():
     logger = logging.getLogger("github3")
     logger.setLevel(logging.WARN)
 
+    slack_webhook = None
+    if args.slack_webhook is not None:
+        with open(args.slack_webhook, "r", encoding='utf-8') as app_key_file:
+            slack_webhook = app_key_file.read().strip()
+
     github_app_wrapper = _get_github_app_wrapper(
         gh_app_id=args.github_app_id, gh_app_key_path=args.github_app_key, dest_branch=args.dest,
         gh_cloner_id=args.github_cloner_id, gh_cloner_key_path=args.github_cloner_key, rebase_branch=args.rebase,
         gh_user_token_path=args.github_user_token
     )
 
-    slack_webhook = None
-    if args.slack_webhook is not None:
-        with open(args.slack_webhook, "r", encoding='utf-8') as app_key_file:
-            slack_webhook = app_key_file.read().strip()
-
-    try:
-        hooks = lifecycle_hooks.LifecycleHooks(args)
-    except Exception as e:
-        logger.error(f"Error occurred while initalizing lifecycle hooks: {str(e)}")
-        sys.exit(1)
-
-    success = bot.run(
-        source=args.source,
-        dest=args.dest,
-        rebase=args.rebase,
-        working_dir=args.working_dir,
-        git_username=args.git_username,
-        git_email=args.git_email,
-        github_app_provider=github_app_wrapper,
-        slack_webhook=slack_webhook,
-        tag_policy=args.tag_policy,
-        bot_emails=args.bot_emails,
-        exclude_commits=args.exclude_commits,
-        update_go_modules=args.update_go_modules,
-        dry_run=args.dry_run,
-        ignore_manual_label=args.ignore_manual_label,
-        hooks=hooks
-    )
-
-    if success:
+    if rebasebot_run(args, slack_webhook, github_app_wrapper):
         sys.exit(0)
     else:
         sys.exit(1)

@@ -645,7 +645,7 @@ def run(
     gh_cloner_app = github_app_provider.github_cloner_app
 
     if hooks is None:
-        hooks = lifecycle_hooks.LifecycleHooks()
+        hooks = lifecycle_hooks.LifecycleHooks(tmp_script_dir=None, args=None)
 
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)
@@ -691,15 +691,22 @@ def run(
             git_email=git_email
         )
     except Exception as ex:
-        logging.exception("error initializing the git directory", extra={"working_dir": working_dir})
+        logging.exception(
+            "error initializing the git directory with remotes: ",
+            extra={"working_dir": working_dir,
+                   "source_repo": source.url,
+                   "dest_repo": dest.url,
+                   "rebase_repo": rebase.url}
+        )
         _message_slack(
             slack_webhook,
-            f"I got an error initializing the git directory: {ex}"
+            f"I got an error initializing the git directory with remotes: source repo {source.url}, "
+            f"destination repo {dest.url}, rebase repo {rebase.url}: {ex}"
         )
         return False
 
     try:
-        hooks.fetch_hook_scripts(gitwd)
+        hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
     except Exception as ex:
         logging.exception("error fetching lifecycle hook scripts")
         _message_slack(

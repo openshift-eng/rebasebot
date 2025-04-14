@@ -18,6 +18,8 @@ import builtins
 from dataclasses import dataclass
 
 from functools import cached_property
+import re
+from urllib.parse import urlparse
 from typing import Optional
 
 import github3
@@ -39,6 +41,33 @@ class GitHubBranch:
     ns: str  # pylint: disable=invalid-name
     name: str
     branch: str
+
+
+def parse_github_branch(repository_string) -> GitHubBranch:
+    """
+    parse_github_branch constructs GitHubBranch object from the provided location.
+    The repository_string format is <user or organization>/<repo>:<branch>
+    """
+    url = urlparse(repository_string)
+    if url.scheme and url.netloc != "github.com":
+        raise ValueError("Only GitHub URLs are supported right now")
+
+    # Remove prefix if it's a URL
+    repository_string = repository_string.removeprefix("https://github.com/")
+
+    github_regex = re.compile(
+        r"^(?P<organization>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
+    match = github_regex.match(repository_string)
+    if match is None:
+        raise ValueError(
+            "GitHub branch value must be in the form <user or organization>/<repo>:<branch>")
+
+    return GitHubBranch(
+        f"https://github.com/{match.group('organization')}/{match.group('name')}",
+        match.group("organization"),
+        match.group("name"),
+        match.group("branch")
+    )
 
 
 @dataclass
