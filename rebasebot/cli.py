@@ -78,10 +78,10 @@ def _parse_cli_arguments():
     )
 
     def check_source_repo_args(namespace):
-        if namespace.source_repo and not namespace.source_branch_hook:
+        if namespace.source_repo and not namespace.source_ref_hook:
             parser.error(
                 "--source-ref-hook must also be specified when --source-repo is used.")
-        if namespace.source_branch_hook and not namespace.source_repo:
+        if namespace.source_ref_hook and not namespace.source_repo:
             parser.error(
                 "--source-repo must also be specified when --source-ref-hook is used.")
 

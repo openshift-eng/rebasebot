@@ -272,7 +272,7 @@ Possible formats for path to the script:
 
 You may include any logic to determine the source ref (e.g. call Github APIs).
 
-### Environment variables available in the source branch hook script
+### Environment variables available in the source ref hook script
 
 - **`REBASEBOT_SOURCE_REPO`** - Source repository in the format `namespace/repository`.
 
