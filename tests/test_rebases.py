@@ -573,7 +573,7 @@ exit 5""")
     @patch('rebasebot.cli.parse_github_branch')
     @patch('rebasebot.lifecycle_hooks.parse_github_branch')
     @patch("rebasebot.lifecycle_hooks._fetch_file_from_github")
-    def test_source_branch_hook(
+    def test_source_ref_hook(
             self, mock_fetch_file_from_github, mock_parse_github_branch_hooks, mock_parse_github_branch_cli,
             init_test_repositories, fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
@@ -601,7 +601,7 @@ echo main
         args.source = None
         args.source_repo = f"{source.ns}/{source.name}"
         url = "git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-source-ref-hook-script.sh"
-        args.source_branch_hook = url
+        args.source_ref_hook = url
         args.dest = dest
         args.rebase = rebase
         args.working_dir = tmpdir

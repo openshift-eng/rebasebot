@@ -11,5 +11,5 @@ setuptools.setup(
    install_requires=['cryptography', 'gitpython', 'github3.py', 'requests', 'validators'], #external packages as dependencies
    scripts=['rebasebot/cli.py'],
    include_package_data=True,
-   package_data={'rebasebot': ['builtin-hooks/*']}
+   package_data={'rebasebot': ['builtin-hooks/**']}
 )

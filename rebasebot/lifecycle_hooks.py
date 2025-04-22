@@ -263,7 +263,7 @@ def run_source_repo_hook(args, github_app_wrapper, temp_script_dir):
             Source branch name as the only printed out line
     """
     os.environ["REBASEBOT_SOURCE_REPO"] = args.source_repo
-    source_hook = LifecycleHookScript(args.source_branch_hook)
+    source_hook = LifecycleHookScript(args.source_ref_hook)
     source_hook.fetch_script(
         temp_hook_dir=temp_script_dir, github=github_app_wrapper)
     result = source_hook()
