@@ -1,6 +1,73 @@
 [build-system]
-requires = [
-    "setuptools>=42",
-    "wheel"
-]
+requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "rebasebot"
+version = "0.0.1"
+description = "A tool to sync downstream repositories with their upstream"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "github3-py>=4.0.1",
+    "gitpython>=3.1.44",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-cov>=6.1.1",
+    "ruff>=0.12.1",
+]
+
+[project.scripts]
+rebasebot = "rebasebot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+rebasebot = ["builtin-hooks/**"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+ignore = [
+    "PLR0912", # too many branches
+    "PLR0913", # too many arguments
+    "PLR0915", # too many statements
+    "PLR0911", # too many return statements
+    # Enabling these rules would require significant refactoring
+]
+
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes - undefined names, unused imports
+    "I",   # isort - import sorting
+    "B",   # flake8-bugbear - common bugs and design problems
+    "C4",  # flake8-comprehensions - better list/set/dict comprehensions
+    "UP",  # pyupgrade - upgrade syntax for newer Python versions
+    "PL",  # pylint - static analysis rules
+    #"D",   # pydocstyle - docstring conventions
+    #"N",   # pep8-naming - naming conventions
+    #"RET", # flake8-return - return statement patterns
+    #"SIM", # flake8-simplify - code simplification
+    #"PTH", # flake8-use-pathlib - prefer pathlib over os.path
+    # TODO Enable the currently disabled rules
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PLR2004", "D"]  # allow magic values, disable docstring checks in tests
+
+[tool.ruff.lint.pep8-naming]
+ignore-names = ["i", "j", "k", "ex", "Run", "_"]  # allow common single-letter variable names
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint.isort]
+known-first-party = ["rebasebot"]  # treat rebasebot as first-party for import sorting

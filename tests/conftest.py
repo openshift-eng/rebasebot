@@ -12,20 +12,20 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 from __future__ import annotations
-from collections import deque
+
 import os
 import shutil
-from typing import Tuple, Generator, TypeVar
+from collections import deque
+from collections.abc import Generator
 from tempfile import TemporaryDirectory
-
-import pytest
+from typing import TypeVar
 from unittest import mock
 
-from git import Repo, GitCommandError
+import pytest
+from git import GitCommandError, Repo
 from git.objects import Commit
 
-from rebasebot.github import GitHubBranch, GithubAppProvider
-
+from rebasebot.github import GithubAppProvider, GitHubBranch
 
 T = TypeVar("T")
 
@@ -52,7 +52,7 @@ _GO_CODE_FILENAME = "test.go"
 
 
 @pytest.fixture
-def tmp_go_app_repo() -> YieldFixture[Tuple[str, Repo]]:
+def tmp_go_app_repo() -> YieldFixture[tuple[str, Repo]]:
     with TemporaryDirectory(prefix="rebasebot_tests_") as tmpdir:
         with open(os.path.join(tmpdir, _GO_CODE_FILENAME), "x", encoding="utf8") as file:
             file.write(_GO_CODE)
@@ -73,6 +73,7 @@ def tmpdir() -> YieldFixture[str]:
 
 class CommitBuilderAction:
     """Stores a function and its arguments to be called later"""
+
     def __init__(self: CommitBuilderAction, func, args) -> None:
         self.func = func
         self.args = args
@@ -95,8 +96,7 @@ class CommitBuilder:
 
     def add_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
         """Adds a file to the commit"""
-        self.action_plan.append(CommitBuilderAction(
-            self._add_file, [filename, content]))
+        self.action_plan.append(CommitBuilderAction(self._add_file, [filename, content]))
         return self
 
     def _add_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
@@ -108,8 +108,7 @@ class CommitBuilder:
 
     def update_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
         """Updates file in the commit"""
-        self.action_plan.append(CommitBuilderAction(
-            self._update_file, [filename, content]))
+        self.action_plan.append(CommitBuilderAction(self._update_file, [filename, content]))
         return self
 
     def _update_file(self: CommitBuilder, filename: str, content: str) -> CommitBuilder:
@@ -121,8 +120,7 @@ class CommitBuilder:
 
     def remove_file(self: CommitBuilder, filename: str) -> CommitBuilder:
         """Removes a file from the commit"""
-        self.action_plan.append(CommitBuilderAction(
-            self._remove_file, [filename]))
+        self.action_plan.append(CommitBuilderAction(self._remove_file, [filename]))
         return self
 
     def _remove_file(self: CommitBuilder, filename: str) -> CommitBuilder:
@@ -133,8 +131,7 @@ class CommitBuilder:
 
     def move_file(self: CommitBuilder, oldName: str, newName: str) -> CommitBuilder:
         """Moves a file in the commit"""
-        self.action_plan.append(CommitBuilderAction(
-            self._move_file, [oldName, newName]))
+        self.action_plan.append(CommitBuilderAction(self._move_file, [oldName, newName]))
         return self
 
     def _move_file(self: CommitBuilder, oldName: str, newName: str) -> CommitBuilder:
@@ -160,11 +157,9 @@ class CommitBuilder:
         with self.repo.config_writer() as config:
             if committer_email is not None:
                 config.set_value("user", "email", committer_email)
-                config.set_value(
-                    "user", "name", f"{self.branch.name}_{committer_email}")
+                config.set_value("user", "name", f"{self.branch.name}_{committer_email}")
             else:
-                config.set_value(
-                    "user", "email", f"{self.branch.name}_author@{self.branch.ns}.org")
+                config.set_value("user", "email", f"{self.branch.name}_author@{self.branch.ns}.org")
                 config.set_value("user", "name", f"{self.branch.name}_author")
         self.commited = True
         self.repo.git.commit("--allow-empty", "-m", commit_msg)
@@ -178,7 +173,7 @@ class CommitBuilder:
 
 
 @pytest.fixture
-def init_test_repositories() -> YieldFixture[Tuple[GitHubBranch, GitHubBranch, GitHubBranch]]:
+def init_test_repositories() -> YieldFixture[tuple[GitHubBranch, GitHubBranch, GitHubBranch]]:
     """
     Creates three repositories in own temp directories
 
@@ -188,22 +183,19 @@ def init_test_repositories() -> YieldFixture[Tuple[GitHubBranch, GitHubBranch, G
 
     source = TemporaryDirectory(prefix="rebasebot_tests_source_repo_")
     Repo.init(source.name)
-    source_gh_branch = GitHubBranch(
-        url=source.name, ns="source", name="source", branch="main")
-    CommitBuilder(source_gh_branch).add_file(
-        _GO_CODE_FILENAME, _GO_CODE).commit("Upstream commit")
+    source_gh_branch = GitHubBranch(url=source.name, ns="source", name="source", branch="main")
+    CommitBuilder(source_gh_branch).add_file(_GO_CODE_FILENAME, _GO_CODE).commit("Upstream commit")
 
     rebase = TemporaryDirectory(prefix="rebasebot_tests_rebase_repo_")
     rebase_repo = Repo.init(rebase.name)
-    rebase_gh_branch = GitHubBranch(
-        url=rebase.name, ns="rebase", name="rebase", branch=rebase_repo.head.ref.name)
+    rebase_gh_branch = GitHubBranch(url=rebase.name, ns="rebase", name="rebase", branch=rebase_repo.head.ref.name)
 
     dest = TemporaryDirectory(prefix="rebasebot_tests_dest_repo_")
     shutil.copytree(source.name, dest.name, dirs_exist_ok=True)
-    dest_gh_branch = GitHubBranch(
-        url=dest.name, ns="dest", name="dest", branch="main")
-    CommitBuilder(dest_gh_branch).add_file("another_file.go",
-                                           _ANOTHER_GO_CODE).commit("UPSTREAM: <carry>: our cool addition")
+    dest_gh_branch = GitHubBranch(url=dest.name, ns="dest", name="dest", branch="main")
+    CommitBuilder(dest_gh_branch).add_file("another_file.go", _ANOTHER_GO_CODE).commit(
+        "UPSTREAM: <carry>: our cool addition"
+    )
 
     yield source_gh_branch, rebase_gh_branch, dest_gh_branch
 
