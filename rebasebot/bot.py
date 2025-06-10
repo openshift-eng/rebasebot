@@ -81,13 +81,33 @@ def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> 
     return True
 
 
-def _is_pr_merged(pr_number: int, source_repo: Repository) -> bool:
-    logging.info("Checking that PR %s has been merged", pr_number)
+def _is_pr_merged(pr_number: int, source_repo: Repository, gitwd: git.Repo, source_branch: str) -> bool:
+    logging.info("Checking that PR %s has been merged and is included in %s", pr_number, source_branch)
     gh_pr = source_repo.pull_request(pr_number)
-    return gh_pr.is_merged()
+
+    if not gh_pr.is_merged():
+        return False
+
+    merge_commit_sha = gh_pr.merge_commit_sha
+    if merge_commit_sha is None:
+        logging.error("PR %s is marked as merged but has no merge commit SHA", pr_number)
+        return False
+
+    merge_commit = gitwd.commit(merge_commit_sha)
+    source_head = gitwd.commit(f"source/{source_branch}")
+
+    # Check if the source branch contains the merge commit
+    if gitwd.is_ancestor(merge_commit, source_head):
+        logging.info("PR %s merge commit %s is included in %s", pr_number, merge_commit_sha[:7], source_branch)
+        return True
+
+    logging.info("PR %s merge commit %s is NOT included in %s", pr_number, merge_commit_sha[:7], source_branch)
+    return False
 
 
-def _add_to_rebase(commit_message: str, source_repo: Repository, tag_policy: str) -> bool:
+def _add_to_rebase(
+    commit_message: str, source_repo: Repository, tag_policy: str, gitwd: git.Repo, source_branch: str
+) -> bool:
     valid_tag_policy = ["soft", "strict", "none"]
     if tag_policy not in valid_tag_policy:
         raise builtins.Exception(f"Unknown tag policy: {tag_policy}")
@@ -106,7 +126,7 @@ def _add_to_rebase(commit_message: str, source_repo: Repository, tag_policy: str
             return True
 
         if commit_tag.isnumeric():
-            return not _is_pr_merged(int(commit_tag), source_repo)
+            return not _is_pr_merged(int(commit_tag), source_repo, gitwd, source_branch)
 
         raise builtins.Exception(f"Unknown commit message tag: {commit_tag}")
 
@@ -217,7 +237,7 @@ def _do_rebase(*, gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, sou
                 logging.info("Dropping Go modules commit %s - %s", sha, commit_message)
                 continue
 
-        if not _add_to_rebase(commit_message, source_repo, tag_policy):
+        if not _add_to_rebase(commit_message, source_repo, tag_policy, gitwd, source.branch):
             logging.info("Dropping commit: %s - %s", sha, commit_message)
             continue
 

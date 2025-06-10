@@ -134,11 +134,13 @@ class TestCommitMessageTags:
     def test_commit_messages_tags(
             self, mocked_is_pr_merged, pr_is_merged, commit_message, tag_policy, expected):
         mocked_is_pr_merged.return_value = pr_is_merged
+        mock_gitwd = MagicMock()
+        mock_source_branch = "main"
         if isinstance(expected, Exception):
             with pytest.raises(Exception, match=str(expected)):
-                _add_to_rebase(commit_message, None, tag_policy)
+                _add_to_rebase(commit_message, None, tag_policy, mock_gitwd, mock_source_branch)
         else:
-            assert _add_to_rebase(commit_message, None, tag_policy) == expected
+            assert _add_to_rebase(commit_message, None, tag_policy, mock_gitwd, mock_source_branch) == expected
 
 
 class TestIsPrAvailable:
