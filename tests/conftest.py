@@ -194,9 +194,9 @@ def init_test_repositories() -> YieldFixture[Tuple[GitHubBranch, GitHubBranch, G
         _GO_CODE_FILENAME, _GO_CODE).commit("Upstream commit")
 
     rebase = TemporaryDirectory(prefix="rebasebot_tests_rebase_repo_")
-    rebase_repo = Repo.init(rebase.name)
+    Repo.init(rebase.name)
     rebase_gh_branch = GitHubBranch(
-        url=rebase.name, ns="rebase", name="rebase", branch=rebase_repo.head.ref.name)
+        url=rebase.name, ns="rebase", name="rebase", branch="main")
 
     dest = TemporaryDirectory(prefix="rebasebot_tests_dest_repo_")
     shutil.copytree(source.name, dest.name, dirs_exist_ok=True)
