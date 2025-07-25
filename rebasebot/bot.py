@@ -202,7 +202,7 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
     # List all commits on dest/branch and stop at cutoff commits
     # This should be the list of commits we are carrying on top of the UPSTREAM
     downstream_commits = gitwd.git.log("--reverse", "--pretty=format:%H || %s || %aE", "--no-merges",
-                                       "--author-date-order", *cutoff_commits, f"dest/{dest.branch}")
+                                       "--topo-order", *cutoff_commits, f"dest/{dest.branch}")
 
     logging.info("Identified downstream commits:\n%s", downstream_commits)
     return downstream_commits
