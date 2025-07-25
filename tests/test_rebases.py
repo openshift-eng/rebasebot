@@ -248,8 +248,8 @@ class TestRebases:
 
         assert log_graph == r"""
 * '<dest_anotherbot@example.com>, commit #1 from anotherbot'
-* '<dest_genbot@example.com>, commit #2 from genbot'
 * '<dest_author>, commit on dest feature branch'
+* '<dest_genbot@example.com>, commit #2 from genbot'
 * '<dest_genbot@example.com>, commit #1 from genbot'
 * '<dest_author>, UPSTREAM: <carry>: our cool addition'
 *   '<test_rebasebot>, merge upstream/main into main'
