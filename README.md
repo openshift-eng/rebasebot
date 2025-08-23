@@ -252,6 +252,27 @@ Some rebasebot arguments are available in lifecycle hook scripts as environment 
 
 *Note: Remotes are always `source`, `dest`, and `rebase`. The local branch is called rebase.*
 
+### Always run hooks
+
+By default, lifecycle hooks are only executed when a rebase happened. However, there are scenarios where you might want to run hooks regardless of whether a rebase is needed, such as:
+
+- Updating dependencies automatically — keep libraries or modules in sync with their downstream versions without manual intervention, even if upstream did not change.
+- Performing maintenance tasks or code generation.
+
+Enable this behavior with the opt-in `--always-run-hooks` flag:
+
+```txt
+...
+--always-run-hooks \
+...
+```
+
+When this flag is enabled:
+- The main lifecycle hooks (`--pre-rebase-hook`, `--pre-carry-commit-hook`, `--post-rebase-hook`) will execute **even if no rebase is required**.
+- Hooks that depend on specific actions (e.g., `--pre-push-rebase-branch-hook`, `--pre-create-pr-hook`) will still only run if that action occurs.
+- Built-in hooks (e.g. triggered by flags, `--update-go-modules`) are also executed as usual.
+- The execution order and logic of the rebase process remain unchanged.
+
 ## Dynamic source git reference selection
 
 Rebasebot offers the capability to dynamically determine the source branch or tag for rebasing, enabling integration into CI/CD pipelines. This is especially valuable when rebasing from release tags or dynamically created branches.
@@ -314,6 +335,17 @@ rebasebot --source https://github.com/kubernetes/cloud-provider-azure:master \
           --github-user-token ~/my-github-token.txt
 ```
 
-Example 3. Rebasebot usage in OpenShift CI pipeline.
+Example 3. Run Go module updates even when no rebase is needed.
+
+```sh
+rebasebot --source https://github.com/kubernetes/cloud-provider-aws:master \
+          --dest openshift/cloud-provider-aws:master \
+          --rebase openshift-cloud-team/cloud-provider-aws:rebase-bot-master \
+          --update-go-modules \
+          --always-run-hooks \
+          --github-user-token ~/my-github-token.txt
+```
+
+Example 4. Rebasebot usage in OpenShift CI pipeline.
 
 https://github.com/openshift/release/blob/master/ci-operator/config/openshift-eng/rebasebot/openshift-eng-rebasebot-main.yaml
