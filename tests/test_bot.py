@@ -176,11 +176,12 @@ class TestIsPrAvailable:
             }
         }
         gh_pr.head.ref = rebase.branch
+        gh_pr.state = "open"
         dest_repo.pull_requests.return_value = [gh_pr]
 
         pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
         dest_repo.pull_requests.assert_called_once_with(
-            base="dest-branch")
+            base="dest-branch", state="open")
         assert pr == gh_pr
         assert pr_available is True
 
@@ -189,7 +190,32 @@ class TestIsPrAvailable:
         dest_repo.pull_requests.return_value = []
         pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
         dest_repo.pull_requests.assert_called_with(
-            base="dest-branch")
+            base="dest-branch", state="open")
+        assert pr is None
+        assert pr_available is False
+
+    def test_is_pr_available_closed(self, dest_repo, dest, rebase):
+        gh_pr = MagicMock()
+        gh_pr.as_dict.return_value = {
+            "head": {
+                "repo": {
+                    "full_name": "test-namespace/rebase-repo"
+                }
+            }
+        }
+        gh_pr.head.ref = rebase.branch
+        gh_pr.state = "closed"
+
+        # Mock pull_requests to return only PRs that match the requested state
+        def mock_pull_requests(*, base, state):
+            all_prs = [gh_pr]
+            return [pr for pr in all_prs if pr.state == state]
+
+        dest_repo.pull_requests.side_effect = mock_pull_requests
+
+        pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
+        dest_repo.pull_requests.assert_called_once_with(
+            base="dest-branch", state="open")
         assert pr is None
         assert pr_available is False
 
@@ -199,17 +225,32 @@ class TestReportResult:
     slack_webhook = "https://hooks.slack.com/services/..."
 
     @pytest.mark.parametrize(
-        "push_required, pr_available, pr_url, slack_message",
+        "needs_rebase, always_run_hooks, pr_available, pr_url, slack_message",
         [
-            (True, False, "https://github.com/user/repo/pull/123",
+            # Cases when needs_rebase is True (always_run_hooks doesn't matter)
+            (True, False, False, "https://github.com/user/repo/pull/123",
              "I created a new rebase PR: https://github.com/user/repo/pull/123"),
-            (True, True, "https://github.com/user/repo/pull/456",
+            (True, False, True, "https://github.com/user/repo/pull/456",
              "I updated existing rebase PR: https://github.com/user/repo/pull/456"),
-            (False, False, "https://github.com/user/repo/pull/789",
+            (True, True, False, "https://github.com/user/repo/pull/123",
+             "I created a new rebase PR: https://github.com/user/repo/pull/123"),
+            (True, True, True, "https://github.com/user/repo/pull/456",
+             "I updated existing rebase PR: https://github.com/user/repo/pull/456"),
+
+            # Cases when needs_rebase is False and always_run_hooks is False
+            (False, False, False, "https://github.com/user/repo/pull/789",
              "I created a new rebase PR: https://github.com/user/repo/pull/789"),
-            (False, True, "https://github.com/user/repo/pull/100",
+            (False, False, True, "https://github.com/user/repo/pull/100",
              "PR https://github.com/user/repo/pull/100 already contains the latest changes"),
-            (False, True, "",
+            (False, False, False, "",
+             f"Destination repo {dest_url} already contains the latest changes"),
+
+            # Cases when needs_rebase is False and always_run_hooks is True
+            (False, True, False, "https://github.com/user/repo/pull/200",
+             "I created a new rebase PR (hooks enabled): https://github.com/user/repo/pull/200"),
+            (False, True, True, "https://github.com/user/repo/pull/201",
+             "PR https://github.com/user/repo/pull/201 already contains the latest changes (hooks enabled)"),
+            (False, True, False, "",
              f"Destination repo {dest_url} already contains the latest changes"),
         ],
     )
@@ -219,12 +260,13 @@ class TestReportResult:
         self,
         mocked_message_slack,
         mocked_logging_info,
-        push_required,
+        needs_rebase,
+        always_run_hooks,
         pr_available,
         pr_url,
         slack_message,
     ):
-        _report_result(push_required, pr_available, pr_url,
+        _report_result(needs_rebase, always_run_hooks, pr_available, pr_url,
                        self.dest_url, self.slack_webhook)
 
         mocked_logging_info.assert_called_once_with(slack_message)
