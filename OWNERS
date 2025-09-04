@@ -4,16 +4,17 @@
 approvers:
 - JoelSpeed
 - RadekManak
+- chrischdi
 - damdo
 - elmiko
+- mdbooth
 - nrb
-- odvarkadaniel
-reviewers:
-- JoelSpeed
-- RadekManak
-- damdo
-- elmiko
-- nrb
-- odvarkadaniel
 - racheljpg
-- vincepri
+reviewers:
+- RadekManak
+- chrischdi
+- damdo
+- mdbooth
+- nrb
+- racheljpg
+- theobarberbany
