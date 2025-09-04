@@ -175,7 +175,7 @@ def _parse_cli_arguments():
         action="store_true",
         default=False,
         required=False,
-        help="When enabled, the bot will not create a PR.",
+        help="When enabled, the bot will not create or update PR.",
     )
     parser.add_argument(
         "--tag-policy",
@@ -242,6 +242,15 @@ def _parse_cli_arguments():
         required=False,
         nargs="+",
         help="The location of the pre-create-pr lifecycle hook script.",
+    )
+    parser.add_argument(
+        "--always-run-hooks",
+        action="store_true",
+        default=False,
+        help="When enabled, the bot will run configured lifecycle hooks (including built-in ones like from "
+        "--update-go-modules) even if no rebase is needed. "
+        "Note: hooks that depend on a push or PR creation step (e.g. PRE_PUSH_REBASE_BRANCH, PRE_CREATE_PR) "
+        "will still only run if those actions occur.",
     )
 
     return parser.parse_args()
@@ -321,7 +330,8 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
             update_go_modules=args.update_go_modules,
             dry_run=args.dry_run,
             ignore_manual_label=args.ignore_manual_label,
-            hooks=hooks
+            hooks=hooks,
+            always_run_hooks=args.always_run_hooks
         )
 
 
