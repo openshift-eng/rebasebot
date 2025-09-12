@@ -143,32 +143,44 @@ def _in_excluded_commits(sha: str, exclude_commits: list) -> bool:
     return False
 
 
-def _find_last_rebase_merge_commit(gitwd: git.Repo, source_repo: Repository, ancestry_path_merges) -> Commit:
+def _find_last_rebase_merge_commit(gitwd: git.Repo, ancestry_path_merges) -> Commit:
     logging.info("Searching for merge commit from previous rebasebot run to identify downstream commits")
     for merge_line in ancestry_path_merges:
-        sha, commit_message, committer_email = merge_line.split(" || ", 2)
-        logging.info(f"Checking: \"{commit_message}\"")
-        if "openshift-merge-bot[bot]@users.noreply.github.com" in committer_email:
-            logging.info("Skipping this downstream (PR) merge commit as we are only interested in the rebase merges")
-            # We can skip all merges from this bot because it only merges downstream pull requests.
-            # This skip is not required and is here only to improve performance.
-            continue
+        sha, _, _ = merge_line.split(" || ", 2)
+
         merge = gitwd.commit(sha)
 
-        # Now we get both parents of the merge commit and check if one of them is on an upstream branch.
-        # If it is, we know that this merge commit is the last rebase merge commit
-        for parent in merge.parents:
-            branches = gitwd.git.branch('--contains', parent.hexsha, format='%(refname:short)').split('\n')
-            for upstream_branch in source_repo.branches():
-                if upstream_branch.name in branches:
-                    logging.info("Found merge commit from previous rebase: %s", sha)
-                    logging.info("Its parent %s is on upstream branch %s", parent.hexsha, upstream_branch.name)
-                    return merge
+        # Last rebase merge commit has two parents.
+        parents = list(merge.parents)
+        if len(parents) != 2:
+            continue
+
+        # Identify the upstream parent: Merge parent that is reachable from any upstream branch.
+        upstream_parent = _find_source_parent_commit(parents, gitwd)
+        if upstream_parent is None:
+            continue
+
+        # The synthetic rebase merge uses the upstream tree as the merge tree.
+        # Therefore, the merge commit's tree must equal the upstream parent's tree.
+        if merge.tree.hexsha != upstream_parent.tree.hexsha:
+            continue
+
+        logging.info("Found merge commit from previous rebase: %s", sha)
+        logging.info("Its parent %s is on an upstream branch", upstream_parent.hexsha)
+        return merge
     return None
 
 
-def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch,
-                                 source_repo: Repository) -> str:
+def _find_source_parent_commit(parents: list, gitwd: git.Repo) -> Commit:
+    """Returns first parent that is on an upstream branch."""
+    for parent in parents:
+        upstream_branches = gitwd.git.branch("-r", "--contains", parent.hexsha, "--list", "source/*")
+        if upstream_branches.strip():
+            return parent
+    return None
+
+
+def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> str:
     # Merge base is the last shared commit of source branch and destination branch
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
     logging.info(f"Merge base of source/{source.branch} and dest/{dest.branch}: %s", merge_base)
@@ -180,7 +192,7 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
     val = '\n'.join(ancestry_path_merges)
     logging.info(f"""Merges on ancestry-path from merge_base=({merge_base}) to dest/{dest.branch} branch:\n{val}""")
 
-    last_rebase_merge_commit = _find_last_rebase_merge_commit(gitwd, source_repo, ancestry_path_merges)
+    last_rebase_merge_commit = _find_last_rebase_merge_commit(gitwd, ancestry_path_merges)
     cutoff_commits = []
 
     if last_rebase_merge_commit is None:
@@ -216,7 +228,7 @@ def _do_rebase(*, gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, sou
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
-    downstream_commits = _identify_downstream_commits(gitwd, source, dest, source_repo)
+    downstream_commits = _identify_downstream_commits(gitwd, source, dest)
 
     commits_to_squash = defaultdict(list)
 
