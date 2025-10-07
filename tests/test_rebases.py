@@ -684,13 +684,17 @@ echo main
         """Test that hooks run when --always-run-hooks is True even when no rebase is needed."""
         source, rebase, dest = init_test_repositories
 
-        # Create a simple test hook that creates a marker file
-        hook_script = """#!/bin/bash
-touch test-hook-script.success"""
+        # Create separate test hooks that create different marker files
+        pre_rebase_hook_script = """#!/bin/bash
+touch pre-rebase-hook.success"""
+
+        post_rebase_hook_script = """#!/bin/bash
+touch post-rebase-hook.success"""
 
         with CommitBuilder(dest) as cb:
-            cb.add_file("test-hook-script.sh", hook_script)
-            cb.commit("UPSTREAM: <carry>: add test hook script")
+            cb.add_file("pre-rebase-hook-script.sh", pre_rebase_hook_script)
+            cb.add_file("post-rebase-hook-script.sh", post_rebase_hook_script)
+            cb.commit("UPSTREAM: <carry>: add test hook scripts")
 
         # Configure args with always_run_hooks=True and multiple hook types to test
         args = MagicMock()
@@ -709,10 +713,9 @@ touch test-hook-script.success"""
         args.ignore_manual_label = True
         args.always_run_hooks = True
 
-        # Test multiple hook types
-        hook_ref = f"git:dest/{dest.branch}:test-hook-script.sh"
-        args.pre_rebase_hook = [hook_ref]
-        args.post_rebase_hook = [hook_ref]
+        # Test multiple hook types with different scripts
+        args.pre_rebase_hook = [f"git:dest/{dest.branch}:pre-rebase-hook-script.sh"]
+        args.post_rebase_hook = [f"git:dest/{dest.branch}:post-rebase-hook-script.sh"]
         args.pre_carry_commit_hook = None
         args.pre_push_rebase_branch_hook = None
         args.pre_create_pr_hook = None
@@ -723,21 +726,26 @@ touch test-hook-script.success"""
             args, slack_webhook=None, github_app_wrapper=fake_github_provider)
 
         assert result is True
-        # Verify hook execution by checking for the marker file
-        assert "test-hook-script.success" in os.listdir(tmpdir)
+        # Verify both hooks executed by checking for their marker files
+        assert "pre-rebase-hook.success" in os.listdir(tmpdir)
+        assert "post-rebase-hook.success" in os.listdir(tmpdir)
 
     def test_hooks_not_run_when_no_rebase_needed_and_flag_false(self, init_test_repositories,
                                                                 fake_github_provider, tmpdir):
         """Test that hooks DON'T run when --always-run-hooks is False and no rebase is needed."""
         source, rebase, dest = init_test_repositories
 
-        # Create the same test hook
-        hook_script = """#!/bin/bash
-touch test-hook-script.success"""
+        # Create separate test hooks that create different marker files
+        pre_rebase_hook_script = """#!/bin/bash
+touch pre-rebase-hook.success"""
+
+        post_rebase_hook_script = """#!/bin/bash
+touch post-rebase-hook.success"""
 
         with CommitBuilder(dest) as cb:
-            cb.add_file("test-hook-script.sh", hook_script)
-            cb.commit("UPSTREAM: <carry>: add test hook script")
+            cb.add_file("pre-rebase-hook-script.sh", pre_rebase_hook_script)
+            cb.add_file("post-rebase-hook-script.sh", post_rebase_hook_script)
+            cb.commit("UPSTREAM: <carry>: add test hook scripts")
 
         # Configure args with always_run_hooks=False (default behavior)
         args = MagicMock()
@@ -756,9 +764,8 @@ touch test-hook-script.success"""
         args.ignore_manual_label = True
         args.always_run_hooks = False  # Key difference: hooks should NOT run
 
-        hook_ref = f"git:dest/{dest.branch}:test-hook-script.sh"
-        args.pre_rebase_hook = [hook_ref]
-        args.post_rebase_hook = [hook_ref]
+        args.pre_rebase_hook = [f"git:dest/{dest.branch}:pre-rebase-hook-script.sh"]
+        args.post_rebase_hook = [f"git:dest/{dest.branch}:post-rebase-hook-script.sh"]
         args.pre_carry_commit_hook = None
         args.pre_push_rebase_branch_hook = None
         args.pre_create_pr_hook = None
@@ -767,5 +774,6 @@ touch test-hook-script.success"""
             args, slack_webhook=None, github_app_wrapper=fake_github_provider)
 
         assert result is True
-        # Verify hooks were NOT executed - marker file should not exist
-        assert "test-hook-script.success" not in os.listdir(tmpdir)
+        # Verify hooks were NOT executed - marker files should not exist
+        assert "pre-rebase-hook.success" not in os.listdir(tmpdir)
+        assert "post-rebase-hook.success" not in os.listdir(tmpdir)

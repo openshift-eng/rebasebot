@@ -259,15 +259,7 @@ By default, lifecycle hooks are only executed when a rebase happened. However, t
 - Updating dependencies automatically — keep libraries or modules in sync with their downstream versions without manual intervention, even if upstream did not change.
 - Performing maintenance tasks or code generation.
 
-Enable this behavior with the opt-in `--always-run-hooks` flag:
-
-```txt
-...
---always-run-hooks \
-...
-```
-
-When this flag is enabled:
+Enable this behavior with the opt-in `--always-run-hooks` flag. When this flag is enabled:
 - The main lifecycle hooks (`--pre-rebase-hook`, `--pre-carry-commit-hook`, `--post-rebase-hook`) will execute **even if no rebase is required**.
 - Hooks that depend on specific actions (e.g., `--pre-push-rebase-branch-hook`, `--pre-create-pr-hook`) will still only run if that action occurs.
 - Built-in hooks (e.g. triggered by flags, `--update-go-modules`) are also executed as usual.
@@ -335,17 +327,6 @@ rebasebot --source https://github.com/kubernetes/cloud-provider-azure:master \
           --github-user-token ~/my-github-token.txt
 ```
 
-Example 3. Run Go module updates even when no rebase is needed.
-
-```sh
-rebasebot --source https://github.com/kubernetes/cloud-provider-aws:master \
-          --dest openshift/cloud-provider-aws:master \
-          --rebase openshift-cloud-team/cloud-provider-aws:rebase-bot-master \
-          --update-go-modules \
-          --always-run-hooks \
-          --github-user-token ~/my-github-token.txt
-```
-
-Example 4. Rebasebot usage in OpenShift CI pipeline.
+Example 3. Rebasebot usage in OpenShift CI pipeline.
 
 https://github.com/openshift/release/blob/master/ci-operator/config/openshift-eng/rebasebot/openshift-eng-rebasebot-main.yaml

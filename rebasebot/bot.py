@@ -638,10 +638,9 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
                      "Keeping the current title.")
 
 
-def _report_result(  # pylint: disable=R0917
+def _report_result(
     needs_rebase: bool,
     pr_required: bool,
-    always_run_hooks: bool,
     pr_available: bool,
     pr_url: str,
     dest_url: str,
@@ -659,32 +658,16 @@ def _report_result(  # pylint: disable=R0917
             # We updated the exiting PR.
             message = f"I updated existing rebase PR: {pr_url}"
     else:
-        if pr_url is not None and pr_url != "" and not always_run_hooks:
-            if not pr_available:
-                # Case 3: the remote branch is already up to date, but there is no PR yet.
-                # We create a new PR then.
-                message = f"I created a new rebase PR: {pr_url}"
-            else:
-                # Case 4: we created a PR, but no changes were done to the repos after that.
-                # Just infrom that the PR is in a good shape.
-                message = f"PR {pr_url} already contains the latest changes"
-        elif pr_url is not None and pr_url != "":
-            # These are the cases where the remote branch is already up to date with upstream
-            #  (no rebase needed), but hook scripts require a new PR to be created or updated.
-            if not pr_available and pr_required:
-                # Case 5: No rebase needed, but hooks require a PR to exist.
-                # Create a new PR for hook execution.
+        if pr_url is not None and pr_url != "":
+            if pr_required and not pr_available:
+                # Case 3: No rebase needed, but hooks made changes requiring a new PR.
                 message = f"I created a new rebase PR (hooks enabled): {pr_url}"
-            elif pr_available and not pr_required:
-                # Case 6a: A PR already exists and no rebase was needed,
-                # but hooks require the PR to be updated/confirmed.
-                message = f"PR {pr_url} already contains the latest changes (hooks enabled)"
-            else:
-                # Case 6: A PR already exists and no rebase was needed,
-                # but hooks require the PR to be updated/confirmed.
-                message = f"PR {pr_url} already contains the latest changes (hooks enabled)"
+            elif pr_available:
+                # Case 4: we created a PR, but no changes were done to the repos after that.
+                # Just inform that the PR is in a good shape.
+                message = f"PR {pr_url} already contains the latest changes"
         else:
-            # Case 7: source and dest repos are the same (git diff is empty), and there is no PR.
+            # Case 5: source and dest repos are the same (git diff is empty), and there is no PR.
             # Just inform that there is nothing to update in the dest repository.
             message = f"Destination repo {dest_url} already contains the latest changes"
 
@@ -843,30 +826,30 @@ def run(
     # Push the rebase branch to the remote repository.
     if push_required:
         logging.info("Existing rebase branch needs to be updated.")
-        try:
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
-            if dry_run:
-                logging.info("Dry run mode is enabled. Do not push the rebase branch.")
-            else:
+        if dry_run:
+            logging.info("Dry run mode is enabled. Do not push the rebase branch.")
+        else:
+            try:
+                hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
                 _push_rebase_branch(gitwd, rebase)
-        except LifecycleHookScriptException as ex:
-            logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-                          f"into {dest.ns}/{dest.name}:{dest.branch}")
-            _message_slack(
-                slack_webhook,
-                f"Manual intervention is needed to rebase "
-                f"{source.url}:{source.branch} "
-                f"into {dest.ns}/{dest.name}:{dest.branch}: "
-                f"{ex}",
-            )
-            return False
-        except Exception as ex:
-            logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
-            _message_slack(
-                slack_webhook,
-                f"I got an exception pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}: {ex}",
-            )
-            return False
+            except LifecycleHookScriptException as ex:
+                logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
+                              f"into {dest.ns}/{dest.name}:{dest.branch}")
+                _message_slack(
+                    slack_webhook,
+                    f"Manual intervention is needed to rebase "
+                    f"{source.url}:{source.branch} "
+                    f"into {dest.ns}/{dest.name}:{dest.branch}: "
+                    f"{ex}",
+                )
+                return False
+            except Exception as ex:
+                logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
+                _message_slack(
+                    slack_webhook,
+                    f"I got an exception pushing to " f"{rebase.ns}/{rebase.name}:{rebase.branch}: {ex}",
+                )
+                return False
 
     if pr_available and dry_run:
         logging.info("Dry run mode is enabled. Do not update PR title.")
@@ -882,46 +865,46 @@ def run(
             )
             return False
 
-    try:
-        if not pr_available and (needs_rebase or always_run_hooks):
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
-            if dry_run:
-                logging.info("Dry run mode is enabled. Do not create a PR.")
-            else:
+    if not pr_available and (needs_rebase or always_run_hooks):
+        if dry_run:
+            logging.info("Dry run mode is enabled. Do not create a PR.")
+        else:
+            try:
+                hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
                 pr_required = _is_pr_required(gitwd, rebase, dest)
                 if pr_required:
                     pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
                 else:
                     logging.info("No PR required - no changes between rebase and dest.")
                     pr_url = None
-    except LifecycleHookScriptException as ex:
-        logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-                      f"into {dest.ns}/{dest.name}:{dest.branch}")
-        _message_slack(
-            slack_webhook,
-            f"Manual intervention is needed to rebase "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
-        )
-        return False
-    except requests.exceptions.HTTPError as ex:
-        logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
-        _message_slack(
-            slack_webhook,
-            f"Failed to create a pull request: {ex}\n Response: {ex.response.text}"
-        )
+            except LifecycleHookScriptException as ex:
+                logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
+                              f"into {dest.ns}/{dest.name}:{dest.branch}")
+                _message_slack(
+                    slack_webhook,
+                    f"Manual intervention is needed to rebase "
+                    f"{source.url}:{source.branch} "
+                    f"into {dest.ns}/{dest.name}:{dest.branch}: "
+                    f"{ex}",
+                )
+                return False
+            except requests.exceptions.HTTPError as ex:
+                logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
+                _message_slack(
+                    slack_webhook,
+                    f"Failed to create a pull request: {ex}\n Response: {ex.response.text}"
+                )
 
-        return False
-    except Exception as ex:
-        logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}")
-        _message_slack(
-            slack_webhook,
-            f"I got an error creating a rebase PR in {dest.ns}/{dest.name}: {ex}"
-        )
+                return False
+            except Exception as ex:
+                logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}")
+                _message_slack(
+                    slack_webhook,
+                    f"I got an error creating a rebase PR in {dest.ns}/{dest.name}: {ex}"
+                )
 
-        return False
+                return False
 
     if not dry_run:
-        _report_result(needs_rebase, pr_required, always_run_hooks, pr_available, pr_url, dest.url, slack_webhook)
+        _report_result(needs_rebase, pr_required, pr_available, pr_url, dest.url, slack_webhook)
     return True

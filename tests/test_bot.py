@@ -262,33 +262,23 @@ class TestReportResult:
     slack_webhook = "https://hooks.slack.com/services/..."
 
     @pytest.mark.parametrize(
-        "needs_rebase, pr_required, always_run_hooks, pr_available, pr_url, slack_message",
+        "needs_rebase, pr_required, pr_available, pr_url, slack_message",
         [
-            # Cases when needs_rebase is True (always_run_hooks doesn't matter)
-            (True, False, False, False, "https://github.com/user/repo/pull/123",
+            # Cases when needs_rebase is True
+            (True, False, False, "https://github.com/user/repo/pull/123",
              "I created a new rebase PR: https://github.com/user/repo/pull/123"),
-            (True, False, False, True, "https://github.com/user/repo/pull/456",
-             "I updated existing rebase PR: https://github.com/user/repo/pull/456"),
-            (True, False, True, False, "https://github.com/user/repo/pull/123",
-             "I created a new rebase PR: https://github.com/user/repo/pull/123"),
-            (True, False, True, True, "https://github.com/user/repo/pull/456",
+            (True, False, True, "https://github.com/user/repo/pull/456",
              "I updated existing rebase PR: https://github.com/user/repo/pull/456"),
 
-            # Cases when needs_rebase is False and always_run_hooks is False
-            (False, False, False, False, "https://github.com/user/repo/pull/789",
-             "I created a new rebase PR: https://github.com/user/repo/pull/789"),
-            (False, False, False, True, "https://github.com/user/repo/pull/100",
+            # Cases when needs_rebase is False
+            (False, False, True, "https://github.com/user/repo/pull/100",
              "PR https://github.com/user/repo/pull/100 already contains the latest changes"),
-            (False, False, False, False, "",
+            (False, False, False, "",
              f"Destination repo {dest_url} already contains the latest changes"),
 
-            # Cases when needs_rebase is False and always_run_hooks is True
-            (False, True, True, False, "https://github.com/user/repo/pull/200",
+            # Case when hooks created a new PR
+            (False, True, False, "https://github.com/user/repo/pull/200",
              "I created a new rebase PR (hooks enabled): https://github.com/user/repo/pull/200"),
-            (False, False, True, True, "https://github.com/user/repo/pull/201",
-             "PR https://github.com/user/repo/pull/201 already contains the latest changes (hooks enabled)"),
-            (False, False, True, False, "",
-             f"Destination repo {dest_url} already contains the latest changes"),
         ],
     )
     @patch('logging.info')
@@ -299,12 +289,11 @@ class TestReportResult:
         mocked_logging_info,
         needs_rebase,
         pr_required,
-        always_run_hooks,
         pr_available,
         pr_url,
         slack_message,
     ):
-        _report_result(needs_rebase, pr_required, always_run_hooks, pr_available, pr_url,
+        _report_result(needs_rebase, pr_required, pr_available, pr_url,
                        self.dest_url, self.slack_webhook)
 
         mocked_logging_info.assert_called_once_with(slack_message)
