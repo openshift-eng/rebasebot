@@ -276,9 +276,11 @@ class TestReportResult:
             (False, False, False, "",
              f"Destination repo {dest_url} already contains the latest changes"),
 
-            # Case when hooks created a new PR
+            # Cases when hooks made changes
             (False, True, False, "https://github.com/user/repo/pull/200",
              "I created a new rebase PR (hooks enabled): https://github.com/user/repo/pull/200"),
+            (False, True, True, "https://github.com/user/repo/pull/201",
+             "I updated existing rebase PR (hooks enabled): https://github.com/user/repo/pull/201"),
         ],
     )
     @patch('logging.info')
