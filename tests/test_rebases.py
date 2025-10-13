@@ -678,3 +678,102 @@ echo main
 
         assert args.source == source
         assert result
+
+    def test_always_run_hooks_when_no_rebase_needed(self, init_test_repositories,
+                                                    fake_github_provider, tmpdir):
+        """Test that hooks run when --always-run-hooks is True even when no rebase is needed."""
+        source, rebase, dest = init_test_repositories
+
+        # Create separate test hooks that create different marker files
+        pre_rebase_hook_script = """#!/bin/bash
+touch pre-rebase-hook.success"""
+
+        post_rebase_hook_script = """#!/bin/bash
+touch post-rebase-hook.success"""
+
+        with CommitBuilder(dest) as cb:
+            cb.add_file("pre-rebase-hook-script.sh", pre_rebase_hook_script)
+            cb.add_file("post-rebase-hook-script.sh", post_rebase_hook_script)
+            cb.commit("UPSTREAM: <carry>: add test hook scripts")
+
+        # Configure args with always_run_hooks=True and multiple hook types to test
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "none"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.dry_run = True
+        args.ignore_manual_label = True
+        args.always_run_hooks = True
+
+        # Test multiple hook types with different scripts
+        args.pre_rebase_hook = [f"git:dest/{dest.branch}:pre-rebase-hook-script.sh"]
+        args.post_rebase_hook = [f"git:dest/{dest.branch}:post-rebase-hook-script.sh"]
+        args.pre_carry_commit_hook = None
+        args.pre_push_rebase_branch_hook = None
+        args.pre_create_pr_hook = None
+
+        # Verify no rebase is needed initially (source and dest are in sync)
+        # But hooks should still run due to always_run_hooks=True
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result is True
+        # Verify both hooks executed by checking for their marker files
+        assert "pre-rebase-hook.success" in os.listdir(tmpdir)
+        assert "post-rebase-hook.success" in os.listdir(tmpdir)
+
+    def test_hooks_not_run_when_no_rebase_needed_and_flag_false(self, init_test_repositories,
+                                                                fake_github_provider, tmpdir):
+        """Test that hooks DON'T run when --always-run-hooks is False and no rebase is needed."""
+        source, rebase, dest = init_test_repositories
+
+        # Create separate test hooks that create different marker files
+        pre_rebase_hook_script = """#!/bin/bash
+touch pre-rebase-hook.success"""
+
+        post_rebase_hook_script = """#!/bin/bash
+touch post-rebase-hook.success"""
+
+        with CommitBuilder(dest) as cb:
+            cb.add_file("pre-rebase-hook-script.sh", pre_rebase_hook_script)
+            cb.add_file("post-rebase-hook-script.sh", post_rebase_hook_script)
+            cb.commit("UPSTREAM: <carry>: add test hook scripts")
+
+        # Configure args with always_run_hooks=False (default behavior)
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "none"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.dry_run = True
+        args.ignore_manual_label = True
+        args.always_run_hooks = False  # Key difference: hooks should NOT run
+
+        args.pre_rebase_hook = [f"git:dest/{dest.branch}:pre-rebase-hook-script.sh"]
+        args.post_rebase_hook = [f"git:dest/{dest.branch}:post-rebase-hook-script.sh"]
+        args.pre_carry_commit_hook = None
+        args.pre_push_rebase_branch_hook = None
+        args.pre_create_pr_hook = None
+
+        result = cli.rebasebot_run(
+            args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result is True
+        # Verify hooks were NOT executed - marker files should not exist
+        assert "pre-rebase-hook.success" not in os.listdir(tmpdir)
+        assert "post-rebase-hook.success" not in os.listdir(tmpdir)

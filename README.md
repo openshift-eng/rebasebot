@@ -252,6 +252,19 @@ Some rebasebot arguments are available in lifecycle hook scripts as environment 
 
 *Note: Remotes are always `source`, `dest`, and `rebase`. The local branch is called rebase.*
 
+### Always run hooks
+
+By default, lifecycle hooks are only executed when a rebase happened. However, there are scenarios where you might want to run hooks regardless of whether a rebase is needed, such as:
+
+- Updating dependencies automatically — keep libraries or modules in sync with their downstream versions without manual intervention, even if upstream did not change.
+- Performing maintenance tasks or code generation.
+
+Enable this behavior with the opt-in `--always-run-hooks` flag. When this flag is enabled:
+- The main lifecycle hooks (`--pre-rebase-hook`, `--pre-carry-commit-hook`, `--post-rebase-hook`) will execute **even if no rebase is required**.
+- Hooks that depend on specific actions (e.g., `--pre-push-rebase-branch-hook`, `--pre-create-pr-hook`) will still only run if that action occurs.
+- Built-in hooks (e.g. triggered by flags, `--update-go-modules`) are also executed as usual.
+- The execution order and logic of the rebase process remain unchanged.
+
 ## Dynamic source git reference selection
 
 Rebasebot offers the capability to dynamically determine the source branch or tag for rebasing, enabling integration into CI/CD pipelines. This is especially valuable when rebasing from release tags or dynamically created branches.

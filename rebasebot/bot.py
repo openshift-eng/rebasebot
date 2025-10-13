@@ -424,6 +424,22 @@ def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
         if len(diff_index) == 0:
             logging.info("Existing rebase branch already contains source.")
             return False
+        logging.info("Existing rebase branch contains changes.")
+
+    return True
+
+
+def _is_pr_required(gitwd: git.Repo, rebase: GitHubBranch, dest: GitHubBranch) -> bool:
+    """
+    Check if there are diffs between rebase and dest that would require a PR.
+    Content-based: looks at the diff between remote dest and remote rebase branches.
+    """
+    if dest.branch in gitwd.remotes.dest.refs and rebase.branch in gitwd.remotes.rebase.refs:
+        diff_index = gitwd.git.diff(f"dest/{dest.branch}...rebase/{rebase.branch}")
+        if len(diff_index) == 0:
+            logging.info("Rebase branch does not introduce changes compared to dest.")
+            return False
+        logging.info("Rebase branch introduces changes compared to dest.")
 
     return True
 
@@ -431,7 +447,7 @@ def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
 def _is_pr_available(dest_repo: Repository, dest: GitHubBranch, rebase: GitHubBranch) -> Tuple[ShortPullRequest, bool]:
     logging.info("Checking for existing pull request")
 
-    pull_requests = dest_repo.pull_requests(base=dest.branch)
+    pull_requests = dest_repo.pull_requests(base=dest.branch, state="open")
     # Github does not support filtering cross-repository pull requests if both repositories
     # are owned by the same organization. We must filter client side.
     for pr in pull_requests:
@@ -622,7 +638,14 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
                      "Keeping the current title.")
 
 
-def _report_result(needs_rebase: bool, pr_available: bool, pr_url: str, dest_url: str, slack_webhook: str) -> None:
+def _report_result(  # pylint: disable=R0917
+    needs_rebase: bool,
+    pr_required: bool,
+    pr_available: bool,
+    pr_url: str,
+    dest_url: str,
+    slack_webhook: str
+) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
     message = None
     if needs_rebase:
@@ -635,17 +658,19 @@ def _report_result(needs_rebase: bool, pr_available: bool, pr_url: str, dest_url
             # We updated the exiting PR.
             message = f"I updated existing rebase PR: {pr_url}"
     else:
-        if pr_url != "":
-            if not pr_available:
-                # Case 3: the remote branch is already up to date, but there is no PR yet.
-                # We create a new PR then.
-                message = f"I created a new rebase PR: {pr_url}"
-            else:
-                # Case 4: we created a PR, but no changes were done to the repos after that.
-                # Just infrom that the PR is in a good shape.
+        if pr_url is not None and pr_url != "":
+            if pr_required and not pr_available:
+                # Case 3: No rebase needed, but hooks made changes requiring a new PR.
+                message = f"I created a new rebase PR (hooks enabled): {pr_url}"
+            elif pr_required and pr_available:
+                # Case 4: No rebase needed, but hooks made changes to an existing PR.
+                message = f"I updated existing rebase PR (hooks enabled): {pr_url}"
+            elif pr_available:
+                # Case 5: we created a PR, but no changes were done to the repos after that.
+                # Just inform that the PR is in a good shape.
                 message = f"PR {pr_url} already contains the latest changes"
         else:
-            # Case 5: source and dest repos are the same (git diff is empty), and there is no PR.
+            # Case 6: source and dest repos are the same (git diff is empty), and there is no PR.
             # Just inform that there is nothing to update in the dest repository.
             message = f"Destination repo {dest_url} already contains the latest changes"
 
@@ -670,7 +695,8 @@ def run(
     hooks: lifecycle_hooks.LifecycleHooks = None,
     update_go_modules: bool = False,
     dry_run: bool = False,
-    ignore_manual_label: bool = False
+    ignore_manual_label: bool = False,
+    always_run_hooks: bool = False
 ) -> bool:
     """Run Rebase Bot."""
     gh_app = github_app_provider.github_app
@@ -765,6 +791,11 @@ def run(
             )
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
             _cherrypick_art_pull_request(gitwd, dest_repo, dest)
+        elif always_run_hooks:
+            # Run hooks without rebase operations when --always-run-hooks is enabled
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
 
     except (RepoException, LifecycleHookScriptException) as ex:
         logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
@@ -794,9 +825,10 @@ def run(
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
-    push_required = _is_push_required(gitwd, rebase) if needs_rebase else False
+    push_required = _is_push_required(gitwd, rebase)
     pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
     pr_url = pull_req.html_url if pull_req is not None else ""
+    pr_required = False
 
     # Push the rebase branch to the remote repository.
     if push_required:
@@ -804,7 +836,6 @@ def run(
         try:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
             _push_rebase_branch(gitwd, rebase)
-
         except LifecycleHookScriptException as ex:
             logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
                           f"into {dest.ns}/{dest.name}:{dest.branch}")
@@ -825,7 +856,7 @@ def run(
             return False
 
     if pr_available:
-        # the branch was rebased, but the PR already exists, update its title.
+        # the branch was rebased, but the open PR already exists, update its title.
         try:
             _update_pr_title(gitwd, pull_req, source, dest)
         except Exception as ex:
@@ -837,9 +868,14 @@ def run(
             return False
 
     try:
-        if not pr_available and needs_rebase:
+        if not pr_available:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
-            pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
+            pr_required = _is_pr_required(gitwd, rebase, dest)
+            if pr_required:
+                pr_url = _create_pr(gh_app, dest, source, rebase, gitwd)
+            else:
+                logging.info("No PR required - no changes between rebase and dest.")
+                pr_url = None
     except LifecycleHookScriptException as ex:
         logging.error(f"Manual intervention is needed to rebase {source.url}:{source.branch} "
                       f"into {dest.ns}/{dest.name}:{dest.branch}")
@@ -868,5 +904,5 @@ def run(
 
         return False
 
-    _report_result(needs_rebase, pr_available, pr_url, dest.url, slack_webhook)
+    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest.url, slack_webhook)
     return True
