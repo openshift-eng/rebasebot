@@ -25,12 +25,11 @@ from collections import defaultdict
 
 import git
 import git.compat
-import github3
 import requests
 from git.objects import Commit
-from github3.pulls import ShortPullRequest
-from github3.repos.commit import ShortCommit
-from github3.repos.repo import Repository
+from github import Github, GithubException
+from github.PullRequest import PullRequest
+from github.Repository import Repository
 
 from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
@@ -82,9 +81,9 @@ def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> 
 
 def _is_pr_merged(pr_number: int, source_repo: Repository, gitwd: git.Repo, source_branch: str) -> bool:
     logging.info("Checking that PR %s has been merged and is included in %s", pr_number, source_branch)
-    gh_pr = source_repo.pull_request(pr_number)
+    gh_pr = source_repo.get_pull(pr_number)
 
-    if not gh_pr.is_merged():
+    if not gh_pr.merged:
         return False
 
     merge_commit_sha = gh_pr.merge_commit_sha
@@ -633,21 +632,24 @@ def _cherrypick_art_pull_request(
     that updates the build image, it includes it in the rebase.
     """
     logging.info("Checking for ART pull request")
-    for pull_request in dest_repo.pull_requests(state="open", base=f"{dest.branch}"):
-        assert isinstance(pull_request, ShortPullRequest)  # type hint
+    for pull_request in dest_repo.get_pulls(state="open", base=dest.branch):
         if "consistent with ART" in pull_request.title and pull_request.user.login == "openshift-bot":
             logging.info(f"Found open ART image update pull requst: {pull_request.title}")
-            remote = pull_request.head.repository
+            head = pull_request.head
+            if head is None or head.repo is None:
+                logging.warning("Skipping PR with deleted head repository: %s", pull_request.html_url)
+                continue
+
+            remote = head.repo
             remote_name = remote.name
             if remote_name in gitwd.remotes:
                 gitwd.remotes[remote_name].set_url(remote.html_url)
             else:
                 gitwd.create_remote(remote_name, remote.html_url)
 
-            gitwd.remotes[remote_name].fetch(pull_request.head.ref)
+            gitwd.remotes[remote_name].fetch(head.ref)
 
-            for commit in pull_request.commits():
-                assert isinstance(commit, ShortCommit)
+            for commit in pull_request.get_commits():
                 _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit.sha,
@@ -684,15 +686,20 @@ def _is_pr_required(gitwd: git.Repo, rebase: GitHubBranch, dest: GitHubBranch) -
     return True
 
 
-def _is_pr_available(dest_repo: Repository, dest: GitHubBranch, rebase: GitHubBranch) -> tuple[ShortPullRequest, bool]:
+def _is_pr_available(
+    dest_repo: Repository, dest: GitHubBranch, rebase: GitHubBranch
+) -> tuple[PullRequest | None, bool]:
     logging.info("Checking for existing pull request")
 
-    pull_requests = dest_repo.pull_requests(base=dest.branch, state="open")
+    pull_requests = dest_repo.get_pulls(base=dest.branch, state="open")
     # Github does not support filtering cross-repository pull requests if both repositories
     # are owned by the same organization. We must filter client side.
     for pr in pull_requests:
-        pr_repo = pr.as_dict()["head"]["repo"]["full_name"]
-        if pr_repo == f"{rebase.ns}/{rebase.name}" and pr.head.ref == rebase.branch:
+        if pr.head.repo is None:
+            logging.warning(f"Skipping PR with deleted head repository: {pr.html_url}")
+            continue
+        pr_repo = pr.head.repo.full_name
+        if pr_repo == rebase.full_name and pr.head.ref == rebase.branch:
             logging.info('Found existing pull request: "%s" %s', pr.title, pr.html_url)
             return pr, True
 
@@ -702,7 +709,7 @@ def _is_pr_available(dest_repo: Repository, dest: GitHubBranch, rebase: GitHubBr
 
 def _create_pr(
     *,
-    gh_app: github3.GitHub,
+    gh_app: Github,
     dest: GitHubBranch,
     source: GitHubBranch,
     rebase: GitHubBranch,
@@ -717,30 +724,19 @@ def _create_pr(
 
     logging.info("Creating a pull request")
 
-    # FIXME(rmanak): This hack is because github3 doesn't support setting
-    # head_repo param when creating a PR.
-    #
-    # This param is required when creating cross-repository pull requests if both repositories
-    # are owned by the same organization.
-    #
-    # https://github.com/sigmavirus24/github3.py/issues/1190
+    dest_repo = gh_app.get_repo(dest.full_name)
 
-    gh_pr: requests.Response = gh_app._post(  # pylint: disable=W0212
-        f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
-        data={
-            "title": title,
-            "head": rebase.branch,
-            "head_repo": f"{rebase.ns}/{rebase.name}",
-            "base": dest.branch,
-            "maintainer_can_modify": False,
-        },
-        json=True,
+    pr = dest_repo.create_pull(
+        title=title,
+        body="",
+        head=f"{rebase.ns}:{rebase.branch}",
+        base=dest.branch,
+        maintainer_can_modify=False,
     )
 
-    logging.debug(gh_pr.json())
-    gh_pr.raise_for_status()
+    logging.info(f"Created pull request: {pr.html_url}")
 
-    return gh_pr.json()["html_url"]
+    return pr.html_url
 
 
 def is_ref_a_tag(gitwd: git.Repo, ref: str) -> bool:
@@ -867,12 +863,12 @@ def _init_working_dir(
     return gitwd
 
 
-def _manual_rebase_pr_in_repo(repo: Repository) -> ShortPullRequest | None:
+def _manual_rebase_pr_in_repo(repo: Repository) -> PullRequest | None:
     """Checks for the presence of a rebase/manual label on the pull request."""
-    prs = repo.pull_requests()
+    prs = repo.get_pulls()
     for pull_req in prs:
         for label in pull_req.labels:
-            if label["name"] == "rebase/manual":
+            if label.name == "rebase/manual":
                 return pull_req
     return None
 
@@ -885,7 +881,7 @@ def _push_rebase_branch(gitwd: git.Repo, rebase: GitHubBranch) -> None:
         raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
 
 
-def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHubBranch, dest: GitHubBranch) -> None:
+def _update_pr_title(gitwd: git.Repo, pull_req: PullRequest, source: GitHubBranch, dest: GitHubBranch) -> None:
     """Updates the pull request title to match the current state of the rebase branch
     Only updates the title if the title contains the word Merge.
     Keeping everything before "Merge" and updating everything after.
@@ -902,8 +898,10 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
             return
 
         logging.info(f"Updating pull request title: {computed_title}")
-        if not pull_req.update(title=computed_title):
-            raise PullRequestUpdateException(f"Error updating title for pull request: {pull_req.html_url}")
+        try:
+            pull_req.edit(title=computed_title)
+        except GithubException as ex:
+            raise PullRequestUpdateException(f"Error updating title for pull request: {pull_req.html_url}") from ex
     else:
         logging.info(
             f'Open pull request title "{pull_req.title}" does not match rebasebot format. Keeping the current title.'
@@ -964,7 +962,7 @@ def run(
     conflict_policy: str = "auto",
     bot_emails: list,
     exclude_commits: list,
-    hooks: lifecycle_hooks.LifecycleHooks = None,
+    hooks: lifecycle_hooks.LifecycleHooks | None = None,
     update_go_modules: bool = False,
     dry_run: bool = False,
     ignore_manual_label: bool = False,
@@ -979,11 +977,11 @@ def run(
         hooks = lifecycle_hooks.LifecycleHooks(tmp_script_dir=None, args=None)
 
     try:
-        dest_repo = gh_app.repository(dest.ns, dest.name)
+        dest_repo = gh_app.get_repo(dest.full_name)
         logging.info("Destination repository is %s", dest_repo.clone_url)
-        rebase_repo = gh_cloner_app.repository(rebase.ns, rebase.name)
+        rebase_repo = gh_cloner_app.get_repo(rebase.full_name)
         logging.info("rebase repository is %s", rebase_repo.clone_url)
-        source_repo = gh_app.repository(source.ns, source.name)
+        source_repo = gh_app.get_repo(source.full_name)
         logging.info("source repository is %s", source_repo.clone_url)
 
         if not ignore_manual_label:
@@ -1171,9 +1169,11 @@ def run(
             f"{ex}",
         )
         return False
-    except requests.exceptions.HTTPError as ex:
-        logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
-        _message_slack(slack_webhook, f"Failed to create a pull request: {ex}\n Response: {ex.response.text}")
+    except GithubException as ex:
+        logging.error(f"Failed to create a pull request: {ex}")
+        if ex.data:
+            logging.error(f"Response data: {ex.data}")
+        _message_slack(slack_webhook, f"Failed to create a pull request: {ex}")
 
         return False
     except Exception as ex:
