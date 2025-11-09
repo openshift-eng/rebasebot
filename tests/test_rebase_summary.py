@@ -21,7 +21,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from git import Repo
-from github3.pulls import ShortPullRequest
 
 from rebasebot.bot import _cherrypick_art_pull_request, _do_rebase, _init_working_dir, _prepare_rebase_branch
 from rebasebot.github import GitHubBranch
@@ -72,7 +71,7 @@ class TestDoRebaseDroppedCommits:
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            source_repo=fake_github_provider.github_app.get_repo.return_value,
             tag_policy="soft",
             bot_emails=[],
             exclude_commits=[excluded.hexsha],
@@ -96,7 +95,7 @@ class TestDoRebaseDroppedCommits:
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            source_repo=fake_github_provider.github_app.get_repo.return_value,
             tag_policy="strict",
             bot_emails=[],
             exclude_commits=[],
@@ -119,7 +118,7 @@ class TestDoRebaseDroppedCommits:
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            source_repo=fake_github_provider.github_app.get_repo.return_value,
             tag_policy="soft",
             bot_emails=[],
             exclude_commits=[],
@@ -149,7 +148,7 @@ class TestDoRebaseContentLossWarnings:
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            source_repo=fake_github_provider.github_app.get_repo.return_value,
             tag_policy="soft",
             conflict_policy="warn",
             bot_emails=[],
@@ -187,7 +186,7 @@ class TestDoRebaseContentLossWarnings:
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            source_repo=fake_github_provider.github_app.get_repo.return_value,
             tag_policy="soft",
             conflict_policy="auto",
             bot_emails=[],
@@ -202,7 +201,7 @@ class TestCherrypickArtPullRequest:
     @patch("rebasebot.bot._safe_cherry_pick")
     def test_returns_art_pr_info_when_matching_pr_exists(self, _mock_safe_cherry_pick, working_repo_context):
         ctx = working_repo_context
-        art_pr = MagicMock(spec=ShortPullRequest)
+        art_pr = MagicMock()
         art_pr.title = "Update build image to be consistent with ART"
         art_pr.user = MagicMock(login="openshift-bot")
         art_pr.number = 42
@@ -210,11 +209,11 @@ class TestCherrypickArtPullRequest:
         repository = MagicMock()
         repository.name = "fork"
         repository.html_url = "https://github.com/downstream/fork"
-        art_pr.head = MagicMock(repository=repository, ref="art-update")
-        art_pr.commits.return_value = []
+        art_pr.head = MagicMock(repo=repository, ref="art-update")
+        art_pr.get_commits.return_value = []
 
         dest_repo = MagicMock()
-        dest_repo.pull_requests.return_value = [art_pr]
+        dest_repo.get_pulls.return_value = [art_pr]
 
         if "fork" not in [remote.name for remote in ctx.working_repo.remotes]:
             ctx.working_repo.create_remote("fork", ctx.dest.url)
@@ -231,12 +230,12 @@ class TestCherrypickArtPullRequest:
 
     def test_returns_none_when_no_matching_pr_exists(self, working_repo_context):
         ctx = working_repo_context
-        other_pr = MagicMock(spec=ShortPullRequest)
+        other_pr = MagicMock()
         other_pr.title = "Unrelated change"
         other_pr.user = MagicMock(login="openshift-bot")
 
         dest_repo = MagicMock()
-        dest_repo.pull_requests.return_value = [other_pr]
+        dest_repo.get_pulls.return_value = [other_pr]
 
         result, content_loss = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
 

@@ -13,16 +13,16 @@
 #    under the License.
 """Contains GitHub related helper classes."""
 
-import builtins
 import logging
 import re
 from dataclasses import dataclass
 from functools import cached_property
 from urllib.parse import urlparse
 
-import github3
+from github import Auth, Github, GithubIntegration, UnknownObjectException
 
 logger = logging.getLogger()
+GITHUB_BRANCH_PATTERN = re.compile(r"^(?P<organization>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
 
 
 @dataclass
@@ -46,8 +46,13 @@ class GitHubBranch:
         """A short human-readable identifier, e.g. 'openshift/api:main'."""
         return f"{self.ns}/{self.name}:{self.branch}"
 
+    @property
+    def full_name(self) -> str:
+        """Repository name in the form owner/name."""
+        return f"{self.ns}/{self.name}"
 
-def parse_github_branch(repository_string) -> GitHubBranch:
+
+def parse_github_branch(repository_string: str) -> GitHubBranch:
     """
     parse_github_branch constructs GitHubBranch object from the provided location.
     The repository_string format is <user or organization>/<repo>:<branch>
@@ -59,8 +64,7 @@ def parse_github_branch(repository_string) -> GitHubBranch:
     # Remove prefix if it's a URL
     repository_string = repository_string.removeprefix("https://github.com/")
 
-    github_regex = re.compile(r"^(?P<organization>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
-    match = github_regex.match(repository_string)
+    match = GITHUB_BRANCH_PATTERN.match(repository_string)
     if match is None:
         raise ValueError("GitHub branch value must be in the form <user or organization>/<repo>:<branch>")
 
@@ -124,6 +128,9 @@ class GithubAppProvider:
         self._app_credentials = None
         self._cloner_app_credentials = None
 
+        if self.user_auth and not self.user_token:
+            raise ValueError("User authentication requires a GitHub user token")
+
         if not user_auth:
             if not all((app_id, app_key, dest_branch, cloner_id, cloner_key, rebase_branch)):
                 raise ValueError("Credentials for both, cloning and pushing app should be provided")
@@ -140,7 +147,10 @@ class GithubAppProvider:
 
         :return: str
         """
-        return self.github_app.session.auth.token
+        if self.user_auth:
+            return self._require_user_token()
+
+        return self._get_installation_token(self._app_installation_context, "app")
 
     def get_cloner_token(self) -> str:
         """
@@ -148,60 +158,107 @@ class GithubAppProvider:
 
         :return: str
         """
-        return self.github_cloner_app.session.auth.token
+        if self.user_auth:
+            return self._require_user_token()
+
+        return self._get_installation_token(self._cloner_app_installation_context, "cloner")
 
     @cached_property
-    def github_app(self) -> github3.GitHub:
+    def github_app(self) -> Github:
         """
         Authenticated GitHub app.
 
         In case `user_auth` = True, returns app authenticated with user token.
         In app mode `app_id`, `app_key` and `dest_branch` will be used for app authentication.
 
-        :return: github3.GitHub
+        :return: Github
         """
         if self.user_auth:
             return self._get_github_user_logged_in_app()
 
-        return self._github_login_app(self._app_credentials)
+        return self._get_github_installation_app(self._app_installation_context)
 
     @cached_property
-    def github_cloner_app(self) -> github3.GitHub:
+    def github_cloner_app(self) -> Github:
         """
         Authenticated GitHub app.
 
         In case `user_auth` = True, returns app authenticated with user token.
         In app mode `cloner_id`, `cloner_key` and `rebase_branch`will be used for app authentication.
 
-        :return: github3.GitHub
+        :return: Github
         """
         if self.user_auth:
             return self._get_github_user_logged_in_app()
 
-        return self._github_login_app(self._cloner_app_credentials)
+        return self._get_github_installation_app(self._cloner_app_installation_context)
+
+    @cached_property
+    def _app_installation_context(self) -> tuple[GithubIntegration, int]:
+        return self._get_installation_context(self._require_credentials(self._app_credentials, "app"))
+
+    @cached_property
+    def _cloner_app_installation_context(self) -> tuple[GithubIntegration, int]:
+        return self._get_installation_context(self._require_credentials(self._cloner_app_credentials, "cloner"))
+
+    def _require_user_token(self) -> str:
+        if self.user_token is None:
+            raise RuntimeError("GitHub user token is unavailable")
+        return self.user_token
 
     @staticmethod
-    def _github_login_app(credentials: GitHubAppCredentials) -> github3.GitHub:
+    def _require_credentials(credentials: GitHubAppCredentials | None, role: str) -> GitHubAppCredentials:
+        if credentials is None:
+            raise RuntimeError(f"GitHub {role} credentials are unavailable")
+        return credentials
+
+    @staticmethod
+    def _get_github_installation_app(installation_context: tuple[GithubIntegration, int]) -> Github:
+        """
+        Build a Github client authenticated as a GitHub App installation.
+
+        :return: Github
+        """
+        integration, installation_id = installation_context
+        return integration.get_github_for_installation(installation_id)
+
+    @staticmethod
+    def _get_installation_token(installation_context: tuple[GithubIntegration, int], role: str) -> str:
+        """
+        Fetch a fresh access token for a GitHub App installation.
+
+        :return: access token
+        """
+        integration, installation_id = installation_context
+        token = integration.get_access_token(installation_id).token
+        if not token:
+            raise RuntimeError(f"GitHub {role} token is unavailable")
+        return token
+
+    @staticmethod
+    def _get_installation_context(credentials: GitHubAppCredentials) -> tuple[GithubIntegration, int]:
+        """
+        Authenticate as a GitHub App and locate its installation for a repository.
+
+        :return: tuple of (GithubIntegration, installation_id)
+        """
         logging.info("Logging to GitHub as an Application for repository %s", credentials.github_branch.url)
-        gh_app = github3.GitHub()
-        app_id = str(credentials.app_id)
-        gh_app.login_as_app(credentials.app_key, app_id, expire_in=300)
         gh_branch = credentials.github_branch
 
+        app_auth = Auth.AppAuth(credentials.app_id, credentials.app_key.decode("utf-8"))
+        gi = GithubIntegration(auth=app_auth)
+
         try:
-            install = gh_app.app_installation_for_repository(owner=gh_branch.ns, repository=gh_branch.name)
-        except github3.exceptions.NotFoundError as err:
-            msg = (
-                f"App has not been authorized by {gh_branch.ns}, or repo {gh_branch.ns}/{gh_branch.name} does not exist"
-            )
+            installation = gi.get_repo_installation(gh_branch.ns, gh_branch.name)
+        except UnknownObjectException as err:
+            msg = f"App has not been authorized by {gh_branch.ns}, or repo {gh_branch.full_name} does not exist"
             logging.error(msg)
-            raise builtins.Exception(msg) from err
+            raise RuntimeError(msg) from err
 
-        gh_app.login_as_app_installation(credentials.app_key, app_id, install.id)
-        return gh_app
+        return gi, installation.id
 
-    def _get_github_user_logged_in_app(self) -> github3.GitHub:
+    def _get_github_user_logged_in_app(self) -> Github:
         logging.info("Logging to GitHub as a User")
-        gh_app = github3.GitHub()
-        gh_app.login(token=self.user_token)
+        auth = Auth.Token(self._require_user_token())
+        gh_app = Github(auth=auth)
         return gh_app
