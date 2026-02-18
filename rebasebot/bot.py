@@ -312,8 +312,153 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
     return downstream_commits
 
 
+def _detect_conflicting_files(gitwd: git.Repo, sha: str) -> set:
+    """
+    Probe a cherry-pick without -Xtheirs to detect which files conflict.
+
+    Attempts the cherry-pick with --no-commit (no merge strategy), records
+    any unmerged files, then resets to the original state.
+
+    Returns a set of filenames that had merge conflicts, or an empty set
+    if the cherry-pick would apply cleanly.
+    """
+    saved_head = gitwd.head.commit.hexsha
+    conflicted = set()
+
+    try:
+        gitwd.git.cherry_pick(sha, "--no-commit")
+    except git.GitCommandError:
+        # Conflicts exist — record which files are unmerged
+        try:
+            unmerged = gitwd.git.diff("--name-only", "--diff-filter=U")
+            if unmerged:
+                conflicted = set(unmerged.splitlines())
+        except git.GitCommandError:
+            pass
+
+    # Reset to original state regardless of success/failure
+    gitwd.git.reset("--hard", saved_head)
+
+    # Clean up any stale cherry-pick state files
+    for name in ("CHERRY_PICK_HEAD", "MERGE_MSG"):
+        state_path = os.path.join(gitwd.git_dir, name)
+        if os.path.exists(state_path):
+            os.remove(state_path)
+
+    return conflicted
+
+
+def _check_upstream_content_loss(
+    gitwd: git.Repo,
+    source_branch: str,
+    only_files: set = None
+) -> list:
+    """
+    After a cherry-pick with -Xtheirs, check whether any upstream content
+    was silently dropped from files modified by the cherry-picked commit.
+
+    Compares each file against the upstream version (source/<branch>).
+    Returns a list of (filename, lost_lines) tuples for files where upstream
+    lines are missing from the result.
+
+    If only_files is provided, only those files are checked (used to
+    restrict verification to files that had actual merge conflicts).
+    """
+    source_ref = f"source/{source_branch}"
+
+    if only_files is not None:
+        files_to_check = only_files
+    else:
+        files_to_check = gitwd.git.diff(
+            "--name-only", "HEAD~1", "HEAD"
+        ).splitlines()
+
+    results = []
+    for f in files_to_check:
+        try:
+            upstream_content = gitwd.git.show(f"{source_ref}:{f}")
+            current_content = gitwd.git.show(f"HEAD:{f}")
+        except git.GitCommandError:
+            # File doesn't exist on one side — not a content loss scenario
+            continue
+
+        upstream_lines = set(
+            line for line in upstream_content.splitlines() if line.strip()
+        )
+        current_lines = set(
+            line for line in current_content.splitlines() if line.strip()
+        )
+        lost_lines = upstream_lines - current_lines
+
+        if lost_lines:
+            results.append((f, sorted(lost_lines)))
+
+    return results
+
+
+def _safe_cherry_pick(
+    gitwd: git.Repo,
+    sha: str,
+    source_branch: str,
+    conflict_policy: str,
+    commit_description: str
+) -> None:
+    """
+    Cherry-pick a commit with conflict detection based on conflict_policy.
+
+    For "auto" policy: behaves exactly as before (-Xtheirs, no checks).
+    For "warn"/"strict" policies: first probes for conflicts without
+    -Xtheirs, then cherry-picks with -Xtheirs, then verifies only the
+    files that actually conflicted for upstream content loss.
+    """
+    # Phase 1: probe for conflicts (only for warn/strict)
+    conflicted_files = set()
+    if conflict_policy != "auto":
+        conflicted_files = _detect_conflicting_files(gitwd, sha)
+
+    # Phase 2: actual cherry-pick with -Xtheirs
+    try:
+        gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+    except git.GitCommandError as ex:
+        if not _resolve_rebase_conflicts(gitwd):
+            raise RepoException(f"Git rebase failed: {ex}") from ex
+
+    # If no conflicts were detected, -Xtheirs had no effect — skip check
+    if conflict_policy == "auto" or not conflicted_files:
+        return
+
+    # Only verify files that had actual merge conflicts
+    lost_content = _check_upstream_content_loss(
+        gitwd, source_branch, conflicted_files
+    )
+    if not lost_content:
+        return
+
+    for filename, lost_lines in lost_content:
+        logging.warning(
+            "Upstream content may have been dropped from '%s' "
+            "by cherry-pick of: %s",
+            filename, commit_description
+        )
+        for line in lost_lines[:10]:
+            logging.warning("  lost line: %s", line.strip())
+        if len(lost_lines) > 10:
+            logging.warning(
+                "  ... and %d more lines", len(lost_lines) - 10
+            )
+
+    if conflict_policy == "strict":
+        files = ", ".join(f for f, _ in lost_content)
+        raise RepoException(
+            f"Upstream content was lost in [{files}] after "
+            f"cherry-picking '{commit_description}'. "
+            f"-Xtheirs resolved a content conflict by dropping "
+            f"upstream additions. Manual resolution is required."
+        )
+
+
 def _do_rebase(*, gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, source_repo: Repository, tag_policy: str,
-               bot_emails: list, exclude_commits: list, update_go_modules: bool) -> None:
+               conflict_policy: str = "auto", bot_emails: list, exclude_commits: list, update_go_modules: bool) -> None:
     logging.info("Performing rebase")
 
     allow_bot_squash = len(bot_emails) > 0
@@ -356,11 +501,13 @@ def _do_rebase(*, gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, sou
 
         logging.info("Picking commit: %s - %s", sha, commit_message)
 
-        try:
-            gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
-        except git.GitCommandError as ex:
-            if not _resolve_rebase_conflicts(gitwd):
-                raise RepoException(f"Git rebase failed: {ex}") from ex
+        _safe_cherry_pick(
+            gitwd=gitwd,
+            sha=sha,
+            source_branch=source.branch,
+            conflict_policy=conflict_policy,
+            commit_description=f"{sha} - {commit_message}"
+        )
 
     # Here we cherry-pick the bot's commits and then squash them together
     # We also want the newest bot commit message to represent the squashed commits
@@ -368,11 +515,13 @@ def _do_rebase(*, gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch, sou
         for key, value in commits_to_squash.items():
             logging.info("Squashing commits for bot: %s: %s", key, value)
             for commit in value:
-                try:
-                    gitwd.git.cherry_pick(commit["sha"], "-Xtheirs")
-                except git.GitCommandError as ex:
-                    if not _resolve_rebase_conflicts(gitwd):
-                        raise RepoException(f"Git rebase failed: {ex}") from ex
+                _safe_cherry_pick(
+                    gitwd=gitwd,
+                    sha=commit["sha"],
+                    source_branch=source.branch,
+                    conflict_policy=conflict_policy,
+                    commit_description=f"{commit['sha']} - {commit['commit_message']}"
+                )
             gitwd.git.reset("--soft", f"HEAD~{len(value)}")
 
             newest_bot_commit_message = value[-1]["commit_message"]
@@ -481,7 +630,8 @@ def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
         return _resolve_rebase_conflicts(gitwd)
 
 
-def _cherrypick_art_pull_request(gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch) -> None:
+def _cherrypick_art_pull_request(gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch,
+                                 conflict_policy: str = "auto") -> None:
     """
     Looks at the destination repository and if there is an open ART pull request
     that updates the build image, it includes it in the rebase.
@@ -502,11 +652,13 @@ def _cherrypick_art_pull_request(gitwd: git.Repo, dest_repo: Repository, dest: G
 
             for commit in pull_request.commits():
                 assert isinstance(commit, ShortCommit)
-                try:
-                    gitwd.git.cherry_pick(commit.sha, "-Xtheirs")
-                except git.GitCommandError as ex:
-                    if not _resolve_rebase_conflicts(gitwd):
-                        raise RepoException(f"Git rebase failed: {ex}") from ex
+                _safe_cherry_pick(
+                    gitwd=gitwd,
+                    sha=commit.sha,
+                    source_branch=dest.branch,
+                    conflict_policy=conflict_policy,
+                    commit_description=f"ART PR commit {commit.sha}"
+                )
 
 
 def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
@@ -823,6 +975,7 @@ def run(
     github_app_provider: GithubAppProvider,
     slack_webhook: str,
     tag_policy: str,
+    conflict_policy: str = "auto",
     bot_emails: list,
     exclude_commits: list,
     hooks: lifecycle_hooks.LifecycleHooks = None,
@@ -919,12 +1072,13 @@ def run(
                 dest=dest,
                 source_repo=source_repo,
                 tag_policy=tag_policy,
+                conflict_policy=conflict_policy,
                 bot_emails=bot_emails,
                 exclude_commits=exclude_commits,
                 update_go_modules=update_go_modules
             )
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-            _cherrypick_art_pull_request(gitwd, dest_repo, dest)
+            _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
         elif always_run_hooks:
             # Run hooks without rebase operations when --always-run-hooks is enabled
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)

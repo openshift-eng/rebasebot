@@ -115,6 +115,7 @@ class TestRebases:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.ignore_manual_label = False
         args.dry_run = True
         result = cli.rebasebot_run(
@@ -168,6 +169,7 @@ class TestRebases:
         args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.ignore_manual_label = False
         args.dry_run = True
         result = cli.rebasebot_run(
@@ -235,6 +237,7 @@ class TestRebases:
         args.bot_emails = [],
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.ignore_manual_label = False
         args.dry_run = True
         result = cli.rebasebot_run(
@@ -303,6 +306,7 @@ class TestRebases:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.ignore_manual_label = False
         args.dry_run = True
 
@@ -353,6 +357,7 @@ class TestRebases:
         args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.ignore_manual_label = False
         args.dry_run = False
 
@@ -414,6 +419,7 @@ class TestRebases:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.ignore_manual_label = False
         args.dry_run = False
         result = cli.rebasebot_run(
@@ -452,6 +458,7 @@ class TestRebases:
         args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
         args.exclude_commits = [drop_commit.hexsha]
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.dry_run = True
         result = cli.rebasebot_run(
             args, slack_webhook=None, github_app_wrapper=fake_github_provider)
@@ -506,6 +513,7 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
         args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.dry_run = True
         args.post_rebase_hook = ["git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-hook-script.sh"]  # noqa: E501
 
@@ -564,6 +572,7 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
         args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.dry_run = True,
         args.post_rebase_hook = [f"git:dest/{dest.branch}:test-hook-script.sh"]
         args.source_repo = None
@@ -619,6 +628,7 @@ exit 5""")
         args.bot_emails = ["genbot@example.com", "anotherbot@example.com"]
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.dry_run = True
 
         result = cli.rebasebot_run(
@@ -671,6 +681,7 @@ echo main
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.dry_run = True
 
         result = cli.rebasebot_run(
@@ -709,6 +720,7 @@ touch post-rebase-hook.success"""
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.dry_run = True
         args.ignore_manual_label = True
         args.always_run_hooks = True
@@ -760,6 +772,7 @@ touch post-rebase-hook.success"""
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
+        args.conflict_policy = "auto"
         args.dry_run = True
         args.ignore_manual_label = True
         args.always_run_hooks = False  # Key difference: hooks should NOT run

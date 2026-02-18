@@ -200,6 +200,17 @@ def _parse_cli_arguments():
         help="Option that shows how to handle UPSTREAM tags in "
              "commit messages. (default: %(default)s)")
     parser.add_argument(
+        "--conflict-policy",
+        default="auto",
+        const="auto",
+        nargs="?",
+        choices=["auto", "warn", "strict"],
+        help="Detect upstream content silently dropped by -Xtheirs. "
+             "'auto': no detection. "
+             "'warn': log warnings. "
+             "'strict': fail. "
+             "(default: %(default)s)")
+    parser.add_argument(
         "--bot-emails",
         type=str,
         default=(),
@@ -354,6 +365,7 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
                 github_app_provider=github_app_wrapper,
                 slack_webhook=slack_webhook,
                 tag_policy=args.tag_policy,
+                conflict_policy=args.conflict_policy,
                 bot_emails=args.bot_emails,
                 exclude_commits=args.exclude_commits,
                 update_go_modules=args.update_go_modules,
