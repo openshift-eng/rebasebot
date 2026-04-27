@@ -179,7 +179,8 @@ class GithubAppProvider:
     def _github_login_app(credentials: GitHubAppCredentials) -> github3.GitHub:
         logging.info("Logging to GitHub as an Application for repository %s", credentials.github_branch.url)
         gh_app = github3.GitHub()
-        gh_app.login_as_app(credentials.app_key, credentials.app_id, expire_in=300)
+        app_id = str(credentials.app_id)
+        gh_app.login_as_app(credentials.app_key, app_id, expire_in=300)
         gh_branch = credentials.github_branch
 
         try:
@@ -191,7 +192,7 @@ class GithubAppProvider:
             logging.error(msg)
             raise builtins.Exception(msg) from err
 
-        gh_app.login_as_app_installation(credentials.app_key, credentials.app_id, install.id)
+        gh_app.login_as_app_installation(credentials.app_key, app_id, install.id)
         return gh_app
 
     def _get_github_user_logged_in_app(self) -> github3.GitHub:
