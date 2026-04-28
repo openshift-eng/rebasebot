@@ -126,7 +126,9 @@ class GithubAppProvider:
             self._app_credentials = GitHubAppCredentials(app_id=app_id, app_key=app_key, github_branch=dest_branch)
 
             self._cloner_app_credentials = GitHubAppCredentials(
-                app_id=cloner_id, app_key=cloner_key, github_branch=rebase_branch
+                app_id=cloner_id,
+                app_key=cloner_key,
+                github_branch=rebase_branch,
             )
 
     def get_app_token(self) -> str:

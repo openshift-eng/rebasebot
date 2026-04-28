@@ -28,9 +28,7 @@ from git.objects import Commit
 from rebasebot.github import GithubAppProvider, GitHubBranch
 
 T = TypeVar("T")
-
 YieldFixture = Generator[T, None, None]
-
 _GO_CODE = """
 package main
 import (
@@ -42,12 +40,10 @@ func main() {
     return
 }
 """
-
 _ANOTHER_GO_CODE = """
 package main
 func foo() {}
 """
-
 _GO_CODE_FILENAME = "test.go"
 
 

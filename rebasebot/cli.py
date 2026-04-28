@@ -1,5 +1,4 @@
 #!/usr/bin/python
-
 #    Copyright 2022 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -13,7 +12,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-
 """This module parses CLI arguments for the Rebase Bot."""
 
 import argparse
@@ -22,7 +20,7 @@ import os
 import sys
 import tempfile
 
-from rebasebot import bot, lifecycle_hooks
+from rebasebot import bot, lifecycle_hooks, resume_state
 from rebasebot.github import GithubAppProvider, GitHubBranch, parse_github_branch
 
 
@@ -185,6 +183,31 @@ def _parse_cli_arguments():
         help="When enabled, the bot will not create or update PR.",
     )
     parser.add_argument(
+        "--pause-on-conflict",
+        action="store_true",
+        default=False,
+        required=False,
+        help=(
+            "Pause and persist resume state when a cherry-pick conflict needs manual resolution, "
+            "or when strict conflict policy detects dropped upstream content after a cherry-pick."
+        ),
+    )
+    parser.add_argument(
+        "--continue",
+        dest="continue_run",
+        action="store_true",
+        default=False,
+        required=False,
+        help="Continue a previously paused rebasebot run from the next saved step in the configured working directory.",
+    )
+    parser.add_argument(
+        "--retry-failed-step",
+        action="store_true",
+        default=False,
+        required=False,
+        help="When resuming a paused hook failure, retry the failed hook script instead of skipping to the next one.",
+    )
+    parser.add_argument(
         "--tag-policy",
         default="none",
         const="none",
@@ -331,8 +354,19 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
         args.working_dir = working_dir
         original_cwd = os.getcwd()
         try:
+            if args.continue_run is True and args.source_repo is not None:
+                try:
+                    persisted_state = resume_state.read_resume_state(working_dir)
+                except resume_state.ResumeStateError as e:
+                    logging.error(
+                        f"Error loading resume state before continue: {e}",
+                        exc_info=True,
+                    )
+                    sys.exit(1)
+                args.source = persisted_state.source.to_github_branch()
+
             try:
-                if args.source_repo is not None:
+                if args.source_repo is not None and args.continue_run is not True:
                     lifecycle_hooks.run_source_repo_hook(
                         args=args,
                         github_app_wrapper=github_app_wrapper,
@@ -373,6 +407,9 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
                 hooks=hooks,
                 always_run_hooks=args.always_run_hooks,
                 title_prefix=args.title_prefix,
+                pause_on_conflict=args.pause_on_conflict is True,
+                continue_run=args.continue_run is True,
+                retry_failed_step=args.retry_failed_step is True,
             )
         finally:
             os.chdir(original_cwd)
@@ -402,10 +439,13 @@ def main():
         gh_user_token_path=args.github_user_token,
     )
 
-    if rebasebot_run(args, slack_webhook, github_app_wrapper):
-        sys.exit(0)
-    else:
-        sys.exit(1)
+    try:
+        if rebasebot_run(args, slack_webhook, github_app_wrapper):
+            sys.exit(0)
+        else:
+            sys.exit(1)
+    except bot.PausedRebaseException:
+        sys.exit(3)
 
 
 if __name__ == "__main__":

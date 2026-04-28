@@ -151,12 +151,27 @@ class TestCommitMessageTags:
             (False, "NO TAG: something", "strict", False),
             (False, "fooo fooo fooo", "strict", False),
             # With invalid tag policy
-            (False, "NO TAG: <carry>: something", "asdkjqwe", Exception("Unknown tag policy: asdkjqwe")),
+            (
+                False,
+                "NO TAG: <carry>: something",
+                "asdkjqwe",
+                Exception("Unknown tag policy: asdkjqwe"),
+            ),
             (False, "NO TAG: something", "123123", Exception("Unknown tag policy: 123123")),
             (False, "fooo fooo fooo", "fufufu", Exception("Unknown tag policy: fufufu")),
             # Unknown commit tag
-            (False, "UPSTREAM: <invalid>: something", "strict", Exception("Unknown commit message tag: <invalid>")),
-            (False, "UPSTREAM: commit message", "strict", Exception("Unknown commit message tag: commit message")),
+            (
+                False,
+                "UPSTREAM: <invalid>: something",
+                "strict",
+                Exception("Unknown commit message tag: <invalid>"),
+            ),
+            (
+                False,
+                "UPSTREAM: commit message",
+                "strict",
+                Exception("Unknown commit message tag: commit message"),
+            ),
         ),
     )
     @patch("rebasebot.bot._is_pr_merged")
@@ -290,7 +305,13 @@ class TestReportResult:
                 "I updated existing rebase PR: https://github.com/user/repo/pull/456",
             ),
             # Rebase performed but no changes between rebase and dest (no PR needed)
-            (True, False, False, None, f"Destination repo {dest_url} already contains the latest changes"),
+            (
+                True,
+                False,
+                False,
+                None,
+                f"Destination repo {dest_url} already contains the latest changes",
+            ),
             # Cases when needs_rebase is False
             (
                 False,
@@ -299,7 +320,13 @@ class TestReportResult:
                 "https://github.com/user/repo/pull/100",
                 "PR https://github.com/user/repo/pull/100 already contains the latest changes",
             ),
-            (False, False, False, "", f"Destination repo {dest_url} already contains the latest changes"),
+            (
+                False,
+                False,
+                False,
+                "",
+                f"Destination repo {dest_url} already contains the latest changes",
+            ),
             # Cases when hooks made changes
             (
                 False,

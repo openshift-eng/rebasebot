@@ -1,6 +1,5 @@
 #!/usr/bin/python
 # pylint: disable=too-many-lines
-
 #    Copyright 2022 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -32,9 +31,10 @@ from github3.pulls import ShortPullRequest
 from github3.repos.commit import ShortCommit
 from github3.repos.repo import Repository
 
-from rebasebot import lifecycle_hooks
+from rebasebot import lifecycle_hooks, resume_flow, resume_state
 from rebasebot.github import GithubAppProvider, GitHubBranch
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
+from rebasebot.resume_flow import PauseRebaseTaskException, PausedRebaseException, ResumeFlowException
 
 
 class RepoException(Exception):
@@ -47,9 +47,11 @@ class PullRequestUpdateException(Exception):
     """An error signaling an issue in updating a pull request"""
 
 
+class UnresolvedConflictException(PauseRebaseTaskException):
+    """Raised when a cherry-pick conflict requires manual resolution."""
+
+
 logging.basicConfig(format="%(levelname)s - %(message)s", stream=sys.stdout, level=logging.INFO)
-
-
 MERGE_TMP_BRANCH = "merge-tmp"
 _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
@@ -105,7 +107,11 @@ def _is_pr_merged(pr_number: int, source_repo: Repository, gitwd: git.Repo, sour
 
 
 def _add_to_rebase(
-    commit_message: str, source_repo: Repository, tag_policy: str, gitwd: git.Repo, source_branch: str
+    commit_message: str,
+    source_repo: Repository,
+    tag_policy: str,
+    gitwd: git.Repo,
+    source_branch: str,
 ) -> bool:
     valid_tag_policy = ["soft", "strict", "none"]
     if tag_policy not in valid_tag_policy:
@@ -186,7 +192,11 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
 
     # ancestry_path_merges are merge commits on ancestry path from merge base to destination branch
     ancestry_path_merges = gitwd.git.log(
-        _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{dest.branch}"
+        _COMMIT_LOG_FORMAT,
+        "--ancestry-path",
+        "-r",
+        "--merges",
+        f"{merge_base}..dest/{dest.branch}",
     ).splitlines()
 
     val = "\n".join(ancestry_path_merges)
@@ -216,7 +226,12 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
 
     # Fetch all downstream (non-merge) commits with full formatting.
     all_downstream_lines = gitwd.git.log(
-        "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, "--no-merges", *cutoff_commits, f"dest/{dest.branch}"
+        "--reverse",
+        "--topo-order",
+        _COMMIT_LOG_FORMAT,
+        "--no-merges",
+        *cutoff_commits,
+        f"dest/{dest.branch}",
     ).splitlines()
     downstream_shas = {line.split(" || ", 1)[0].strip() for line in all_downstream_lines if line.strip()}
 
@@ -241,7 +256,11 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
         # ancestor-or-equal to the rebase branch containing the synthetic
         # rebase merge commit.
         first_parent_merges = gitwd.git.rev_list(
-            "--reverse", "--first-parent", "--merges", *cutoff_commits, f"dest/{dest.branch}"
+            "--reverse",
+            "--first-parent",
+            "--merges",
+            *cutoff_commits,
+            f"dest/{dest.branch}",
         ).splitlines()
 
         rebase_pr_merge = None
@@ -253,7 +272,8 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
             # So the rebase commit must be reachable from parent[1], but not
             # yet reachable from parent[0].
             if gitwd.is_ancestor(last_rebase_merge_commit, commit.parents[1]) and not gitwd.is_ancestor(
-                last_rebase_merge_commit, commit.parents[0]
+                last_rebase_merge_commit,
+                commit.parents[0],
             ):
                 rebase_pr_merge = commit
                 break
@@ -390,7 +410,12 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
 
 
 def _safe_cherry_pick(
-    gitwd: git.Repo, sha: str, source_branch: str, conflict_policy: str, commit_description: str
+    gitwd: git.Repo,
+    sha: str,
+    source_branch: str,
+    conflict_policy: str,
+    commit_description: str,
+    pause_on_conflict: bool = False,
 ) -> None:
     """
     Cherry-pick a commit with conflict detection based on conflict_policy.
@@ -410,6 +435,8 @@ def _safe_cherry_pick(
         gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
     except git.GitCommandError as ex:
         if not _resolve_rebase_conflicts(gitwd):
+            if pause_on_conflict:
+                raise UnresolvedConflictException(f"Git rebase failed: {ex}") from ex
             raise RepoException(f"Git rebase failed: {ex}") from ex
 
     # If no conflicts were detected, -Xtheirs had no effect — skip check
@@ -423,7 +450,9 @@ def _safe_cherry_pick(
 
     for filename, lost_lines in lost_content:
         logging.warning(
-            "Upstream content may have been dropped from '%s' by cherry-pick of: %s", filename, commit_description
+            "Upstream content may have been dropped from '%s' by cherry-pick of: %s",
+            filename,
+            commit_description,
         )
         for line in lost_lines[:_LOST_LINE_LOG_LIMIT]:
             logging.warning("  lost line: %s", line.strip())
@@ -432,27 +461,36 @@ def _safe_cherry_pick(
 
     if conflict_policy == "strict":
         files = ", ".join(f for f, _ in lost_content)
-        raise RepoException(
+        message = (
             f"Upstream content was lost in [{files}] after "
             f"cherry-picking '{commit_description}'. "
             f"-Xtheirs resolved a content conflict by dropping "
             f"upstream additions. Manual resolution is required."
         )
+        if pause_on_conflict:
+            raise PauseRebaseTaskException(
+                message,
+                pause_reason=message,
+                resolution_instructions=(
+                    "Review the paused commit, restore the missing upstream content, "
+                    "amend it or add a follow-up commit, then rerun rebasebot with --continue."
+                ),
+            )
+        raise RepoException(message)
 
 
-def _do_rebase(
+def _build_rebase_tasks(
     *,
-    gitwd: git.Repo,
     source: GitHubBranch,
     dest: GitHubBranch,
+    gitwd: git.Repo,
     source_repo: Repository,
     tag_policy: str,
-    conflict_policy: str = "auto",
     bot_emails: list,
     exclude_commits: list,
     update_go_modules: bool,
-) -> None:
-    logging.info("Performing rebase")
+) -> list[resume_state.ResumeTask]:
+    tasks: list[resume_state.ResumeTask] = []
 
     allow_bot_squash = len(bot_emails) > 0
     if allow_bot_squash:
@@ -491,34 +529,276 @@ def _do_rebase(
                 commits_to_squash[email].append({"sha": sha, "commit_message": commit_message})
                 continue
 
-        logging.info("Picking commit: %s - %s", sha, commit_message)
-
-        _safe_cherry_pick(
-            gitwd=gitwd,
-            sha=sha,
-            source_branch=source.branch,
-            conflict_policy=conflict_policy,
-            commit_description=f"{sha} - {commit_message}",
+        tasks.append(
+            resume_state.ResumeTask(
+                kind="pick",
+                sha=sha,
+                source_branch=source.branch,
+                commit_description=f"{sha} - {commit_message}",
+            )
         )
 
     # Here we cherry-pick the bot's commits and then squash them together
     # We also want the newest bot commit message to represent the squashed commits
     if allow_bot_squash:
         for key, value in commits_to_squash.items():
-            logging.info("Squashing commits for bot: %s: %s", key, value)
             for commit in value:
-                _safe_cherry_pick(
-                    gitwd=gitwd,
-                    sha=commit["sha"],
-                    source_branch=source.branch,
-                    conflict_policy=conflict_policy,
-                    commit_description=f"{commit['sha']} - {commit['commit_message']}",
+                tasks.append(
+                    resume_state.ResumeTask(
+                        kind="pick",
+                        sha=commit["sha"],
+                        source_branch=source.branch,
+                        commit_description=f"{commit['sha']} - {commit['commit_message']}",
+                    )
                 )
-            gitwd.git.reset("--soft", f"HEAD~{len(value)}")
+            tasks.append(
+                resume_state.ResumeTask(
+                    kind="squash",
+                    reset_count=len(value),
+                    commit_message=value[-1]["commit_message"],
+                    author=key,
+                )
+            )
 
-            newest_bot_commit_message = value[-1]["commit_message"]
+    return tasks
 
-            gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
+
+def _build_art_pr_tasks(dest_repo: Repository, dest: GitHubBranch, gitwd: git.Repo) -> list[resume_state.ResumeTask]:
+    tasks: list[resume_state.ResumeTask] = []
+    logging.info("Checking for ART pull request")
+    for pull_request in dest_repo.pull_requests(state="open", base=f"{dest.branch}"):
+        assert isinstance(pull_request, ShortPullRequest)  # type hint
+        if "consistent with ART" in pull_request.title and pull_request.user.login == "openshift-bot":
+            logging.info(f"Found open ART image update pull requst: {pull_request.title}")
+            remote = pull_request.head.repository
+            remote_name = remote.name
+            if remote_name in gitwd.remotes:
+                gitwd.remotes[remote_name].set_url(remote.html_url)
+            else:
+                gitwd.create_remote(remote_name, remote.html_url)
+
+            gitwd.remotes[remote_name].fetch(pull_request.head.ref)
+
+            for commit in pull_request.commits():
+                assert isinstance(commit, ShortCommit)
+                tasks.append(
+                    resume_state.ResumeTask(
+                        kind="pick",
+                        sha=commit.sha,
+                        source_branch=dest.branch,
+                        commit_description=f"ART PR commit {commit.sha}",
+                    )
+                )
+
+    return tasks
+
+
+def _report_manual_intervention(
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    slack_webhook: str,
+    ex: Exception,
+) -> None:
+    logging.error(
+        "Manual intervention is needed to rebase %s:%s into %s/%s:%s",
+        source.url,
+        source.branch,
+        dest.ns,
+        dest.name,
+        dest.branch,
+    )
+    logging.error("Failure reason: %s", ex)
+    _message_slack(
+        slack_webhook,
+        f"Manual intervention is needed to rebase "
+        f"{source.url}:{source.branch} "
+        f"into {dest.ns}/{dest.name}:{dest.branch}: "
+        f"{ex}",
+    )
+
+
+def _execute_resume_tasks(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    *,
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+    working_dir: str,
+    tasks: list[resume_state.ResumeTask],
+    phase: resume_state.ResumePhase,
+    conflict_policy: str,
+    pause_on_conflict: bool,
+    future_art_tasks: list[resume_state.ResumeTask] | None = None,
+) -> None:
+    resume_flow.execute_rebase_tasks(
+        gitwd=gitwd,
+        source=source,
+        dest=dest,
+        rebase=rebase,
+        working_dir=working_dir,
+        tasks=tasks,
+        phase=phase,
+        conflict_policy=conflict_policy,
+        pause_on_conflict=pause_on_conflict,
+        safe_cherry_pick=_safe_cherry_pick,
+        pause_exception_cls=PauseRebaseTaskException,
+        future_art_tasks=future_art_tasks,
+    )
+
+
+def _run_post_rebase_and_art(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    *,
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+    working_dir: str,
+    hooks: lifecycle_hooks.LifecycleHooks,
+    art_tasks: list[resume_state.ResumeTask],
+    conflict_policy: str,
+    pause_on_conflict: bool,
+    run_art_tasks: bool = True,
+    post_rebase_start_script_index: int = 0,
+) -> None:
+    flow_args = {
+        "gitwd": gitwd,
+        "source": source,
+        "dest": dest,
+        "rebase": rebase,
+        "working_dir": working_dir,
+    }
+    resume_flow.execute_hook_with_resume(
+        hook=lifecycle_hooks.LifecycleHook.POST_REBASE,
+        hooks=hooks,
+        phase=resume_state.ResumePhase.POST_REBASE,
+        art_tasks=art_tasks,
+        start_script_index=post_rebase_start_script_index,
+        **flow_args,
+    )
+    if run_art_tasks:
+        _execute_resume_tasks(
+            tasks=art_tasks,
+            phase=resume_state.ResumePhase.ART_PR,
+            conflict_policy=conflict_policy,
+            pause_on_conflict=pause_on_conflict,
+            **flow_args,
+        )
+
+
+def _run_pre_carry_through_art(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    *,
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+    working_dir: str,
+    source_repo: Repository,
+    dest_repo: Repository,
+    hooks: lifecycle_hooks.LifecycleHooks,
+    tag_policy: str,
+    conflict_policy: str,
+    bot_emails: list,
+    exclude_commits: list,
+    update_go_modules: bool,
+    pause_on_conflict: bool,
+    pre_carry_start_script_index: int = 0,
+    post_rebase_start_script_index: int = 0,
+) -> None:
+    flow_args = {
+        "gitwd": gitwd,
+        "source": source,
+        "dest": dest,
+        "rebase": rebase,
+        "working_dir": working_dir,
+    }
+    resume_flow.execute_hook_with_resume(
+        hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT,
+        hooks=hooks,
+        phase=resume_state.ResumePhase.PRE_CARRY_COMMIT,
+        start_script_index=pre_carry_start_script_index,
+        **flow_args,
+    )
+    art_tasks = _build_art_pr_tasks(dest_repo, dest, gitwd)
+    carry_tasks = _build_rebase_tasks(
+        gitwd=gitwd,
+        source=source,
+        dest=dest,
+        source_repo=source_repo,
+        tag_policy=tag_policy,
+        bot_emails=bot_emails,
+        exclude_commits=exclude_commits,
+        update_go_modules=update_go_modules,
+    )
+    _execute_resume_tasks(
+        tasks=carry_tasks,
+        phase=resume_state.ResumePhase.CARRY_COMMITS,
+        conflict_policy=conflict_policy,
+        pause_on_conflict=pause_on_conflict,
+        future_art_tasks=art_tasks,
+        **flow_args,
+    )
+    _run_post_rebase_and_art(
+        hooks=hooks,
+        art_tasks=art_tasks,
+        conflict_policy=conflict_policy,
+        pause_on_conflict=pause_on_conflict,
+        post_rebase_start_script_index=post_rebase_start_script_index,
+        **flow_args,
+    )
+
+
+def _run_always_run_hook_subset(
+    *,
+    hooks: lifecycle_hooks.LifecycleHooks,
+    gitwd: git.Repo,
+    working_dir: str,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+    include_pre_rebase: bool,
+    pre_rebase_start_script_index: int = 0,
+    pre_carry_start_script_index: int = 0,
+    post_rebase_start_script_index: int = 0,
+) -> None:
+    flow_args = {
+        "gitwd": gitwd,
+        "source": source,
+        "dest": dest,
+        "rebase": rebase,
+        "working_dir": working_dir,
+    }
+    if include_pre_rebase:
+        resume_flow.execute_hook_with_resume(
+            hook=lifecycle_hooks.LifecycleHook.PRE_REBASE,
+            hooks=hooks,
+            phase=resume_state.ResumePhase.PRE_REBASE,
+            start_script_index=pre_rebase_start_script_index,
+            **flow_args,
+        )
+    resume_flow.execute_hook_with_resume(
+        hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT,
+        hooks=hooks,
+        phase=resume_state.ResumePhase.PRE_CARRY_COMMIT,
+        start_script_index=pre_carry_start_script_index,
+        **flow_args,
+    )
+    resume_flow.execute_hook_with_resume(
+        hook=lifecycle_hooks.LifecycleHook.POST_REBASE,
+        hooks=hooks,
+        phase=resume_state.ResumePhase.POST_REBASE,
+        start_script_index=post_rebase_start_script_index,
+        **flow_args,
+    )
+
+
+def _build_flow_actions() -> resume_flow.FlowActions:
+    return resume_flow.FlowActions(
+        needs_rebase=_needs_rebase,
+        prepare_rebase_branch=_prepare_rebase_branch,
+        build_rebase_tasks=_build_rebase_tasks,
+        build_art_pr_tasks=_build_art_pr_tasks,
+        execute_rebase_tasks=_execute_resume_tasks,
+    )
 
 
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
@@ -625,38 +905,6 @@ def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
         return _resolve_rebase_conflicts(gitwd)
 
 
-def _cherrypick_art_pull_request(
-    gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch, conflict_policy: str = "auto"
-) -> None:
-    """
-    Looks at the destination repository and if there is an open ART pull request
-    that updates the build image, it includes it in the rebase.
-    """
-    logging.info("Checking for ART pull request")
-    for pull_request in dest_repo.pull_requests(state="open", base=f"{dest.branch}"):
-        assert isinstance(pull_request, ShortPullRequest)  # type hint
-        if "consistent with ART" in pull_request.title and pull_request.user.login == "openshift-bot":
-            logging.info(f"Found open ART image update pull requst: {pull_request.title}")
-            remote = pull_request.head.repository
-            remote_name = remote.name
-            if remote_name in gitwd.remotes:
-                gitwd.remotes[remote_name].set_url(remote.html_url)
-            else:
-                gitwd.create_remote(remote_name, remote.html_url)
-
-            gitwd.remotes[remote_name].fetch(pull_request.head.ref)
-
-            for commit in pull_request.commits():
-                assert isinstance(commit, ShortCommit)
-                _safe_cherry_pick(
-                    gitwd=gitwd,
-                    sha=commit.sha,
-                    source_branch=dest.branch,
-                    conflict_policy=conflict_policy,
-                    commit_description=f"ART PR commit {commit.sha}",
-                )
-
-
 def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
     # Check if there is nothing to update in the open rebase PR.
     if rebase.branch in gitwd.remotes.rebase.refs:
@@ -761,6 +1009,7 @@ def _init_working_dir(
     git_username: str,
     git_email: str,
     workdir: str,
+    preserve_rebase_state: bool = False,
 ) -> git.Repo:
     gitwd = git.Repo.init(path=workdir)
 
@@ -769,6 +1018,10 @@ def _init_working_dir(
     # checks, wrong commit filtering, wrong cherry-pick detection). Reinitializing
     # .git is the only safe way to clear them.
     if "source" in gitwd.remotes and gitwd.remotes["source"].url != source.url:
+        if preserve_rebase_state:
+            raise RepoException(
+                "Cannot continue paused run because the source repository URL changed in the working directory."
+            )
         logging.warning(
             "Source URL changed from %s to %s; reinitializing working directory to remove stale refs",
             gitwd.remotes["source"].url,
@@ -852,17 +1105,18 @@ def _init_working_dir(
         logging.info("Fetching existing rebase branch")
         gitwd.remotes.rebase.fetch(rebase.branch)
 
-    # Reset the existing rebase branch to match the source branch
-    # or create a new rebase branch based on the source branch.
-    head_commit = gitwd.git.rev_parse(source_ref)
-    if "rebase" in gitwd.heads:
-        gitwd.heads.rebase.set_commit(head_commit)
-    else:
-        gitwd.create_head("rebase", head_commit)
-    gitwd.git.checkout("rebase", force=True)
-    gitwd.head.reset(index=True, working_tree=True)
-    # Clean any untracked files when reusing rebase directory
-    gitwd.git.clean("-fd")
+    if not preserve_rebase_state:
+        # Reset the existing rebase branch to match the source branch
+        # or create a new rebase branch based on the source branch.
+        head_commit = gitwd.git.rev_parse(source_ref)
+        if "rebase" in gitwd.heads:
+            gitwd.heads.rebase.set_commit(head_commit)
+        else:
+            gitwd.create_head("rebase", head_commit)
+        gitwd.git.checkout("rebase", force=True)
+        gitwd.head.reset(index=True, working_tree=True)
+        # Clean any untracked files when reusing rebase directory
+        gitwd.git.clean("-fd")
 
     return gitwd
 
@@ -911,7 +1165,12 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
 
 
 def _report_result(  # pylint: disable=R0917
-    needs_rebase: bool, pr_required: bool, pr_available: bool, pr_url: str, dest_url: str, slack_webhook: str
+    needs_rebase: bool,
+    pr_required: bool,
+    pr_available: bool,
+    pr_url: str,
+    dest_url: str,
+    slack_webhook: str,
 ) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
     message = None
@@ -950,6 +1209,33 @@ def _report_result(  # pylint: disable=R0917
         _message_slack(slack_webhook, message)
 
 
+def _prepare_resume_state(
+    *,
+    continue_run: bool,
+    gitwd: git.Repo,
+    working_dir: str,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+) -> resume_state.ResumeState | None:
+    if not continue_run:
+        return None
+
+    state = resume_flow.load_and_validate_resume_state(
+        gitwd=gitwd,
+        working_dir=working_dir,
+        source=source,
+        dest=dest,
+        rebase=rebase,
+    )
+
+    # Resume state is only valid for explicit pause points. Clear it before
+    # re-entering the flow so generic failures do not leave stale progress
+    # snapshots behind.
+    resume_state.clear_resume_state(working_dir)
+    return state
+
+
 def run(
     *,
     source: GitHubBranch,
@@ -970,6 +1256,9 @@ def run(
     ignore_manual_label: bool = False,
     always_run_hooks: bool = False,
     title_prefix: str = "",
+    pause_on_conflict: bool = False,
+    continue_run: bool = False,
+    retry_failed_step: bool = False,
 ) -> bool:
     """Run Rebase Bot."""
     gh_app = github_app_provider.github_app
@@ -1008,6 +1297,17 @@ def run(
     except FileExistsError:
         pass
 
+    if continue_run:
+        if not resume_state.has_resume_state(working_dir):
+            logging.error(
+                "No paused resume state found in %s. Run without --continue or resolve a paused run first.",
+                working_dir,
+            )
+            return False
+    elif resume_state.has_resume_state(working_dir):
+        logging.error("Working directory %s contains paused resume state. Use --continue to resume it.", working_dir)
+        return False
+
     try:
         gitwd = _init_working_dir(
             source=source,
@@ -1017,6 +1317,7 @@ def run(
             git_username=git_username,
             git_email=git_email,
             workdir=working_dir,
+            preserve_rebase_state=continue_run,
         )
     except Exception as ex:
         logging.exception(
@@ -1036,49 +1337,54 @@ def run(
         return False
 
     try:
+        validated_resume_state = _prepare_resume_state(
+            continue_run=continue_run,
+            gitwd=gitwd,
+            working_dir=working_dir,
+            source=source,
+            dest=dest,
+            rebase=rebase,
+        )
+    except ResumeFlowException as ex:
+        _report_manual_intervention(source, dest, slack_webhook, ex)
+        return False
+
+    try:
         hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
     except Exception as ex:
         logging.exception("error fetching lifecycle hook scripts")
         _message_slack(slack_webhook, f"Failed to fetch lifecycle hook scripts: {ex}")
         return False
 
+    flow_actions = _build_flow_actions()
     try:
-        needs_rebase = _needs_rebase(gitwd, source, dest)
-        if needs_rebase:
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
-            _prepare_rebase_branch(gitwd, source, dest)
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
-            _do_rebase(
-                gitwd=gitwd,
-                source=source,
-                dest=dest,
-                source_repo=source_repo,
-                tag_policy=tag_policy,
-                conflict_policy=conflict_policy,
-                bot_emails=bot_emails,
-                exclude_commits=exclude_commits,
-                update_go_modules=update_go_modules,
-            )
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-            _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
-        elif always_run_hooks:
-            # Run hooks without rebase operations when --always-run-hooks is enabled
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-
-    except (RepoException, LifecycleHookScriptException) as ex:
-        logging.error(
-            f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}"
+        flow_result = resume_flow.execute_flow(
+            gitwd=gitwd,
+            source=source,
+            dest=dest,
+            rebase=rebase,
+            working_dir=working_dir,
+            source_repo=source_repo,
+            dest_repo=dest_repo,
+            hooks=hooks,
+            tag_policy=tag_policy,
+            conflict_policy=conflict_policy,
+            bot_emails=bot_emails,
+            exclude_commits=exclude_commits,
+            update_go_modules=update_go_modules,
+            always_run_hooks=always_run_hooks,
+            pause_on_conflict=pause_on_conflict,
+            retry_failed_step=retry_failed_step,
+            actions=flow_actions,
+            state=validated_resume_state,
         )
-        _message_slack(
-            slack_webhook,
-            f"Manual intervention is needed to rebase "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
-        )
+        needs_rebase = flow_result.needs_rebase
+    except PausedRebaseException as ex:
+        logging.warning(str(ex))
+        _message_slack(slack_webhook, str(ex))
+        raise
+    except (RepoException, ResumeFlowException, LifecycleHookScriptException) as ex:
+        _report_manual_intervention(source, dest, slack_webhook, ex)
         return False
     except Exception as ex:
         logging.exception(
@@ -1096,6 +1402,7 @@ def run(
 
     if dry_run:
         logging.info("Dry run mode is enabled. Do not create a PR.")
+        resume_state.clear_resume_state(working_dir)
         return True
 
     push_required = _is_push_required(gitwd, rebase)
@@ -1106,21 +1413,24 @@ def run(
     # Push the rebase branch to the remote repository.
     if push_required:
         logging.info("Existing rebase branch needs to be updated.")
+        flow_args = {
+            "gitwd": gitwd,
+            "source": source,
+            "dest": dest,
+            "rebase": rebase,
+            "working_dir": working_dir,
+        }
         try:
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
+            if not flow_result.skip_pre_push_rebase_branch_hook:
+                resume_flow.execute_hook_with_resume(
+                    hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH,
+                    hooks=hooks,
+                    phase=resume_state.ResumePhase.PRE_PUSH_REBASE_BRANCH,
+                    **flow_args,
+                )
             _push_rebase_branch(gitwd, rebase)
         except LifecycleHookScriptException as ex:
-            logging.error(
-                f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-                f"into {dest.ns}/{dest.name}:{dest.branch}"
-            )
-            _message_slack(
-                slack_webhook,
-                f"Manual intervention is needed to rebase "
-                f"{source.url}:{source.branch} "
-                f"into {dest.ns}/{dest.name}:{dest.branch}: "
-                f"{ex}",
-            )
+            _report_manual_intervention(source, dest, slack_webhook, ex)
             return False
         except Exception as ex:
             logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
@@ -1144,7 +1454,20 @@ def run(
 
     try:
         if not pr_available:
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
+            flow_args = {
+                "gitwd": gitwd,
+                "source": source,
+                "dest": dest,
+                "rebase": rebase,
+                "working_dir": working_dir,
+            }
+            if not flow_result.skip_pre_create_pr_hook:
+                resume_flow.execute_hook_with_resume(
+                    hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR,
+                    hooks=hooks,
+                    phase=resume_state.ResumePhase.PRE_CREATE_PR,
+                    **flow_args,
+                )
             pr_required = _is_pr_required(gitwd, rebase, dest)
             if pr_required:
                 pr_url = _create_pr(
@@ -1159,17 +1482,7 @@ def run(
                 logging.info("No PR required - no changes between rebase and dest.")
                 pr_url = None
     except LifecycleHookScriptException as ex:
-        logging.error(
-            f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}"
-        )
-        _message_slack(
-            slack_webhook,
-            f"Manual intervention is needed to rebase "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
-        )
+        _report_manual_intervention(source, dest, slack_webhook, ex)
         return False
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
@@ -1183,4 +1496,5 @@ def run(
         return False
 
     _report_result(needs_rebase, pr_required, pr_available, pr_url, dest.url, slack_webhook)
+    resume_state.clear_resume_state(working_dir)
     return True

@@ -11,7 +11,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-
 """Tests for --conflict-policy behavior."""
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ type Snapshotter struct {
 \tec2 string
 }
 """
-
 # Upstream adds a new field/constant (between existing lines)
 _UPSTREAM_ADDED_CODE = """\
 package main
@@ -54,7 +52,6 @@ type Snapshotter struct {
 \tebsKmsKeyId string
 }
 """
-
 # Downstream carry patch reformats and adds its own field/constant
 # (conflicts with upstream because it modifies the same lines)
 _DOWNSTREAM_CARRY_CODE = """\

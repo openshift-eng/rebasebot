@@ -18,9 +18,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from rebasebot import bot, cli, resume_state
 from rebasebot.cli import _parse_cli_arguments
 from rebasebot.cli import main as cli_main
 from rebasebot.github import GitHubBranch
+
+from .rebase_test_support import make_rebasebot_args
 
 
 def args_dict_to_list(args_dict: dict) -> list[str]:
@@ -73,16 +76,25 @@ class TestCliArgParser:
             (
                 "https://github.com/kubernetes/autoscaler:master",
                 GitHubBranch(
-                    url="https://github.com/kubernetes/autoscaler", ns="kubernetes", name="autoscaler", branch="master"
+                    url="https://github.com/kubernetes/autoscaler",
+                    ns="kubernetes",
+                    name="autoscaler",
+                    branch="master",
                 ),
             ),
             (
                 "kubernetes/autoscaler:master",
                 GitHubBranch(
-                    url="https://github.com/kubernetes/autoscaler", ns="kubernetes", name="autoscaler", branch="master"
+                    url="https://github.com/kubernetes/autoscaler",
+                    ns="kubernetes",
+                    name="autoscaler",
+                    branch="master",
                 ),
             ),
-            ("foo/bar:baz", GitHubBranch(url="https://github.com/foo/bar", ns="foo", name="bar", branch="baz")),
+            (
+                "foo/bar:baz",
+                GitHubBranch(url="https://github.com/foo/bar", ns="foo", name="bar", branch="baz"),
+            ),
         ),
     )
     @pytest.mark.parametrize("arg", ["source", "dest", "rebase"])
@@ -131,6 +143,15 @@ class TestCliArgParser:
             with patch("sys.argv", ["rebasebot", *args_dict_to_list(args_dict)]):
                 parsed_args = _parse_cli_arguments()
         assert parsed_args.working_dir == expected
+
+    def test_pause_continue_and_retry_flags_parse(self, get_valid_cli_args):
+        args = get_valid_cli_args({"pause-on-conflict": None, "continue": None, "retry-failed-step": None})
+        with patch("sys.argv", ["rebasebot", *args]):
+            parsed_args = _parse_cli_arguments()
+
+        assert parsed_args.pause_on_conflict is True
+        assert parsed_args.continue_run is True
+        assert parsed_args.retry_failed_step is True
 
     @patch("rebasebot.bot.run")
     def test_no_credentials_arg(self, mocked_run, valid_args_dict, capsys):
@@ -204,7 +225,10 @@ class TestCliArgParser:
     @patch("rebasebot.cli._get_github_app_wrapper")
     @patch("rebasebot.bot.run")
     def test_persistent_working_dir_when_not_specified(
-        self, mocked_run, mocked_get_github_app_wrapper, valid_args_dict
+        self,
+        mocked_run,
+        mocked_get_github_app_wrapper,
+        valid_args_dict,
     ):
         mocked_get_github_app_wrapper.return_value = MagicMock()
 
@@ -228,3 +252,82 @@ class TestCliArgParser:
             passed_working_dir = mocked_run.call_args.kwargs.get("working_dir")
             assert passed_working_dir == os.path.join(xdg_cache, "rebasebot")
             assert os.path.isdir(passed_working_dir)
+
+    @patch("rebasebot.cli._get_github_app_wrapper")
+    @patch("rebasebot.cli.rebasebot_run")
+    def test_main_exits_with_paused_status(
+        self,
+        mocked_rebasebot_run,
+        mocked_get_github_app_wrapper,
+        get_valid_cli_args,
+    ):
+        mocked_get_github_app_wrapper.return_value = MagicMock()
+        mocked_rebasebot_run.side_effect = bot.PausedRebaseException("paused")
+
+        args = get_valid_cli_args()
+        with patch("sys.argv", ["rebasebot", *args]):
+            with pytest.raises(SystemExit) as exit_exc:
+                cli_main()
+
+        assert exit_exc.value.code == 3
+
+    @patch("rebasebot.lifecycle_hooks.LifecycleHooks")
+    @patch("rebasebot.lifecycle_hooks.run_source_repo_hook")
+    @patch("rebasebot.bot.run")
+    def test_continue_uses_persisted_source_without_rerunning_source_hook(
+        self,
+        mocked_run,
+        mocked_source_hook,
+        mocked_lifecycle_hooks,
+        tmp_path,
+    ):
+        working_dir = tmp_path / "working-dir"
+        working_dir.mkdir()
+        persisted_source = GitHubBranch(
+            url="https://github.com/source/source",
+            ns="source",
+            name="source",
+            branch="main",
+        )
+        dest = GitHubBranch(url="https://github.com/dest/dest", ns="dest", name="dest", branch="main")
+        rebase = GitHubBranch(url="https://github.com/rebase/rebase", ns="rebase", name="rebase", branch="main")
+        state = resume_state.ResumeState(
+            source=resume_state.BranchState.from_github_branch(persisted_source),
+            dest=resume_state.BranchState.from_github_branch(dest),
+            rebase=resume_state.BranchState.from_github_branch(rebase),
+            source_head_sha="a" * 40,
+            dest_head_sha="b" * 40,
+            phase=resume_state.ResumePhase.CARRY_COMMITS,
+            remaining_tasks=[],
+            art_tasks=[],
+            current_task=resume_state.ResumeTask(kind="pick", sha="c" * 40, commit_description="paused task"),
+            head_before_task="d" * 40,
+            allowed_untracked_files=[],
+        )
+        resume_state.write_resume_state(str(working_dir), state)
+
+        args = make_rebasebot_args(
+            source=None,
+            dest=dest,
+            rebase=rebase,
+            working_dir=str(working_dir),
+            source_repo="source/source",
+            source_ref_hook="git:https://github.com/source/source/main:hook.sh",
+            git_username="test",
+            git_email="test@example.com",
+            dry_run=True,
+            pause_on_conflict=True,
+            continue_run=True,
+            retry_failed_step=True,
+        )
+
+        mocked_lifecycle_hooks.return_value = MagicMock()
+        mocked_run.return_value = True
+
+        result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=MagicMock())
+
+        assert result is True
+        mocked_source_hook.assert_not_called()
+        assert args.source == persisted_source
+        assert mocked_run.call_args.kwargs["source"] == persisted_source
+        assert mocked_run.call_args.kwargs["retry_failed_step"] is True
