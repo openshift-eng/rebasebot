@@ -1062,7 +1062,14 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
             _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
         elif always_run_hooks:
-            # Run hooks without rebase operations when --always-run-hooks is enabled
+            # When no rebase is needed but hooks should still run,
+            # reset the rebase branch to dest (which already contains source)
+            # so that hooks run on top of all downstream carry commits.
+            # Without this, hooks would run on top of the source branch,
+            # producing a rebase branch that is missing all carry commits
+            # and causing merge conflicts when creating a PR.
+            logging.info("No rebase needed, but --always-run-hooks is set. Running hooks on top of dest branch.")
+            gitwd.git.reset("--hard", f"dest/{dest.branch}")
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
