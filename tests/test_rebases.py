@@ -787,3 +787,64 @@ touch post-rebase-hook.success"""
         # Verify hooks were NOT executed - marker files should not exist
         assert "pre-rebase-hook.success" not in os.listdir(tmpdir)
         assert "post-rebase-hook.success" not in os.listdir(tmpdir)
+
+    def test_always_run_hooks_preserves_carry_commits(self, init_test_repositories, fake_github_provider, tmpdir):
+        """Test that hooks run on top of dest branch (not source) when no rebase is needed.
+
+        This verifies the fix for a bug where --always-run-hooks would run hooks
+        on top of the source/upstream branch, producing a rebase branch missing
+        all downstream carry commits. The resulting PR would have merge conflicts
+        because it tried to merge a branch without carries into dest which has them.
+        """
+        source, rebase, dest = init_test_repositories
+
+        # Add a carry commit with a downstream-only file to dest
+        with CommitBuilder(dest) as cb:
+            cb.add_file("DOWNSTREAM_OWNERS", "approvers:\n- testuser\n")
+            cb.commit("UPSTREAM: <carry>: add DOWNSTREAM_OWNERS")
+
+        # Hook that verifies DOWNSTREAM_OWNERS exists (i.e. we're on dest, not source)
+        # and creates a marker file to prove it ran on the right branch
+        post_rebase_hook_script = """#!/bin/bash
+if [ -f DOWNSTREAM_OWNERS ]; then
+    echo "carry-preserved" > hook-verified-carry.txt
+    git add hook-verified-carry.txt
+    git commit -m "UPSTREAM: <drop>: hook verified carry commits present"
+else
+    echo "FAIL: DOWNSTREAM_OWNERS not found - hooks ran on source, not dest" >&2
+    exit 1
+fi"""
+
+        with CommitBuilder(dest) as cb:
+            cb.add_file("verify-hook.sh", post_rebase_hook_script)
+            cb.commit("UPSTREAM: <carry>: add verify hook script")
+
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "none"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.conflict_policy = "auto"
+        args.dry_run = True
+        args.ignore_manual_label = True
+        args.always_run_hooks = True
+
+        args.pre_rebase_hook = None
+        args.post_rebase_hook = [f"git:dest/{dest.branch}:verify-hook.sh"]
+        args.pre_carry_commit_hook = None
+        args.pre_push_rebase_branch_hook = None
+        args.pre_create_pr_hook = None
+
+        result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result is True
+        # The hook should have succeeded (exit 0), proving DOWNSTREAM_OWNERS existed
+        # which means hooks ran on dest branch, not source branch
+        assert "hook-verified-carry.txt" in os.listdir(tmpdir)
