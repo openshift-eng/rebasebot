@@ -142,6 +142,19 @@ def _in_excluded_commits(sha: str, exclude_commits: list) -> bool:
     return False
 
 
+def _normalize_bot_email(email: str) -> str:
+    """Normalize GitHub noreply addresses without collapsing real plus-addresses."""
+    local, sep, domain = email.partition("@")
+    if not sep:
+        return email
+
+    prefix, plus, rest = local.partition("+")
+    if plus and prefix.isdigit() and rest:
+        return f"{rest}@{domain}"
+
+    return email
+
+
 def _find_last_rebase_merge_commit(gitwd: git.Repo, ancestry_path_merges) -> Commit:
     logging.info("Searching for merge commit from previous rebasebot run to identify downstream commits")
     for merge_line in ancestry_path_merges:
@@ -455,6 +468,7 @@ def _do_rebase(
     logging.info("Performing rebase")
 
     allow_bot_squash = len(bot_emails) > 0
+    normalized_bot_emails = {_normalize_bot_email(email) for email in bot_emails}
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
@@ -483,11 +497,8 @@ def _do_rebase(
             continue
 
         if allow_bot_squash:
-            # There is sometimes a prefix with number and a following + sign
-            # We have to get rid of that part to make sure to get
-            # only the email of the bot.
-            email = committer_email.split("+")[-1]
-            if email in bot_emails:
+            email = _normalize_bot_email(committer_email)
+            if email in normalized_bot_emails:
                 commits_to_squash[email].append({"sha": sha, "commit_message": commit_message})
                 continue
 
@@ -514,11 +525,15 @@ def _do_rebase(
                     conflict_policy=conflict_policy,
                     commit_description=f"{commit['sha']} - {commit['commit_message']}",
                 )
+            # Capture author before reset makes the cherry-picked commits unreachable.
+            last_author = gitwd.head.commit.author
+            author_string = f"{last_author.name} <{last_author.email}>"
+
             gitwd.git.reset("--soft", f"HEAD~{len(value)}")
 
             newest_bot_commit_message = value[-1]["commit_message"]
 
-            gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
+            gitwd.git.commit("-m", newest_bot_commit_message, "--author", author_string)
 
 
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:

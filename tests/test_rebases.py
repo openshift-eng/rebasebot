@@ -184,6 +184,68 @@ class TestRebases:
 """.strip()  # noqa: W291
         )
 
+    def test_squash_bot_email_normalization(self, init_test_repositories, fake_github_provider, tmpdir):
+        """GitHub noreply numeric prefixes should normalize without collapsing real plus-addresses."""
+        source, rebase, dest = init_test_repositories
+        with CommitBuilder(source) as cb:
+            cb.add_file("baz.txt", "fiz")
+            cb.commit("other upstream commit")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("generated-test-genbot", "content")
+            cb.commit("commit #1 from genbot", committer_email="12345+genbot@example.com")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("generated-test-genbot-2", "content")
+            cb.commit("commit #2 from genbot", committer_email="12345+genbot@example.com")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("generated-test-ci", "content")
+            cb.commit("commit #1 from ci nightly", committer_email="ci+nightly@example.com")
+        with CommitBuilder(dest) as cb:
+            cb.add_file("generated-test-ops", "content")
+            cb.commit("commit #1 from ops nightly", committer_email="ops+nightly@example.com")
+
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = ["12345+genbot@example.com", "ci+nightly@example.com", "ops+nightly@example.com"]
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.conflict_policy = "auto"
+        args.ignore_manual_label = False
+        args.dry_run = True
+        result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+        assert result
+
+        working_repo = Repo.init(tmpdir)
+        assert working_repo.head.ref.name == "rebase"
+        log_graph = working_repo.git.log("--graph", "--oneline", "--pretty='<%an>, %s'")
+        assert "* '<dest_ops+nightly@example.com>, commit #1 from ops nightly'" in log_graph
+        assert "* '<dest_ci+nightly@example.com>, commit #1 from ci nightly'" in log_graph
+        assert (
+            log_graph
+            == r"""
+* '<dest_ops+nightly@example.com>, commit #1 from ops nightly'
+* '<dest_ci+nightly@example.com>, commit #1 from ci nightly'
+* '<dest_12345+genbot@example.com>, commit #2 from genbot'
+* '<dest_author>, UPSTREAM: <carry>: our cool addition'
+*   '<test_rebasebot>, merge upstream/main into main'
+|\  
+| * '<source_author>, other upstream commit'
+* | '<dest_ops+nightly@example.com>, commit #1 from ops nightly'
+* | '<dest_ci+nightly@example.com>, commit #1 from ci nightly'
+* | '<dest_12345+genbot@example.com>, commit #2 from genbot'
+* | '<dest_12345+genbot@example.com>, commit #1 from genbot'
+* | '<dest_author>, UPSTREAM: <carry>: our cool addition'
+|/  
+* '<source_author>, Upstream commit'
+""".strip()  # noqa: W291
+        )
+
     def test_first_run_dest_has_merges_dry_run(self, init_test_repositories, fake_github_provider, tmpdir):
         source, rebase, dest = init_test_repositories
         with CommitBuilder(source) as cb:
