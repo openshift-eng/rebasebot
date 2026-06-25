@@ -4,11 +4,14 @@ import os
 from dataclasses import dataclass
 from unittest.mock import ANY, MagicMock, patch
 
+import git
 import pytest
 from git import Repo
 
 from rebasebot import cli
 from rebasebot.bot import (
+    RepoException,
+    _apply_merge_only_delta,
     _init_working_dir,
     _needs_rebase,
     _prepare_rebase_branch,
@@ -29,6 +32,58 @@ class WorkingRepoContext:
 
     def fetch_remotes(self):
         self.working_repo.git.fetch("--all")
+
+
+def _make_rebase_args(
+    source,
+    rebase,
+    dest,
+    working_dir: str,
+    *,
+    tag_policy: str = "soft",
+    bot_emails: list[str] | None = None,
+    exclude_commits: list[str] | None = None,
+    always_run_hooks: bool = False,
+):
+    args = MagicMock()
+    args.source = source
+    args.source_repo = None
+    args.dest = dest
+    args.rebase = rebase
+    args.working_dir = working_dir
+    args.git_username = "test_rebasebot"
+    args.git_email = "test@rebasebot.ocp"
+    args.tag_policy = tag_policy
+    args.bot_emails = bot_emails or []
+    args.exclude_commits = exclude_commits or []
+    args.update_go_modules = False
+    args.conflict_policy = "auto"
+    args.ignore_manual_label = False
+    args.dry_run = True
+    args.always_run_hooks = always_run_hooks
+    args.title_prefix = ""
+    args.pre_rebase_hook = None
+    args.post_rebase_hook = None
+    args.pre_carry_commit_hook = None
+    args.pre_push_rebase_branch_hook = None
+    args.pre_create_pr_hook = None
+    args.source_ref_hook = None
+    return args
+
+
+def _merge_rebase_branch_into_dest(
+    dest: GitHubBranch,
+    rebase_worktree: str,
+    remote_name: str,
+    message: str = "Merge rebase PR into main",
+) -> Repo:
+    dest_repo = Repo(dest.url)
+    dest_repo.git.checkout(dest.branch)
+    if remote_name not in [remote.name for remote in dest_repo.remotes]:
+        dest_repo.create_remote(remote_name, rebase_worktree)
+    dest_repo.remotes[remote_name].fetch("rebase")
+    dest_repo.git.merge(f"{remote_name}/rebase", "--no-ff", "-m", message)
+    return dest_repo
 
 
 class TestBotInternalHelpers:
@@ -1160,3 +1215,230 @@ fi"""
             f"Expected {expected_carry_msg!r} before {follow_up_msg!r}.\n"
             f"Got commits: {chronological_summaries!r}"
         )
+
+    def test_recovered_merge_only_carry_survives_strict_tag_policy_and_bot_squash(
+        self, init_test_repositories, fake_github_provider, tmpdir
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        args1 = _make_rebase_args(source, rebase, dest, first_run_dir)
+        assert cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "first_run_remote")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        with open(os.path.join(dest.url, "feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+        with open(os.path.join(dest.url, "merge_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("manually resolved\n")
+        dest_repo.git.add("merge_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature into main with merge-only resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        args2 = _make_rebase_args(source, rebase, dest, second_run_dir)
+        assert cli.rebasebot_run(args2, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        expected_recovery_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {manual_merge_sha[:12]}"
+        )
+        assert expected_recovery_msg in [commit.summary for commit in Repo(second_run_dir).iter_commits("rebase")]
+
+        _merge_rebase_branch_into_dest(dest, second_run_dir, "second_run_remote", "Merge second rebase PR into main")
+
+        CommitBuilder(dest).add_file("generated-metadata.txt", "bot output\n").commit(
+            "UPSTREAM: <carry>: generated downstream metadata",
+            committer_email="test@rebasebot.ocp",
+        )
+
+        CommitBuilder(source).add_file("quux.txt", "upstream v4").commit("fourth upstream commit")
+
+        third_run_dir = os.path.join(tmpdir, "third_run")
+        os.makedirs(third_run_dir)
+        args3 = _make_rebase_args(
+            source,
+            rebase,
+            dest,
+            third_run_dir,
+            tag_policy="strict",
+            bot_emails=["test@rebasebot.ocp"],
+        )
+        assert cli.rebasebot_run(args3, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        replayed_summaries = Repo(third_run_dir).git.log("--first-parent", "--pretty=format:%s", "rebase").splitlines()
+        assert expected_recovery_msg in replayed_summaries, (
+            "Recovered merge-only carry should survive a later strict-tag replay even when "
+            "bot squashing is enabled.\n"
+            f"Got first-parent commits: {replayed_summaries!r}"
+        )
+        assert "UPSTREAM: <carry>: generated downstream metadata" in replayed_summaries, (
+            "Control bot-authored carry commit should still be present in the strict-tag replay.\n"
+            f"Got first-parent commits: {replayed_summaries!r}"
+        )
+
+    def test_excluding_source_merge_sha_suppresses_merge_only_delta_recovery(
+        self, init_test_repositories, fake_github_provider, tmpdir
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        args1 = _make_rebase_args(source, rebase, dest, first_run_dir)
+        assert cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "exclude_first_run_remote")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        with open(os.path.join(dest.url, "feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+        with open(os.path.join(dest.url, "merge_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("manually resolved\n")
+        dest_repo.git.add("merge_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature into main with merge-only resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        args2 = _make_rebase_args(
+            source,
+            rebase,
+            dest,
+            second_run_dir,
+            exclude_commits=[manual_merge_sha],
+        )
+        assert cli.rebasebot_run(args2, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        commit_summaries = [commit.summary for commit in Repo(second_run_dir).iter_commits("rebase")]
+        expected_recovery_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {manual_merge_sha[:12]}"
+        )
+        assert expected_recovery_msg not in commit_summaries, (
+            "Explicitly excluding the source merge SHA should suppress synthetic merge-only recovery.\n"
+            f"Got commits: {commit_summaries!r}"
+        )
+
+    def test_first_run_mode_only_merge_delta_is_preserved(
+        self, init_test_repositories, fake_github_provider, tmpdir
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        dest_repo = Repo(dest.url)
+        dest_repo.git.checkout("-b", "mode_feature")
+        script_path = os.path.join(dest.url, "mode_only.sh")
+        with open(script_path, "x", encoding="utf8") as fh:
+            fh.write("#!/bin/sh\necho mode-only\n")
+        dest_repo.git.add("mode_only.sh")
+        dest_repo.git.commit("-m", "add mode-only script")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("mode_feature", "--no-ff", "--no-commit")
+        os.chmod(script_path, 0o755)
+        dest_repo.git.add("mode_only.sh")
+        dest_repo.git.commit("-m", "Legacy merge with mode-only resolution")
+        mode_merge_sha = dest_repo.head.commit.hexsha
+
+        run_dir = os.path.join(tmpdir, "mode_run")
+        os.makedirs(run_dir)
+        args = _make_rebase_args(source, rebase, dest, run_dir)
+        assert cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        working_repo = Repo(run_dir)
+        expected_recovery_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {mode_merge_sha[:12]}"
+        )
+        commit_summaries = [commit.summary for commit in working_repo.iter_commits("rebase")]
+        assert expected_recovery_msg in commit_summaries, (
+            "Mode-only merge deltas should be recovered as synthetic carries.\n"
+            f"Got commits: {commit_summaries!r}"
+        )
+
+        carry_commit = next(commit for commit in working_repo.iter_commits("rebase") if commit.summary == expected_recovery_msg)
+        assert carry_commit.tree["mode_only.sh"].mode == 0o100755
+
+    def test_replay_time_no_op_merge_only_delta_is_skipped(
+        self, init_test_repositories, fake_github_provider, tmpdir
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        args1 = _make_rebase_args(source, rebase, dest, first_run_dir)
+        assert cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "noop_first_run_remote")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        with open(os.path.join(dest.url, "feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+        with open(os.path.join(dest.url, "merge_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("manually resolved\n")
+        dest_repo.git.add("merge_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature into main with merge-only resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        CommitBuilder(source).add_file("merge_resolution.txt", "manually resolved\n").commit(
+            "upstream adopts merge resolution"
+        )
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        args2 = _make_rebase_args(source, rebase, dest, second_run_dir)
+        assert cli.rebasebot_run(args2, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        first_parent_summaries = Repo(second_run_dir).git.log("--first-parent", "--pretty=format:%s", "rebase").splitlines()
+        expected_recovery_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {manual_merge_sha[:12]}"
+        )
+        assert expected_recovery_msg not in first_parent_summaries, (
+            "Replay-time no-op merge-only deltas should be skipped instead of materializing empty carries.\n"
+            f"Got first-parent commits: {first_parent_summaries!r}"
+        )
+        assert os.path.exists(os.path.join(second_run_dir, "merge_resolution.txt"))
+
+    def test_recovery_requires_manual_intervention_when_synthetic_carry_cannot_apply_cleanly(self):
+        gitwd = MagicMock()
+        merge_commit = MagicMock()
+        merge_commit.hexsha = "1234567890abcdef1234567890abcdef12345678"
+
+        gitwd.git.ls_tree.side_effect = [
+            "100644 blob deadbeef\tmerge_resolution.txt",
+            "100644 blob feedface\tmerge_resolution.txt",
+        ]
+        gitwd.git.checkout.side_effect = git.GitCommandError(
+            "checkout",
+            1,
+            stderr="would overwrite conflicting path",
+        )
+
+        with pytest.raises(RepoException, match="Failed to restore merge-only delta paths from merge 1234567890ab"):
+            _apply_merge_only_delta(
+                gitwd,
+                merge_commit,
+                ":000000 100644 0000000 1111111 A\tmerge_resolution.txt",
+            )

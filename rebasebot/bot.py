@@ -55,6 +55,7 @@ MERGE_TMP_BRANCH = "merge-tmp"
 _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
+_RECOVERED_MERGE_ONLY_CARRY_PREFIX = "UPSTREAM: <carry>: Recover merge-only delta from merge "
 
 
 def _message_slack(webhook_url: str, msg: str) -> None:
@@ -141,6 +142,17 @@ def _in_excluded_commits(sha: str, exclude_commits: list) -> bool:
             return True
 
     return False
+
+
+def _is_recovered_merge_only_carry(commit_message: str) -> bool:
+    return commit_message.startswith(_RECOVERED_MERGE_ONLY_CARRY_PREFIX)
+
+
+def _tree_entry_for_path(gitwd: git.Repo, ref: str, path: str) -> str:
+    try:
+        return gitwd.git.ls_tree(ref, "--", path).strip()
+    except git.GitCommandError:
+        return ""
 
 
 def _find_last_rebase_merge_commit(gitwd: git.Repo, ancestry_path_merges) -> Commit:
@@ -568,26 +580,9 @@ def _apply_merge_only_delta(gitwd: git.Repo, merge_commit: Commit, diff_output: 
         else:
             added_or_modified.append(path)
 
-    # Check whether applying the delta would change the current HEAD.
-    has_change = False
-    for path in added_or_modified:
-        try:
-            head_blob = gitwd.git.rev_parse(f"HEAD:{path}").strip()
-            merge_blob = gitwd.git.rev_parse(f"{sha}:{path}").strip()
-            if head_blob != merge_blob:
-                has_change = True
-                break
-        except git.GitCommandError:
-            has_change = True
-            break
-    if not has_change:
-        for path in deleted:
-            try:
-                gitwd.git.rev_parse(f"HEAD:{path}")
-                has_change = True  # File still exists at HEAD; deleting it is a change.
-                break
-            except git.GitCommandError:
-                pass  # Already absent — not a change.
+    # Compare full tree entries so mode-only and other non-text changes are not mistaken for no-ops.
+    affected_paths = list(dict.fromkeys([*added_or_modified, *deleted]))
+    has_change = any(_tree_entry_for_path(gitwd, "HEAD", path) != _tree_entry_for_path(gitwd, sha, path) for path in affected_paths)
 
     if not has_change:
         logging.info("Merge-only delta from %s is a no-op after replay; skipping", short_sha)
@@ -673,7 +668,7 @@ def _do_rebase(
             logging.info("Dropping commit: %s - %s", sha, commit_message)
             return
 
-        if allow_bot_squash:
+        if allow_bot_squash and not _is_recovered_merge_only_carry(commit_message):
             # There is sometimes a prefix with number and a following + sign
             # We have to get rid of that part to make sure to get
             # only the email of the bot.
@@ -709,6 +704,9 @@ def _do_rebase(
         merge_only_delta = merge_only_deltas.get(sha)
         if merge_only_delta is not None:
             merge_commit, diff_output = merge_only_delta
+            if _in_excluded_commits(merge_commit.hexsha, exclude_commits):
+                logging.info("Explicitly skipping merge-only delta recovery from merge %s", merge_commit.hexsha)
+                continue
             logging.info("Recovering merge-only delta from downstream merge %s", merge_commit.hexsha[:12])
             _apply_merge_only_delta(gitwd, merge_commit, diff_output)
             continue
