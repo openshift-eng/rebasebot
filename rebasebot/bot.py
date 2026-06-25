@@ -180,7 +180,9 @@ def _find_source_parent_commit(parents: list, gitwd: git.Repo) -> Commit:
     return None
 
 
-def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> str:
+def _identify_downstream_commit_phases(
+    gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch
+) -> tuple[list[str], list[str], list[str]]:
     # Merge base is the last shared commit of source branch and destination branch
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
     logging.info(f"Merge base of source/{source.branch} and dest/{dest.branch}: %s", merge_base)
@@ -223,10 +225,11 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
 
     if not downstream_shas:
         logging.info("No downstream commits identified")
-        return ""
+        return [], [], cutoff_commits
 
     ordered_commits = []
     seen = set()
+    phase1_lines = []
 
     # Phase 1: Extract commits from the previous rebase PR first.
     # The rebase PR carries establish the baseline and must be cherry-picked
@@ -276,7 +279,6 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
             ).splitlines()
             # Keep only commits that are part of downstream set and not yet
             # emitted, so phase 1 establishes the carry baseline first.
-            phase1_lines = []
             phase1_extras = []
             for line in rebase_commits:
                 sha = line.split(" || ", 1)[0].strip()
@@ -312,7 +314,12 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
         "\n".join(phase2_lines) if phase2_lines else "(none)",
     )
     logging.info("Total downstream commits: %d", len(ordered_commits))
-    downstream_commits = "\n".join(ordered_commits)
+    return phase1_lines, phase2_lines, cutoff_commits
+
+
+def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> str:
+    phase1_lines, phase2_lines, _ = _identify_downstream_commit_phases(gitwd, source, dest)
+    downstream_commits = "\n".join([*phase1_lines, *phase2_lines])
     return downstream_commits
 
 
@@ -551,10 +558,10 @@ def _apply_merge_only_delta(gitwd: git.Repo, merge_commit: Commit, diff_output: 
             deleted.append(path)
         elif status == "R":
             # Rename: remove old path, add new path
-            new_path_parts = tab_parts[1].split("\t")
-            deleted.append(new_path_parts[0])
-            if len(new_path_parts) > 1:
-                added_or_modified.append(new_path_parts[1])
+            renamed_paths = tab_parts[1].split("\t")
+            deleted.append(renamed_paths[0])
+            if len(renamed_paths) > 1:
+                added_or_modified.append(renamed_paths[1])
         else:
             added_or_modified.append(path)
 
@@ -636,29 +643,32 @@ def _do_rebase(
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
-    downstream_commits = _identify_downstream_commits(gitwd, source, dest)
+    phase1_lines, phase2_lines, cutoff_commits = _identify_downstream_commit_phases(gitwd, source, dest)
+    phase1_shas = {line.split(" || ", 1)[0].strip() for line in phase1_lines if line.strip()}
+    phase2_shas = {line.split(" || ", 1)[0].strip() for line in phase2_lines if line.strip()}
+    merge_only_deltas = {merge.hexsha: (merge, diff) for merge, diff in _find_merge_only_deltas(gitwd, source, dest)}
 
     commits_to_squash = defaultdict(list)
 
-    for commit_line in downstream_commits.splitlines():
+    def _replay_commit_line(commit_line: str) -> None:
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
         sha, commit_message, committer_email = commit_line.split(" || ", 2)
 
         if _in_excluded_commits(sha, exclude_commits):
             logging.info("Explicitly dropping commit from rebase: %s", sha)
-            continue
+            return
 
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
             # and append such commit to a list of commits that we want to prune
             if commit_message == "UPSTREAM: <carry>: Updating and vendoring " + "go modules after an upstream rebase":
                 logging.info("Dropping Go modules commit %s - %s", sha, commit_message)
-                continue
+                return
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy, gitwd, source.branch):
             logging.info("Dropping commit: %s - %s", sha, commit_message)
-            continue
+            return
 
         if allow_bot_squash:
             # There is sometimes a prefix with number and a following + sign
@@ -667,7 +677,7 @@ def _do_rebase(
             email = committer_email.split("+")[-1]
             if email in bot_emails:
                 commits_to_squash[email].append({"sha": sha, "commit_message": commit_message})
-                continue
+                return
 
         logging.info("Picking commit: %s - %s", sha, commit_message)
 
@@ -678,6 +688,30 @@ def _do_rebase(
             conflict_policy=conflict_policy,
             commit_description=f"{sha} - {commit_message}",
         )
+
+    for commit_line in phase1_lines:
+        _replay_commit_line(commit_line)
+
+    phase2_history_lines = gitwd.git.log(
+        "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, *cutoff_commits, f"dest/{dest.branch}"
+    ).splitlines()
+    for history_line in phase2_history_lines:
+        if not history_line.strip():
+            continue
+
+        sha, _, _ = history_line.split(" || ", 2)
+        if sha in phase1_shas:
+            continue
+
+        merge_only_delta = merge_only_deltas.get(sha)
+        if merge_only_delta is not None:
+            merge_commit, diff_output = merge_only_delta
+            logging.info("Recovering merge-only delta from downstream merge %s", merge_commit.hexsha[:12])
+            _apply_merge_only_delta(gitwd, merge_commit, diff_output)
+            continue
+
+        if sha in phase2_shas:
+            _replay_commit_line(history_line)
 
     # Here we cherry-pick the bot's commits and then squash them together
     # We also want the newest bot commit message to represent the squashed commits
@@ -697,18 +731,6 @@ def _do_rebase(
             newest_bot_commit_message = value[-1]["commit_message"]
 
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
-
-
-    # Recover merge-only deltas from eligible downstream merge commits (later-run path).
-    # This handles the case where a prior rebasebot rebase was merged into dest, then a
-    # downstream manual merge with custom conflict resolution (merge-only content) appeared.
-    # Each such delta is preserved as a synthetic UPSTREAM: <carry> commit.
-    for _merge_commit, _diff_output in _find_merge_only_deltas(gitwd, source, dest):
-        logging.info("Recovering merge-only delta from downstream merge %s", _merge_commit.hexsha[:12])
-        _apply_merge_only_delta(gitwd, _merge_commit, _diff_output)
-
-
-
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
     logging.info("Preparing rebase branch")
 

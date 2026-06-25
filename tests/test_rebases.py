@@ -965,3 +965,109 @@ fi"""
         assert "merge_resolution.txt" in blob_names, (
             f"merge_resolution.txt missing from synthetic carry commit tree; found: {blob_names!r}"
         )
+
+    def test_later_run_merge_only_delta_is_replayed_before_later_downstream_commits(
+        self, init_test_repositories, fake_github_provider, tmpdir
+    ):
+        """
+        Later-run path: a recovered merge-only carry must land before later downstream commits.
+
+        This isolates the ordering contract: if a downstream manual merge is followed by
+        another ordinary downstream commit, the synthetic carry recovered from that merge
+        must appear before the later commit on the rebased branch.
+        """
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+
+        def _make_args(src, rbs, dst, wdir):
+            a = MagicMock()
+            a.source = src
+            a.source_repo = None
+            a.dest = dst
+            a.rebase = rbs
+            a.working_dir = wdir
+            a.git_username = "test_rebasebot"
+            a.git_email = "test@rebasebot.ocp"
+            a.tag_policy = "soft"
+            a.bot_emails = []
+            a.exclude_commits = []
+            a.update_go_modules = False
+            a.conflict_policy = "auto"
+            a.ignore_manual_label = False
+            a.dry_run = True
+            a.always_run_hooks = False
+            a.title_prefix = ""
+            a.pre_rebase_hook = None
+            a.post_rebase_hook = None
+            a.pre_carry_commit_hook = None
+            a.pre_push_rebase_branch_hook = None
+            a.pre_create_pr_hook = None
+            a.source_ref_hook = None
+            return a
+
+        args1 = _make_args(source, rebase, dest, first_run_dir)
+        assert cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        dest_repo = Repo(dest.url)
+        dest_repo.git.checkout(dest.branch)
+
+        remote_name = "first_run_remote"
+        if remote_name not in [r.name for r in dest_repo.remotes]:
+            dest_repo.create_remote(remote_name, first_run_dir)
+        dest_repo.remotes[remote_name].fetch("rebase")
+        dest_repo.git.merge(f"{remote_name}/rebase", "--no-ff", "-m", "Merge rebase PR into main")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        feature_file_path = os.path.join(dest.url, "feature.txt")
+        with open(feature_file_path, "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+
+        resolution_path = os.path.join(dest.url, "merge_resolution.txt")
+        with open(resolution_path, "w", encoding="utf8") as fh:
+            fh.write("manually resolved\n")
+        dest_repo.git.add("merge_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature into main with merge-only resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        follow_up_msg = "later downstream follow-up"
+        CommitBuilder(dest).add_file("post_merge_followup.txt", "follow-up content\n").commit(follow_up_msg)
+
+        CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        args2 = _make_args(source, rebase, dest, second_run_dir)
+        assert cli.rebasebot_run(args2, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        second_working = Repo(second_run_dir)
+        chronological_summaries = [commit.summary for commit in reversed(list(second_working.iter_commits("rebase")))]
+
+        expected_carry_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {manual_merge_sha[:12]}"
+        )
+        assert expected_carry_msg in chronological_summaries, (
+            f"Expected synthetic carry commit not found in rebase branch.\n"
+            f"Expected: {expected_carry_msg!r}\n"
+            f"Got commits: {chronological_summaries!r}"
+        )
+        assert follow_up_msg in chronological_summaries, (
+            f"Expected later downstream commit not found in rebase branch.\n"
+            f"Expected: {follow_up_msg!r}\n"
+            f"Got commits: {chronological_summaries!r}"
+        )
+        replayed_follow_up_index = max(
+            index for index, summary in enumerate(chronological_summaries) if summary == follow_up_msg
+        )
+        assert chronological_summaries.index(expected_carry_msg) < replayed_follow_up_index, (
+            "Recovered merge-only carry was replayed after a later downstream commit.\n"
+            f"Expected {expected_carry_msg!r} before {follow_up_msg!r}.\n"
+            f"Got commits: {chronological_summaries!r}"
+        )
