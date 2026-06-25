@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from unittest.mock import ANY, MagicMock, patch
@@ -1442,3 +1443,198 @@ fi"""
                 merge_commit,
                 ":000000 100644 0000000 1111111 A\tmerge_resolution.txt",
             )
+
+    def test_detection_and_recovery_logs_emitted(
+        self, init_test_repositories, fake_github_provider, tmpdir, caplog
+    ):
+        """
+        Operator visibility: INFO logs for detection and recovery of a merge-only delta
+        must be emitted during the later-run rebase.
+        """
+        caplog.set_level(logging.INFO)
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, first_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "detect_log_remote")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        with open(os.path.join(dest.url, "feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+        with open(os.path.join(dest.url, "detect_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("manually resolved\n")
+        dest_repo.git.add("detect_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature with detection log resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, second_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+
+        assert f"Found merge-only delta in downstream merge {manual_merge_sha[:12]}" in caplog.text, (
+            "Expected detection INFO log to be captured. "
+            "Ensure caplog.set_level(logging.INFO) is set."
+        )
+        assert (
+            f"Created synthetic carry commit for merge-only delta from merge {manual_merge_sha[:12]}"
+            in caplog.text
+        ), "Expected recovery INFO log to be captured."
+
+    def test_no_op_skip_log_emitted(
+        self, init_test_repositories, fake_github_provider, tmpdir, caplog
+    ):
+        """
+        Operator visibility: INFO log for skipping a merge-only delta that becomes a no-op
+        after replay (because source has since adopted the same content).
+        """
+        caplog.set_level(logging.INFO)
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, first_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "noop_log_remote")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        with open(os.path.join(dest.url, "feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+        with open(os.path.join(dest.url, "noop_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("noop resolved\n")
+        dest_repo.git.add("noop_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature with noop resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        # Source adopts the same content, making the carry a no-op at replay time.
+        CommitBuilder(source).add_file("noop_resolution.txt", "noop resolved\n").commit(
+            "upstream adopts noop resolution"
+        )
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, second_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+
+        assert (
+            f"Merge-only delta from {manual_merge_sha[:12]} is a no-op after replay; skipping"
+            in caplog.text
+        ), (
+            "Expected no-op skip INFO log to be captured. "
+            "Ensure caplog.set_level(logging.INFO) is set."
+        )
+
+    def test_excluded_skip_log_emitted(
+        self, init_test_repositories, fake_github_provider, tmpdir, caplog
+    ):
+        """
+        Operator visibility: INFO log when a merge SHA is explicitly excluded via
+        --exclude-commits, suppressing merge-only delta recovery.
+        """
+        caplog.set_level(logging.INFO)
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, first_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "exclude_log_remote")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        with open(os.path.join(dest.url, "feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+        with open(os.path.join(dest.url, "exclude_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("excluded resolution\n")
+        dest_repo.git.add("exclude_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature with excluded resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(
+                source, rebase, dest, second_run_dir, exclude_commits=[manual_merge_sha]
+            ),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+
+        assert "Explicitly skipping merge-only delta recovery from merge" in caplog.text, (
+            "Expected excluded-skip INFO log to be captured. "
+            "Ensure caplog.set_level(logging.INFO) is set."
+        )
+
+    def test_manual_intervention_warning_logged_on_apply_failure(self, caplog):
+        """
+        Operator visibility: a WARNING log must be emitted specifically for the
+        merge-only delta recovery failure case before the RepoException is raised.
+
+        This is a unit-level test using mocks. The WARNING log helps operators identify
+        the precise merge that required manual intervention without needing to parse
+        the generic outer error.
+        """
+        gitwd = MagicMock()
+        merge_commit = MagicMock()
+        merge_commit.hexsha = "abcdef012345abcdef012345abcdef0123456789"
+
+        gitwd.git.ls_tree.side_effect = [
+            "100644 blob deadbeef\tconflict_file.txt",
+            "100644 blob feedface\tconflict_file.txt",
+        ]
+        gitwd.git.checkout.side_effect = git.GitCommandError(
+            "checkout",
+            1,
+            stderr="would overwrite conflicting path",
+        )
+
+        with pytest.raises(RepoException):
+            _apply_merge_only_delta(
+                gitwd,
+                merge_commit,
+                ":000000 100644 0000000 1111111 A\tconflict_file.txt",
+            )
+
+        assert "abcdef012345" in caplog.text, (
+            "Expected a WARNING log referencing the merge SHA when merge-only delta "
+            "recovery cannot be applied cleanly. "
+            "Add logging.warning(...) in _apply_merge_only_delta before the RepoException raise."
+        )

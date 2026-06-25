@@ -593,6 +593,10 @@ def _apply_merge_only_delta(gitwd: git.Repo, merge_commit: Commit, diff_output: 
         try:
             gitwd.git.checkout(sha, "--", *added_or_modified)
         except git.GitCommandError as ex:
+            logging.warning(
+                "Cannot apply merge-only delta from merge %s cleanly; manual intervention required",
+                short_sha,
+            )
             raise RepoException(
                 f"Failed to restore merge-only delta paths from merge {short_sha}: {ex}"
             ) from ex
