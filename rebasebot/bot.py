@@ -465,10 +465,13 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
 
     last_rebase_merge = _find_last_rebase_merge_commit(gitwd, ancestry_path_merges)
     if last_rebase_merge is None:
-        logging.info("No prior rebase merge found; skipping merge-only delta detection (first-run path)")
-        return []
-
-    cutoffs = [f"^{parent.hexsha}" for parent in last_rebase_merge.parents]
+        logging.info(
+            "No prior rebase merge found; scanning for merge-only deltas from merge_base "
+            "(first-run onboarding path)"
+        )
+        cutoffs = [f"^{merge_base}"]
+    else:
+        cutoffs = [f"^{parent.hexsha}" for parent in last_rebase_merge.parents]
 
     merge_lines = gitwd.git.log(
         "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, "--merges",

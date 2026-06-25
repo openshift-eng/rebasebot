@@ -966,6 +966,95 @@ fi"""
             f"merge_resolution.txt missing from synthetic carry commit tree; found: {blob_names!r}"
         )
 
+    def test_first_run_legacy_merge_only_delta_preserved(self, init_test_repositories, fake_github_provider, tmpdir):
+        """
+        First-run (onboarding) path: a legacy downstream merge with merge-only content
+        must be recovered during the first automated rebase.
+
+        Scenario:
+          - Source and dest share common history; no prior RebaseBot marker exists on dest.
+          - Dest has a legacy feature-branch merge committed with merge-only content
+            (first_run_resolution.txt injected before the merge commit).
+          - Source advances; the first automated dry-run rebase runs.
+          - Assert a synthetic UPSTREAM: <carry> commit restoring first_run_resolution.txt
+            is present in the rebase branch.
+        """
+        source, rebase, dest = init_test_repositories
+        # Initial state (no prior rebasebot marker on dest):
+        #   source: S0  (test.go)
+        #   dest:   S0 → D1  (another_file.go, "UPSTREAM: <carry>: our cool addition")
+
+        # Advance source to trigger the first rebase.
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        # Create a legacy feature branch on dest and add a feature file.
+        dest_repo = Repo(dest.url)
+        dest_repo.git.checkout("-b", "legacy_feature")
+        with open(os.path.join(dest.url, "legacy_feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("legacy feature content\n")
+        dest_repo.git.add("legacy_feature.txt")
+        dest_repo.git.commit("-m", "add legacy feature file")
+
+        # Merge the legacy feature branch into dest/main with --no-commit so we can
+        # inject a merge-only file (first_run_resolution.txt) before the merge commit.
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("legacy_feature", "--no-ff", "--no-commit")
+
+        with open(os.path.join(dest.url, "first_run_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("first-run manual resolution\n")
+        dest_repo.git.add("first_run_resolution.txt")
+
+        dest_repo.git.commit("-m", "Legacy upstream merge with merge-only resolution")
+        legacy_merge_sha = dest_repo.head.commit.hexsha
+
+        # Run the first dry-run rebase (no prior rebasebot marker on dest).
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.conflict_policy = "auto"
+        args.ignore_manual_label = False
+        args.dry_run = True
+        args.always_run_hooks = False
+        args.title_prefix = ""
+        args.pre_rebase_hook = None
+        args.post_rebase_hook = None
+        args.pre_carry_commit_hook = None
+        args.pre_push_rebase_branch_hook = None
+        args.pre_create_pr_hook = None
+        args.source_ref_hook = None
+
+        result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+        assert result, "First-run rebase should succeed"
+
+        # Verify the synthetic carry commit was created for the first-run merge-only delta.
+        working_repo = Repo(tmpdir)
+        commit_summaries = [c.summary for c in working_repo.iter_commits("rebase")]
+
+        expected_carry_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {legacy_merge_sha[:12]}"
+        )
+        assert expected_carry_msg in commit_summaries, (
+            f"Expected synthetic carry commit not found in first-run rebase branch.\n"
+            f"Expected:  {expected_carry_msg!r}\n"
+            f"Got commits: {commit_summaries!r}"
+        )
+
+        # Verify first_run_resolution.txt is present in the synthetic carry commit's tree.
+        carry_commit = next(c for c in working_repo.iter_commits("rebase") if c.summary == expected_carry_msg)
+        blob_names = {b.name for b in carry_commit.tree.blobs}
+        assert "first_run_resolution.txt" in blob_names, (
+            f"first_run_resolution.txt missing from synthetic carry commit tree; found: {blob_names!r}"
+        )
+
     def test_later_run_merge_only_delta_is_replayed_before_later_downstream_commits(
         self, init_test_repositories, fake_github_provider, tmpdir
     ):
