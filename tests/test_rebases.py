@@ -848,3 +848,120 @@ fi"""
         # The hook should have succeeded (exit 0), proving DOWNSTREAM_OWNERS existed
         # which means hooks ran on dest branch, not source branch
         assert "hook-verified-carry.txt" in os.listdir(tmpdir)
+
+
+    def test_later_run_merge_only_delta_preserved(self, init_test_repositories, fake_github_provider, tmpdir):
+        """
+        Later-run path: a downstream manual merge with merge-only content must be preserved.
+
+        Scenario:
+          1. Source advances; first dry-run rebase runs, producing a rebase branch.
+          2. The rebase PR is merged into dest (--no-ff, simulated locally).
+          3. A downstream feature branch is merged into dest with merge-only content:
+             an extra file (merge_resolution.txt) is staged before the merge commit,
+             so it exists in the merge commit tree but NOT in the auto-merge baseline.
+          4. Source advances again; the second (later-run) dry-run rebase runs.
+          5. Assert the later run produces a synthetic UPSTREAM: <carry> commit that
+             restores merge_resolution.txt from the downstream merge commit.
+        """
+        source, rebase, dest = init_test_repositories
+        # Initial state:
+        #   source: S0  (test.go)
+        #   dest:   S0 → D1  (another_file.go, "UPSTREAM: <carry>: our cool addition")
+
+        # Step 1: advance source (trigger first rebase).
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        # ── First dry-run rebase ────────────────────────────────────────────────
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+
+        def _make_args(src, rbs, dst, wdir):
+            a = MagicMock()
+            a.source = src
+            a.source_repo = None
+            a.dest = dst
+            a.rebase = rbs
+            a.working_dir = wdir
+            a.git_username = "test_rebasebot"
+            a.git_email = "test@rebasebot.ocp"
+            a.tag_policy = "soft"
+            a.bot_emails = []
+            a.exclude_commits = []
+            a.update_go_modules = False
+            a.conflict_policy = "auto"
+            a.ignore_manual_label = False
+            a.dry_run = True
+            a.always_run_hooks = False
+            a.title_prefix = ""
+            a.pre_rebase_hook = None
+            a.post_rebase_hook = None
+            a.pre_carry_commit_hook = None
+            a.pre_push_rebase_branch_hook = None
+            a.pre_create_pr_hook = None
+            a.source_ref_hook = None
+            return a
+
+        args1 = _make_args(source, rebase, dest, first_run_dir)
+        result1 = cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
+        assert result1, "First rebase run should succeed"
+
+        # ── Simulate merging the rebase PR into dest (--no-ff) ─────────────────
+        dest_repo = Repo(dest.url)
+        dest_repo.git.checkout(dest.branch)
+
+        remote_name = "first_run_remote"
+        if remote_name not in [r.name for r in dest_repo.remotes]:
+            dest_repo.create_remote(remote_name, first_run_dir)
+        dest_repo.remotes[remote_name].fetch("rebase")
+        dest_repo.git.merge(f"{remote_name}/rebase", "--no-ff", "-m", "Merge rebase PR into main")
+
+        # ── Create a feature branch and merge it with merge-only content ────────
+        dest_repo.git.checkout("-b", "feature_branch")
+        feature_file_path = os.path.join(dest.url, "feature.txt")
+        with open(feature_file_path, "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        # --no-commit so we can inject a merge-only file before the merge commit.
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+
+        resolution_path = os.path.join(dest.url, "merge_resolution.txt")
+        with open(resolution_path, "w", encoding="utf8") as fh:
+            fh.write("manually resolved\n")
+        dest_repo.git.add("merge_resolution.txt")
+
+        dest_repo.git.commit("-m", "Manual merge: feature into main with merge-only resolution")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+
+        # ── Advance source for the second (later) rebase ────────────────────────
+        CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
+
+        # ── Second dry-run rebase (the "later run") ─────────────────────────────
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        args2 = _make_args(source, rebase, dest, second_run_dir)
+        result2 = cli.rebasebot_run(args2, slack_webhook=None, github_app_wrapper=fake_github_provider)
+        assert result2, "Second (later) rebase run should succeed"
+
+        # ── Assertions ───────────────────────────────────────────────────────────
+        second_working = Repo(second_run_dir)
+        commit_summaries = [c.summary for c in second_working.iter_commits("rebase")]
+
+        expected_carry_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {manual_merge_sha[:12]}"
+        )
+        assert expected_carry_msg in commit_summaries, (
+            f"Expected synthetic carry commit not found in rebase branch.\n"
+            f"Expected:  {expected_carry_msg!r}\n"
+            f"Got commits: {commit_summaries!r}"
+        )
+
+        # The synthetic carry commit's tree must include merge_resolution.txt.
+        carry_commit = next(c for c in second_working.iter_commits("rebase") if c.summary == expected_carry_msg)
+        blob_names = {b.name for b in carry_commit.tree.blobs}
+        assert "merge_resolution.txt" in blob_names, (
+            f"merge_resolution.txt missing from synthetic carry commit tree; found: {blob_names!r}"
+        )

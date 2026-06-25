@@ -20,6 +20,7 @@ import builtins
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from collections import defaultdict
 
@@ -440,6 +441,183 @@ def _safe_cherry_pick(
         )
 
 
+def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> list:
+    """
+    Find downstream two-parent merge commits with merge-only deltas in the later-run replay window.
+
+    A merge-only delta exists when the actual merge commit tree differs from the tree that
+    ``git merge-tree --write-tree parent1 parent2`` would produce automatically.
+
+    Returns a list of (merge_commit, diff_output) tuples in topo/history order.
+    Only looks for eligible merges in the "later-run path" (when a prior rebasebot merge exists).
+    """
+    merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
+    ancestry_path_merges = gitwd.git.log(
+        _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{dest.branch}"
+    ).splitlines()
+
+    last_rebase_merge = _find_last_rebase_merge_commit(gitwd, ancestry_path_merges)
+    if last_rebase_merge is None:
+        logging.info("No prior rebase merge found; skipping merge-only delta detection (first-run path)")
+        return []
+
+    cutoffs = [f"^{parent.hexsha}" for parent in last_rebase_merge.parents]
+
+    merge_lines = gitwd.git.log(
+        "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, "--merges",
+        *cutoffs, f"dest/{dest.branch}",
+    ).splitlines()
+
+    result = []
+    for line in merge_lines:
+        if not line.strip():
+            continue
+        sha, _, _ = line.split(" || ", 2)
+        merge = gitwd.commit(sha)
+        parents = list(merge.parents)
+        if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
+            continue
+
+        # Exclude synthetic rebase merge commits (identified by tree == upstream parent's tree).
+        upstream_parent = _find_source_parent_commit(parents, gitwd)
+        if upstream_parent is not None and merge.tree.hexsha == upstream_parent.tree.hexsha:
+            logging.info("Skipping synthetic rebase merge %s during merge-only delta scan", sha[:12])
+            continue
+
+        # Compute auto-merge tree baseline via git merge-tree --write-tree.
+        p1, p2 = parents[0].hexsha, parents[1].hexsha
+        try:
+            proc = subprocess.run(
+                ["git", "merge-tree", "--write-tree", p1, p2],
+                capture_output=True,
+                text=True,
+                cwd=gitwd.working_dir,
+            )
+            # merge-tree exits 0 for clean merge, 1 for conflicts.
+            # Either way the tree SHA is on the first line of stdout.
+            auto_tree = proc.stdout.strip().split("\n")[0].strip() if proc.stdout.strip() else ""
+            if not auto_tree:
+                logging.warning("merge-tree produced no tree SHA for %s; skipping", sha[:12])
+                continue
+        except OSError as ex:
+            logging.warning("Could not run git merge-tree for %s: %s", sha[:12], ex)
+            continue
+
+        if auto_tree == merge.tree.hexsha:
+            logging.info("No merge-only delta in merge %s", sha[:12])
+            continue
+
+        # Diff auto-merge tree against actual merge tree to find affected paths.
+        try:
+            diff = gitwd.git.diff_tree("--no-commit-id", "-r", auto_tree, merge.tree.hexsha)
+        except git.GitCommandError as ex:
+            logging.warning("Could not diff merge-only delta for %s: %s", sha[:12], ex)
+            continue
+
+        if diff.strip():
+            logging.info("Found merge-only delta in downstream merge %s", sha[:12])
+            result.append((merge, diff))
+
+    return result
+
+
+def _apply_merge_only_delta(gitwd: git.Repo, merge_commit: Commit, diff_output: str) -> None:
+    """
+    Apply a synthetic carry commit that recovers merge-only content from a downstream merge commit.
+
+    Restores affected paths to the exact state in the original merge commit tree, then creates
+    a commit with message ``UPSTREAM: <carry>: Recover merge-only delta from merge {sha[:12]}``.
+
+    Raises RepoException if the commit cannot be applied cleanly.
+    """
+    sha = merge_commit.hexsha
+    short_sha = sha[:12]
+
+    # Parse the diff-tree output to classify affected paths.
+    added_or_modified: list[str] = []
+    deleted: list[str] = []
+    for line in diff_output.splitlines():
+        if not line.startswith(":"):
+            continue
+        tab_parts = line.split("\t", 1)
+        if len(tab_parts) < 2:
+            continue
+        meta_fields = tab_parts[0].lstrip(":").split()
+        if len(meta_fields) < 5:
+            continue
+        status = meta_fields[4][0]
+        path = tab_parts[1].split("\t")[0]  # handle renames: take src path
+        if status == "D":
+            deleted.append(path)
+        elif status == "R":
+            # Rename: remove old path, add new path
+            new_path_parts = tab_parts[1].split("\t")
+            deleted.append(new_path_parts[0])
+            if len(new_path_parts) > 1:
+                added_or_modified.append(new_path_parts[1])
+        else:
+            added_or_modified.append(path)
+
+    # Check whether applying the delta would change the current HEAD.
+    has_change = False
+    for path in added_or_modified:
+        try:
+            head_blob = gitwd.git.rev_parse(f"HEAD:{path}").strip()
+            merge_blob = gitwd.git.rev_parse(f"{sha}:{path}").strip()
+            if head_blob != merge_blob:
+                has_change = True
+                break
+        except git.GitCommandError:
+            has_change = True
+            break
+    if not has_change:
+        for path in deleted:
+            try:
+                gitwd.git.rev_parse(f"HEAD:{path}")
+                has_change = True  # File still exists at HEAD; deleting it is a change.
+                break
+            except git.GitCommandError:
+                pass  # Already absent — not a change.
+
+    if not has_change:
+        logging.info("Merge-only delta from %s is a no-op after replay; skipping", short_sha)
+        return
+
+    # Restore added/modified paths to their state in the merge commit's tree.
+    if added_or_modified:
+        try:
+            gitwd.git.checkout(sha, "--", *added_or_modified)
+        except git.GitCommandError as ex:
+            raise RepoException(
+                f"Failed to restore merge-only delta paths from merge {short_sha}: {ex}"
+            ) from ex
+
+    # Remove paths that were deleted in the merge commit relative to the auto-merge baseline.
+    for path in deleted:
+        try:
+            gitwd.git.rm("--force", path)
+        except git.GitCommandError:
+            pass  # Already absent; ignore.
+
+    # Verify there are actually staged changes (guard against no-op after checkout).
+    try:
+        gitwd.git.diff("--cached", "--exit-code")
+        logging.info("No staged changes after applying merge-only delta from %s; skipping", short_sha)
+        return
+    except git.GitCommandError:
+        pass  # Non-zero exit code means staged changes exist — proceed.
+
+    commit_msg = f"UPSTREAM: <carry>: Recover merge-only delta from merge {short_sha}"
+    try:
+        gitwd.git.commit("-m", commit_msg)
+    except git.GitCommandError as ex:
+        raise RepoException(
+            f"Failed to create synthetic carry commit for merge-only delta from {short_sha}: {ex}"
+        ) from ex
+
+    logging.info("Created synthetic carry commit for merge-only delta from merge %s", short_sha)
+
+
 def _do_rebase(
     *,
     gitwd: git.Repo,
@@ -519,6 +697,16 @@ def _do_rebase(
             newest_bot_commit_message = value[-1]["commit_message"]
 
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
+
+
+    # Recover merge-only deltas from eligible downstream merge commits (later-run path).
+    # This handles the case where a prior rebasebot rebase was merged into dest, then a
+    # downstream manual merge with custom conflict resolution (merge-only content) appeared.
+    # Each such delta is preserved as a synthetic UPSTREAM: <carry> commit.
+    for _merge_commit, _diff_output in _find_merge_only_deltas(gitwd, source, dest):
+        logging.info("Recovering merge-only delta from downstream merge %s", _merge_commit.hexsha[:12])
+        _apply_merge_only_delta(gitwd, _merge_commit, _diff_output)
+
 
 
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
