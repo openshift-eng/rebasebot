@@ -58,6 +58,10 @@ _LOST_LINE_LOG_LIMIT = 10
 _RECOVERED_MERGE_ONLY_CARRY_PREFIX = "UPSTREAM: <carry>: Recover merge-only delta from merge "
 
 
+def _synthetic_rebase_merge_message(source_branch: str, dest_branch: str) -> str:
+    return f"merge upstream/{source_branch} into {dest_branch}"
+
+
 def _message_slack(webhook_url: str, msg: str) -> None:
     """Send a message to Slack via a webhook if one is configured."""
     if webhook_url is None:
@@ -149,35 +153,60 @@ def _is_recovered_merge_only_carry(commit_message: str) -> bool:
 
 
 def _tree_entry_for_path(gitwd: git.Repo, ref: str, path: str) -> str:
-    try:
-        return gitwd.git.ls_tree(ref, "--", path).strip()
-    except git.GitCommandError:
-        return ""
+    return gitwd.git.ls_tree(ref, "--", path).strip()
 
 
-def _find_last_rebase_merge_commit(gitwd: git.Repo, ancestry_path_merges) -> Commit:
+def _is_rebasebot_synthetic_merge(
+    merge: Commit,
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    *,
+    first_parent_merge_shas: set[str],
+) -> bool:
+    parents = list(merge.parents)
+    if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
+        return False
+
+    # RebaseBot's synthetic upstream merge lives on the rebase branch and is later
+    # introduced into dest via the PR merge, so it is not on dest's first-parent path.
+    if merge.hexsha in first_parent_merge_shas:
+        return False
+
+    if merge.summary != _synthetic_rebase_merge_message(source.branch, dest.branch):
+        return False
+
+    upstream_parent = _find_source_parent_commit(parents, gitwd)
+    if upstream_parent is None:
+        return False
+
+    return merge.tree.hexsha == upstream_parent.tree.hexsha
+
+
+def _find_last_rebase_merge_commit(
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    ancestry_path_merges,
+    *,
+    first_parent_merge_shas: set[str],
+) -> Commit:
     logging.info("Searching for merge commit from previous rebasebot run to identify downstream commits")
     for merge_line in ancestry_path_merges:
         sha, _, _ = merge_line.split(" || ", 2)
 
         merge = gitwd.commit(sha)
-
-        # Last rebase merge commit has two parents.
-        parents = list(merge.parents)
-        if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
-            continue
-
-        # Identify the upstream parent: Merge parent that is reachable from any upstream branch.
-        upstream_parent = _find_source_parent_commit(parents, gitwd)
-        if upstream_parent is None:
-            continue
-
-        # The synthetic rebase merge uses the upstream tree as the merge tree.
-        # Therefore, the merge commit's tree must equal the upstream parent's tree.
-        if merge.tree.hexsha != upstream_parent.tree.hexsha:
+        if not _is_rebasebot_synthetic_merge(
+            merge,
+            gitwd,
+            source,
+            dest,
+            first_parent_merge_shas=first_parent_merge_shas,
+        ):
             continue
 
         logging.info("Found merge commit from previous rebase: %s", sha)
+        upstream_parent = _find_source_parent_commit(list(merge.parents), gitwd)
         logging.info("Its parent %s is on an upstream branch", upstream_parent.hexsha)
         return merge
     return None
@@ -203,11 +232,20 @@ def _identify_downstream_commit_phases(
     ancestry_path_merges = gitwd.git.log(
         _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{dest.branch}"
     ).splitlines()
+    first_parent_merge_shas = set(
+        gitwd.git.rev_list("--first-parent", "--merges", f"{merge_base}..dest/{dest.branch}").splitlines()
+    )
 
     val = "\n".join(ancestry_path_merges)
     logging.info(f"""Merges on ancestry-path from merge_base=({merge_base}) to dest/{dest.branch} branch:\n{val}""")
 
-    last_rebase_merge_commit = _find_last_rebase_merge_commit(gitwd, ancestry_path_merges)
+    last_rebase_merge_commit = _find_last_rebase_merge_commit(
+        gitwd,
+        source,
+        dest,
+        ancestry_path_merges,
+        first_parent_merge_shas=first_parent_merge_shas,
+    )
     cutoff_commits = []
 
     if last_rebase_merge_commit is None:
@@ -475,7 +513,16 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
         _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{dest.branch}"
     ).splitlines()
 
-    last_rebase_merge = _find_last_rebase_merge_commit(gitwd, ancestry_path_merges)
+    first_parent_merge_shas = set(
+        gitwd.git.rev_list("--first-parent", "--merges", f"{merge_base}..dest/{dest.branch}").splitlines()
+    )
+    last_rebase_merge = _find_last_rebase_merge_commit(
+        gitwd,
+        source,
+        dest,
+        ancestry_path_merges,
+        first_parent_merge_shas=first_parent_merge_shas,
+    )
     if last_rebase_merge is None:
         logging.info(
             "No prior rebase merge found; scanning for merge-only deltas from merge_base "
@@ -489,6 +536,9 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
         "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, "--merges",
         *cutoffs, f"dest/{dest.branch}",
     ).splitlines()
+    eligible_first_parent_merge_shas = set(
+        gitwd.git.rev_list("--first-parent", "--merges", *cutoffs, f"dest/{dest.branch}").splitlines()
+    )
 
     result = []
     for line in merge_lines:
@@ -500,9 +550,13 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
         if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
             continue
 
-        # Exclude synthetic rebase merge commits (identified by tree == upstream parent's tree).
-        upstream_parent = _find_source_parent_commit(parents, gitwd)
-        if upstream_parent is not None and merge.tree.hexsha == upstream_parent.tree.hexsha:
+        if _is_rebasebot_synthetic_merge(
+            merge,
+            gitwd,
+            source,
+            dest,
+            first_parent_merge_shas=eligible_first_parent_merge_shas,
+        ):
             logging.info("Skipping synthetic rebase merge %s during merge-only delta scan", sha[:12])
             continue
 
@@ -519,11 +573,14 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
             # Either way the tree SHA is on the first line of stdout.
             auto_tree = proc.stdout.strip().split("\n")[0].strip() if proc.stdout.strip() else ""
             if not auto_tree:
-                logging.warning("merge-tree produced no tree SHA for %s; skipping", sha[:12])
-                continue
+                raise RepoException(
+                    f"Failed to determine merge-only delta baseline for merge {sha[:12]}: "
+                    f"git merge-tree produced no tree SHA (exit {proc.returncode})"
+                )
         except OSError as ex:
-            logging.warning("Could not run git merge-tree for %s: %s", sha[:12], ex)
-            continue
+            raise RepoException(
+                f"Failed to determine merge-only delta baseline for merge {sha[:12]}: {ex}"
+            ) from ex
 
         if auto_tree == merge.tree.hexsha:
             logging.info("No merge-only delta in merge %s", sha[:12])
@@ -533,8 +590,9 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
         try:
             diff = gitwd.git.diff_tree("--no-commit-id", "-r", auto_tree, merge.tree.hexsha)
         except git.GitCommandError as ex:
-            logging.warning("Could not diff merge-only delta for %s: %s", sha[:12], ex)
-            continue
+            raise RepoException(
+                f"Failed to diff merge-only delta for merge {sha[:12]}: {ex}"
+            ) from ex
 
         if diff.strip():
             logging.info("Found merge-only delta in downstream merge %s", sha[:12])
@@ -760,7 +818,7 @@ def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBr
         "-p",
         MERGE_TMP_BRANCH,
         "-m",
-        f"merge upstream/{source.branch} into {dest.branch}",
+        _synthetic_rebase_merge_message(source.branch, dest.branch),
     )
     logging.info(f"Merging upstream/{source.branch} into {dest.branch}")
 

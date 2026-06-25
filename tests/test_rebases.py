@@ -16,6 +16,7 @@ from rebasebot.bot import (
     _init_working_dir,
     _needs_rebase,
     _prepare_rebase_branch,
+    _tree_entry_for_path,
 )
 from rebasebot.github import GitHubBranch, parse_github_branch
 
@@ -142,6 +143,13 @@ class TestBotInternalHelpers:
             "UPSTREAM: <carry>: our cool addition",
             "Upstream commit",
         ]
+
+    def test_tree_entry_for_path_propagates_real_lookup_failures(self):
+        gitwd = MagicMock()
+        gitwd.git.ls_tree.side_effect = git.GitCommandError("ls-tree", 128, stderr="fatal: bad tree object")
+
+        with pytest.raises(git.GitCommandError, match="ls-tree"):
+            _tree_entry_for_path(gitwd, "missing-ref", "test.go")
 
 
 class TestRebases:
@@ -1601,6 +1609,122 @@ fi"""
         assert "Explicitly skipping merge-only delta recovery from merge" in caplog.text, (
             "Expected excluded-skip INFO log to be captured. "
             "Ensure caplog.set_level(logging.INFO) is set."
+        )
+
+    def test_real_upstream_merge_resolved_to_upstream_is_not_treated_as_synthetic_marker(
+        self, init_test_repositories, fake_github_provider, tmpdir
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2\n").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, first_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "real_upstream_remote")
+        CommitBuilder(dest).update_file(
+            "test.go",
+            """package main
+func main() {
+    println("downstream override")
+}
+""",
+        ).commit("downstream tweak before upstream sync")
+        CommitBuilder(source).update_file(
+            "test.go",
+            """package main
+func main() {
+    println("upstream sync")
+}
+""",
+        ).commit("third upstream commit")
+
+        remote_name = "manual_upstream_source"
+        if remote_name not in [remote.name for remote in dest_repo.remotes]:
+            dest_repo.create_remote(remote_name, source.url)
+        dest_repo.remotes[remote_name].fetch(source.branch)
+        dest_repo.git.checkout(dest.branch)
+        try:
+            dest_repo.git.merge(f"{remote_name}/{source.branch}", "--no-ff", "--no-commit")
+        except git.GitCommandError:
+            pass
+        dest_repo.git.checkout("--theirs", "test.go")
+        dest_repo.git.add("test.go")
+        dest_repo.git.rm("--force", "another_file.go")
+        dest_repo.git.commit("-m", "Manual upstream sync resolved fully to upstream")
+        manual_merge_sha = dest_repo.head.commit.hexsha
+        assert dest_repo.head.commit.tree.hexsha == dest_repo.head.commit.parents[1].tree.hexsha
+
+        CommitBuilder(source).add_file("qux.txt", "upstream v3\n").commit("fourth upstream commit")
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, second_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+
+        expected_recovery_msg = (
+            f"UPSTREAM: <carry>: Recover merge-only delta from merge {manual_merge_sha[:12]}"
+        )
+        working_repo = Repo(second_run_dir)
+        commit_summaries = [commit.summary for commit in working_repo.iter_commits("rebase")]
+        assert expected_recovery_msg in commit_summaries, (
+            "A real upstream merge that resolved fully to the upstream tree must still be "
+            "treated as a user-authored merge and recovered on later rebases.\n"
+            f"Got commits: {commit_summaries!r}"
+        )
+        assert "another_file.go" not in working_repo.head.commit.tree
+        assert working_repo.git.show("HEAD:test.go") == Repo(source.url).git.show(f"{source.branch}:test.go")
+
+    @patch("rebasebot.bot.subprocess.run")
+    def test_merge_only_delta_detection_failure_requires_manual_intervention(
+        self, mocked_subprocess_run, init_test_repositories, fake_github_provider, tmpdir
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "upstream v2").commit("second upstream commit")
+
+        first_run_dir = os.path.join(tmpdir, "first_run")
+        os.makedirs(first_run_dir)
+        assert cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, first_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "failed_detection_remote")
+
+        dest_repo.git.checkout("-b", "feature_branch")
+        with open(os.path.join(dest.url, "feature.txt"), "x", encoding="utf8") as fh:
+            fh.write("feature content\n")
+        dest_repo.git.add("feature.txt")
+        dest_repo.git.commit("-m", "add feature file")
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge("feature_branch", "--no-ff", "--no-commit")
+        with open(os.path.join(dest.url, "merge_resolution.txt"), "w", encoding="utf8") as fh:
+            fh.write("manually resolved\n")
+        dest_repo.git.add("merge_resolution.txt")
+        dest_repo.git.commit("-m", "Manual merge: feature into main with merge-only resolution")
+
+        CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
+
+        mocked_subprocess_run.return_value = MagicMock(stdout="", returncode=0, stderr="")
+
+        second_run_dir = os.path.join(tmpdir, "second_run")
+        os.makedirs(second_run_dir)
+        result = cli.rebasebot_run(
+            _make_rebase_args(source, rebase, dest, second_run_dir),
+            slack_webhook=None,
+            github_app_wrapper=fake_github_provider,
+        )
+        assert result is False, (
+            "If merge-only delta detection cannot produce a baseline for an eligible merge, "
+            "the rebase must fail closed instead of warning and continuing."
         )
 
     def test_manual_intervention_warning_logged_on_apply_failure(self, caplog):
