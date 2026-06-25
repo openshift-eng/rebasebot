@@ -156,6 +156,15 @@ def _tree_entry_for_path(gitwd: git.Repo, ref: str, path: str) -> str:
     return gitwd.git.ls_tree(ref, "--", path).strip()
 
 
+def _is_commit_authored_by_current_git_user(commit: Commit, gitwd: git.Repo) -> bool:
+    try:
+        git_email = gitwd.config_reader().get_value("user", "email")
+    except Exception:  # pragma: no cover - config lookup failures fall back to legacy heuristics
+        return False
+
+    return commit.author.email == git_email and commit.committer.email == git_email
+
+
 def _is_rebasebot_synthetic_merge(
     merge: Commit,
     gitwd: git.Repo,
@@ -174,6 +183,12 @@ def _is_rebasebot_synthetic_merge(
         return False
 
     if merge.summary != _synthetic_rebase_merge_message(source.branch, dest.branch):
+        return False
+
+    # RebaseBot creates this synthetic merge locally with its configured git identity.
+    # A real upstream-sync merge can have the same tree shape and summary, so require
+    # bot authorship before treating it as an internal marker.
+    if not _is_commit_authored_by_current_git_user(merge, gitwd):
         return False
 
     upstream_parent = _find_source_parent_commit(parents, gitwd)
@@ -571,6 +586,11 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
             )
             # merge-tree exits 0 for clean merge, 1 for conflicts.
             # Either way the tree SHA is on the first line of stdout.
+            if proc.returncode not in (0, 1):
+                raise RepoException(
+                    f"Failed to determine merge-only delta baseline for merge {sha[:12]}: "
+                    f"git merge-tree exited {proc.returncode}: {proc.stderr.strip() or 'no stderr'}"
+                )
             auto_tree = proc.stdout.strip().split("\n")[0].strip() if proc.stdout.strip() else ""
             if not auto_tree:
                 raise RepoException(

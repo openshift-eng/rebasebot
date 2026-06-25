@@ -1647,7 +1647,7 @@ func main() {
         if remote_name not in [remote.name for remote in dest_repo.remotes]:
             dest_repo.create_remote(remote_name, source.url)
         dest_repo.remotes[remote_name].fetch(source.branch)
-        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.checkout("-b", "manual_upstream_sync_branch")
         try:
             dest_repo.git.merge(f"{remote_name}/{source.branch}", "--no-ff", "--no-commit")
         except git.GitCommandError:
@@ -1655,9 +1655,18 @@ func main() {
         dest_repo.git.checkout("--theirs", "test.go")
         dest_repo.git.add("test.go")
         dest_repo.git.rm("--force", "another_file.go")
-        dest_repo.git.commit("-m", "Manual upstream sync resolved fully to upstream")
+        dest_repo.git.commit("-m", "merge upstream/main into main")
         manual_merge_sha = dest_repo.head.commit.hexsha
         assert dest_repo.head.commit.tree.hexsha == dest_repo.head.commit.parents[1].tree.hexsha
+        assert dest_repo.head.commit.author.email == "dest_author@dest.org"
+
+        dest_repo.git.checkout(dest.branch)
+        dest_repo.git.merge(
+            "manual_upstream_sync_branch",
+            "--no-ff",
+            "-m",
+            "Merge manual upstream sync branch",
+        )
 
         CommitBuilder(source).add_file("qux.txt", "upstream v3\n").commit("fourth upstream commit")
 
@@ -1713,7 +1722,11 @@ func main() {
 
         CommitBuilder(source).add_file("qux.txt", "upstream v3").commit("third upstream commit")
 
-        mocked_subprocess_run.return_value = MagicMock(stdout="", returncode=0, stderr="")
+        mocked_subprocess_run.return_value = MagicMock(
+            stdout=f"{dest_repo.head.commit.tree.hexsha}\nfatal: merge-tree exploded",
+            returncode=128,
+            stderr="fatal: merge-tree exploded",
+        )
 
         second_run_dir = os.path.join(tmpdir, "second_run")
         os.makedirs(second_run_dir)
@@ -1723,8 +1736,8 @@ func main() {
             github_app_wrapper=fake_github_provider,
         )
         assert result is False, (
-            "If merge-only delta detection cannot produce a baseline for an eligible merge, "
-            "the rebase must fail closed instead of warning and continuing."
+            "If merge-tree fatally fails for an otherwise eligible merge, the rebase must fail "
+            "closed even when stdout starts with a tree-looking line."
         )
 
     def test_manual_intervention_warning_logged_on_apply_failure(self, caplog):
