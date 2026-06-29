@@ -404,7 +404,7 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
 
 def _safe_cherry_pick(
     gitwd: git.Repo, sha: str, source_branch: str, conflict_policy: str, commit_description: str
-) -> None:
+) -> bool:
     """
     Cherry-pick a commit with conflict detection based on conflict_policy.
 
@@ -412,7 +412,11 @@ def _safe_cherry_pick(
     For "warn"/"strict" policies: first probes for conflicts without
     -Xtheirs, then cherry-picks with -Xtheirs, then verifies only the
     files that actually conflicted for upstream content loss.
+
+    Returns True when the cherry-pick creates a commit and False when it is skipped as empty.
     """
+    start_head = gitwd.head.commit.hexsha
+
     # Phase 1: probe for conflicts (only for warn/strict)
     conflicted_files = set()
     if conflict_policy != "auto":
@@ -427,12 +431,12 @@ def _safe_cherry_pick(
 
     # If no conflicts were detected, -Xtheirs had no effect — skip check
     if conflict_policy == "auto" or not conflicted_files:
-        return
+        return gitwd.head.commit.hexsha != start_head
 
     # Only verify files that had actual merge conflicts
     lost_content = _check_upstream_content_loss(gitwd, source_branch, conflicted_files)
     if not lost_content:
-        return
+        return gitwd.head.commit.hexsha != start_head
 
     for filename, lost_lines in lost_content:
         logging.warning(
@@ -451,6 +455,8 @@ def _safe_cherry_pick(
             f"-Xtheirs resolved a content conflict by dropping "
             f"upstream additions. Manual resolution is required."
         )
+
+    return gitwd.head.commit.hexsha != start_head
 
 
 def _do_rebase(
@@ -517,21 +523,30 @@ def _do_rebase(
     if allow_bot_squash:
         for key, value in commits_to_squash.items():
             logging.info("Squashing commits for bot: %s: %s", key, value)
+            created_commit_count = 0
+            newest_created_commit = None
             for commit in value:
-                _safe_cherry_pick(
+                if _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit["sha"],
                     source_branch=source.branch,
                     conflict_policy=conflict_policy,
                     commit_description=f"{commit['sha']} - {commit['commit_message']}",
-                )
+                ):
+                    created_commit_count += 1
+                    newest_created_commit = commit
+
+            if newest_created_commit is None:
+                logging.info("Skipping squashed bot commit for %s because all picks were empty.", key)
+                continue
+
             # Capture author before reset makes the cherry-picked commits unreachable.
             last_author = gitwd.head.commit.author
             author_string = f"{last_author.name} <{last_author.email}>"
 
-            gitwd.git.reset("--soft", f"HEAD~{len(value)}")
+            gitwd.git.reset("--soft", f"HEAD~{created_commit_count}")
 
-            newest_bot_commit_message = value[-1]["commit_message"]
+            newest_bot_commit_message = newest_created_commit["commit_message"]
 
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", author_string)
 
