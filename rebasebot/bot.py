@@ -62,6 +62,41 @@ def _synthetic_rebase_merge_message(source_branch: str, dest_branch: str) -> str
     return f"merge upstream/{source_branch} into {dest_branch}"
 
 
+def _merge_tree_write_tree(gitwd: git.Repo, merge_commit: Commit) -> str:
+    """Return the synthetic auto-merge tree SHA for a two-parent merge commit."""
+    parents = list(merge_commit.parents)
+    short_sha = merge_commit.hexsha[:12]
+    if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
+        raise RepoException(f"Failed to determine merge-only delta baseline for merge {short_sha}: expected 2 parents")
+
+    p1, p2 = parents[0].hexsha, parents[1].hexsha
+    try:
+        proc = subprocess.run(
+            ["git", "merge-tree", "--write-tree", p1, p2],
+            capture_output=True,
+            text=True,
+            cwd=gitwd.working_dir,
+        )
+        # merge-tree exits 0 for clean merge, 1 for conflicts.
+        # Either way the tree SHA is on the first line of stdout.
+        if proc.returncode not in (0, 1):
+            raise RepoException(
+                f"Failed to determine merge-only delta baseline for merge {short_sha}: "
+                f"git merge-tree exited {proc.returncode}: {proc.stderr.strip() or 'no stderr'}"
+            )
+        auto_tree = proc.stdout.strip().split("\n")[0].strip() if proc.stdout.strip() else ""
+        if not auto_tree:
+            raise RepoException(
+                f"Failed to determine merge-only delta baseline for merge {short_sha}: "
+                f"git merge-tree produced no tree SHA (exit {proc.returncode})"
+            )
+        return auto_tree
+    except OSError as ex:
+        raise RepoException(
+            f"Failed to determine merge-only delta baseline for merge {short_sha}: {ex}"
+        ) from ex
+
+
 def _message_slack(webhook_url: str, msg: str) -> None:
     """Send a message to Slack via a webhook if one is configured."""
     if webhook_url is None:
@@ -360,7 +395,11 @@ def _identify_downstream_commit_phases(
                     "Phase 1 sanity check failed: commits from the rebase PR range are not downstream commits:\n"
                     f"{extras_text}"
                 )
-            logging.info("Phase 1 - rebase PR carries (%d commits):\n%s", len(phase1_lines), "\n".join(phase1_lines))
+            logging.info(
+                "Phase 1 - rebase PR carries (%d commits):\n%s",
+                len(phase1_lines),
+                "\n".join(phase1_lines),
+            )
         else:
             logging.info("Could not find rebase PR merge on dest, skipping phase 1")
 
@@ -576,31 +615,7 @@ def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubB
             continue
 
         # Compute auto-merge tree baseline via git merge-tree --write-tree.
-        p1, p2 = parents[0].hexsha, parents[1].hexsha
-        try:
-            proc = subprocess.run(
-                ["git", "merge-tree", "--write-tree", p1, p2],
-                capture_output=True,
-                text=True,
-                cwd=gitwd.working_dir,
-            )
-            # merge-tree exits 0 for clean merge, 1 for conflicts.
-            # Either way the tree SHA is on the first line of stdout.
-            if proc.returncode not in (0, 1):
-                raise RepoException(
-                    f"Failed to determine merge-only delta baseline for merge {sha[:12]}: "
-                    f"git merge-tree exited {proc.returncode}: {proc.stderr.strip() or 'no stderr'}"
-                )
-            auto_tree = proc.stdout.strip().split("\n")[0].strip() if proc.stdout.strip() else ""
-            if not auto_tree:
-                raise RepoException(
-                    f"Failed to determine merge-only delta baseline for merge {sha[:12]}: "
-                    f"git merge-tree produced no tree SHA (exit {proc.returncode})"
-                )
-        except OSError as ex:
-            raise RepoException(
-                f"Failed to determine merge-only delta baseline for merge {sha[:12]}: {ex}"
-            ) from ex
+        auto_tree = _merge_tree_write_tree(gitwd, merge)
 
         if auto_tree == merge.tree.hexsha:
             logging.info("No merge-only delta in merge %s", sha[:12])
@@ -659,12 +674,37 @@ def _apply_merge_only_delta(gitwd: git.Repo, merge_commit: Commit, diff_output: 
             added_or_modified.append(path)
 
     # Compare full tree entries so mode-only and other non-text changes are not mistaken for no-ops.
+    added_or_modified = list(dict.fromkeys(added_or_modified))
+    deleted = list(dict.fromkeys(deleted))
     affected_paths = list(dict.fromkeys([*added_or_modified, *deleted]))
     has_change = any(_tree_entry_for_path(gitwd, "HEAD", path) != _tree_entry_for_path(gitwd, sha, path) for path in affected_paths)
 
     if not has_change:
         logging.info("Merge-only delta from %s is a no-op after replay; skipping", short_sha)
         return
+
+    baseline_tree = _merge_tree_write_tree(gitwd, merge_commit)
+    parent_refs = [parent.hexsha for parent in merge_commit.parents]
+    conflicting_paths = []
+    for path in affected_paths:
+        head_entry = _tree_entry_for_path(gitwd, "HEAD", path)
+        baseline_entry = _tree_entry_for_path(gitwd, baseline_tree, path)
+        target_entry = _tree_entry_for_path(gitwd, sha, path)
+        parent_entries = tuple(_tree_entry_for_path(gitwd, parent_ref, path) for parent_ref in parent_refs)
+        if head_entry not in (baseline_entry, target_entry, *parent_entries):
+            conflicting_paths.append(path)
+
+    if conflicting_paths:
+        conflicted = ", ".join(conflicting_paths)
+        logging.warning(
+            "Cannot apply merge-only delta from merge %s cleanly; paths diverged from replay baseline: %s",
+            short_sha,
+            conflicted,
+        )
+        raise RepoException(
+            f"Cannot apply merge-only delta from merge {short_sha} cleanly; "
+            f"rebased paths diverged from merge baseline: {conflicted}"
+        )
 
     # Restore added/modified paths to their state in the merge commit's tree.
     if added_or_modified:
@@ -682,9 +722,16 @@ def _apply_merge_only_delta(gitwd: git.Repo, merge_commit: Commit, diff_output: 
     # Remove paths that were deleted in the merge commit relative to the auto-merge baseline.
     for path in deleted:
         try:
-            gitwd.git.rm("--force", path)
-        except git.GitCommandError:
-            pass  # Already absent; ignore.
+            gitwd.git.rm("--force", "--ignore-unmatch", "--", path)
+        except git.GitCommandError as ex:
+            logging.warning(
+                "Cannot remove merge-only delta path %s from merge %s cleanly; manual intervention required",
+                path,
+                short_sha,
+            )
+            raise RepoException(
+                f"Failed to remove merge-only delta path {path} from merge {short_sha}: {ex}"
+            ) from ex
 
     # Verify there are actually staged changes (guard against no-op after checkout).
     try:

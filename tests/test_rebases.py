@@ -940,33 +940,7 @@ fi"""
         first_run_dir = os.path.join(tmpdir, "first_run")
         os.makedirs(first_run_dir)
 
-        def _make_args(src, rbs, dst, wdir):
-            a = MagicMock()
-            a.source = src
-            a.source_repo = None
-            a.dest = dst
-            a.rebase = rbs
-            a.working_dir = wdir
-            a.git_username = "test_rebasebot"
-            a.git_email = "test@rebasebot.ocp"
-            a.tag_policy = "soft"
-            a.bot_emails = []
-            a.exclude_commits = []
-            a.update_go_modules = False
-            a.conflict_policy = "auto"
-            a.ignore_manual_label = False
-            a.dry_run = True
-            a.always_run_hooks = False
-            a.title_prefix = ""
-            a.pre_rebase_hook = None
-            a.post_rebase_hook = None
-            a.pre_carry_commit_hook = None
-            a.pre_push_rebase_branch_hook = None
-            a.pre_create_pr_hook = None
-            a.source_ref_hook = None
-            return a
-
-        args1 = _make_args(source, rebase, dest, first_run_dir)
+        args1 = _make_rebase_args(source, rebase, dest, first_run_dir)
         result1 = cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
         assert result1, "First rebase run should succeed"
 
@@ -1006,7 +980,7 @@ fi"""
         # ── Second dry-run rebase (the "later run") ─────────────────────────────
         second_run_dir = os.path.join(tmpdir, "second_run")
         os.makedirs(second_run_dir)
-        args2 = _make_args(source, rebase, dest, second_run_dir)
+        args2 = _make_rebase_args(source, rebase, dest, second_run_dir)
         result2 = cli.rebasebot_run(args2, slack_webhook=None, github_app_wrapper=fake_github_provider)
         assert result2, "Second (later) rebase run should succeed"
 
@@ -1072,29 +1046,7 @@ fi"""
         legacy_merge_sha = dest_repo.head.commit.hexsha
 
         # Run the first dry-run rebase (no prior rebasebot marker on dest).
-        args = MagicMock()
-        args.source = source
-        args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
-        args.working_dir = tmpdir
-        args.git_username = "test_rebasebot"
-        args.git_email = "test@rebasebot.ocp"
-        args.tag_policy = "soft"
-        args.bot_emails = []
-        args.exclude_commits = []
-        args.update_go_modules = False
-        args.conflict_policy = "auto"
-        args.ignore_manual_label = False
-        args.dry_run = True
-        args.always_run_hooks = False
-        args.title_prefix = ""
-        args.pre_rebase_hook = None
-        args.post_rebase_hook = None
-        args.pre_carry_commit_hook = None
-        args.pre_push_rebase_branch_hook = None
-        args.pre_create_pr_hook = None
-        args.source_ref_hook = None
+        args = _make_rebase_args(source, rebase, dest, tmpdir)
 
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
         assert result, "First-run rebase should succeed"
@@ -1135,33 +1087,7 @@ fi"""
         first_run_dir = os.path.join(tmpdir, "first_run")
         os.makedirs(first_run_dir)
 
-        def _make_args(src, rbs, dst, wdir):
-            a = MagicMock()
-            a.source = src
-            a.source_repo = None
-            a.dest = dst
-            a.rebase = rbs
-            a.working_dir = wdir
-            a.git_username = "test_rebasebot"
-            a.git_email = "test@rebasebot.ocp"
-            a.tag_policy = "soft"
-            a.bot_emails = []
-            a.exclude_commits = []
-            a.update_go_modules = False
-            a.conflict_policy = "auto"
-            a.ignore_manual_label = False
-            a.dry_run = True
-            a.always_run_hooks = False
-            a.title_prefix = ""
-            a.pre_rebase_hook = None
-            a.post_rebase_hook = None
-            a.pre_carry_commit_hook = None
-            a.pre_push_rebase_branch_hook = None
-            a.pre_create_pr_hook = None
-            a.source_ref_hook = None
-            return a
-
-        args1 = _make_args(source, rebase, dest, first_run_dir)
+        args1 = _make_rebase_args(source, rebase, dest, first_run_dir)
         assert cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
 
         dest_repo = Repo(dest.url)
@@ -1197,7 +1123,7 @@ fi"""
 
         second_run_dir = os.path.join(tmpdir, "second_run")
         os.makedirs(second_run_dir)
-        args2 = _make_args(source, rebase, dest, second_run_dir)
+        args2 = _make_rebase_args(source, rebase, dest, second_run_dir)
         assert cli.rebasebot_run(args2, slack_webhook=None, github_app_wrapper=fake_github_provider)
 
         second_working = Repo(second_run_dir)
@@ -1430,14 +1356,54 @@ fi"""
         )
         assert os.path.exists(os.path.join(second_run_dir, "merge_resolution.txt"))
 
-    def test_recovery_requires_manual_intervention_when_synthetic_carry_cannot_apply_cleanly(self):
+    @patch("rebasebot.bot.subprocess.run")
+    def test_recovery_requires_manual_intervention_when_rebased_head_diverged_from_merge_baseline(
+        self, merge_tree_run
+    ):
+        merge_tree_run.return_value = MagicMock(returncode=0, stdout="baseline-tree\n", stderr="")
+
         gitwd = MagicMock()
         merge_commit = MagicMock()
         merge_commit.hexsha = "1234567890abcdef1234567890abcdef12345678"
+        merge_commit.parents = [MagicMock(hexsha="parent-one"), MagicMock(hexsha="parent-two")]
+
+        gitwd.git.ls_tree.side_effect = [
+            "100644 blob headbead\tmerge_resolution.txt",
+            "100644 blob target123\tmerge_resolution.txt",
+            "100644 blob headbead\tmerge_resolution.txt",
+            "100644 blob basecafe\tmerge_resolution.txt",
+            "100644 blob target123\tmerge_resolution.txt",
+            "100644 blob parent111\tmerge_resolution.txt",
+            "100644 blob parent222\tmerge_resolution.txt",
+        ]
+
+        with pytest.raises(RepoException, match="Cannot apply merge-only delta from merge 1234567890ab cleanly"):
+            _apply_merge_only_delta(
+                gitwd,
+                merge_commit,
+                ":000000 100644 0000000 1111111 A\tmerge_resolution.txt",
+            )
+
+        gitwd.git.checkout.assert_not_called()
+        gitwd.git.rm.assert_not_called()
+
+    @patch("rebasebot.bot.subprocess.run")
+    def test_recovery_requires_manual_intervention_when_synthetic_carry_cannot_apply_cleanly(self, merge_tree_run):
+        merge_tree_run.return_value = MagicMock(returncode=0, stdout="baseline-tree\n", stderr="")
+
+        gitwd = MagicMock()
+        merge_commit = MagicMock()
+        merge_commit.hexsha = "1234567890abcdef1234567890abcdef12345678"
+        merge_commit.parents = [MagicMock(hexsha="parent-one"), MagicMock(hexsha="parent-two")]
 
         gitwd.git.ls_tree.side_effect = [
             "100644 blob deadbeef\tmerge_resolution.txt",
             "100644 blob feedface\tmerge_resolution.txt",
+            "100644 blob deadbeef\tmerge_resolution.txt",
+            "100644 blob deadbeef\tmerge_resolution.txt",
+            "100644 blob feedface\tmerge_resolution.txt",
+            "100644 blob deadbeef\tmerge_resolution.txt",
+            "100644 blob parent222\tmerge_resolution.txt",
         ]
         gitwd.git.checkout.side_effect = git.GitCommandError(
             "checkout",
@@ -1451,6 +1417,35 @@ fi"""
                 merge_commit,
                 ":000000 100644 0000000 1111111 A\tmerge_resolution.txt",
             )
+
+    @patch("rebasebot.bot.subprocess.run")
+    def test_deleted_merge_only_paths_use_pathspec_separator_and_raise_on_rm_failures(self, merge_tree_run):
+        merge_tree_run.return_value = MagicMock(returncode=0, stdout="baseline-tree\n", stderr="")
+
+        gitwd = MagicMock()
+        merge_commit = MagicMock()
+        merge_commit.hexsha = "1234567890abcdef1234567890abcdef12345678"
+        merge_commit.parents = [MagicMock(hexsha="parent-one"), MagicMock(hexsha="parent-two")]
+
+        gitwd.git.ls_tree.side_effect = [
+            "100644 blob deadbeef\t-dash-path",
+            "",
+            "100644 blob deadbeef\t-dash-path",
+            "100644 blob deadbeef\t-dash-path",
+            "",
+            "100644 blob deadbeef\t-dash-path",
+            "",
+        ]
+        gitwd.git.rm.side_effect = git.GitCommandError("rm", 1, stderr="fatal: permission denied")
+
+        with pytest.raises(RepoException, match="Failed to remove merge-only delta path -dash-path from merge 1234567890ab"):
+            _apply_merge_only_delta(
+                gitwd,
+                merge_commit,
+                ":100644 000000 deadbeef 0000000 D\t-dash-path",
+            )
+
+        gitwd.git.rm.assert_called_once_with("--force", "--ignore-unmatch", "--", "-dash-path")
 
     def test_detection_and_recovery_logs_emitted(
         self, init_test_repositories, fake_github_provider, tmpdir, caplog
@@ -1740,7 +1735,8 @@ func main() {
             "closed even when stdout starts with a tree-looking line."
         )
 
-    def test_manual_intervention_warning_logged_on_apply_failure(self, caplog):
+    @patch("rebasebot.bot.subprocess.run")
+    def test_manual_intervention_warning_logged_on_apply_failure(self, merge_tree_run, caplog):
         """
         Operator visibility: a WARNING log must be emitted specifically for the
         merge-only delta recovery failure case before the RepoException is raised.
@@ -1749,13 +1745,20 @@ func main() {
         the precise merge that required manual intervention without needing to parse
         the generic outer error.
         """
+        merge_tree_run.return_value = MagicMock(returncode=0, stdout="baseline-tree\n", stderr="")
         gitwd = MagicMock()
         merge_commit = MagicMock()
         merge_commit.hexsha = "abcdef012345abcdef012345abcdef0123456789"
+        merge_commit.parents = [MagicMock(hexsha="parent-one"), MagicMock(hexsha="parent-two")]
 
         gitwd.git.ls_tree.side_effect = [
             "100644 blob deadbeef\tconflict_file.txt",
             "100644 blob feedface\tconflict_file.txt",
+            "100644 blob deadbeef\tconflict_file.txt",
+            "100644 blob deadbeef\tconflict_file.txt",
+            "100644 blob feedface\tconflict_file.txt",
+            "100644 blob deadbeef\tconflict_file.txt",
+            "100644 blob parent222\tconflict_file.txt",
         ]
         gitwd.git.checkout.side_effect = git.GitCommandError(
             "checkout",
