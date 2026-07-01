@@ -183,6 +183,19 @@ def _in_excluded_commits(sha: str, exclude_commits: list) -> bool:
     return False
 
 
+def _normalize_bot_email(email: str) -> str:
+    """Normalize GitHub noreply addresses without collapsing real plus-addresses."""
+    local, sep, domain = email.partition("@")
+    if not sep:
+        return email
+
+    prefix, plus, rest = local.partition("+")
+    if plus and prefix.isdigit() and rest:
+        return f"{rest}@{domain}"
+
+    return email
+
+
 def _is_recovered_merge_only_carry(commit_message: str) -> bool:
     return commit_message.startswith(_RECOVERED_MERGE_ONLY_CARRY_PREFIX)
 
@@ -503,7 +516,7 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
 
 def _safe_cherry_pick(
     gitwd: git.Repo, sha: str, source_branch: str, conflict_policy: str, commit_description: str
-) -> None:
+) -> bool:
     """
     Cherry-pick a commit with conflict detection based on conflict_policy.
 
@@ -511,7 +524,11 @@ def _safe_cherry_pick(
     For "warn"/"strict" policies: first probes for conflicts without
     -Xtheirs, then cherry-picks with -Xtheirs, then verifies only the
     files that actually conflicted for upstream content loss.
+
+    Returns True when the cherry-pick creates a commit and False when it is skipped as empty.
     """
+    start_head = gitwd.head.commit.hexsha
+
     # Phase 1: probe for conflicts (only for warn/strict)
     conflicted_files = set()
     if conflict_policy != "auto":
@@ -526,12 +543,12 @@ def _safe_cherry_pick(
 
     # If no conflicts were detected, -Xtheirs had no effect — skip check
     if conflict_policy == "auto" or not conflicted_files:
-        return
+        return gitwd.head.commit.hexsha != start_head
 
     # Only verify files that had actual merge conflicts
     lost_content = _check_upstream_content_loss(gitwd, source_branch, conflicted_files)
     if not lost_content:
-        return
+        return gitwd.head.commit.hexsha != start_head
 
     for filename, lost_lines in lost_content:
         logging.warning(
@@ -550,6 +567,8 @@ def _safe_cherry_pick(
             f"-Xtheirs resolved a content conflict by dropping "
             f"upstream additions. Manual resolution is required."
         )
+
+    return gitwd.head.commit.hexsha != start_head
 
 
 def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> list:
@@ -767,6 +786,7 @@ def _do_rebase(
     logging.info("Performing rebase")
 
     allow_bot_squash = len(bot_emails) > 0
+    normalized_bot_emails = {_normalize_bot_email(email) for email in bot_emails}
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
@@ -798,11 +818,8 @@ def _do_rebase(
             return
 
         if allow_bot_squash and not _is_recovered_merge_only_carry(commit_message):
-            # There is sometimes a prefix with number and a following + sign
-            # We have to get rid of that part to make sure to get
-            # only the email of the bot.
-            email = committer_email.split("+")[-1]
-            if email in bot_emails:
+            email = _normalize_bot_email(committer_email)
+            if email in normalized_bot_emails:
                 commits_to_squash[email].append({"sha": sha, "commit_message": commit_message})
                 return
 
@@ -848,19 +865,32 @@ def _do_rebase(
     if allow_bot_squash:
         for key, value in commits_to_squash.items():
             logging.info("Squashing commits for bot: %s: %s", key, value)
+            created_commit_count = 0
+            newest_created_commit = None
             for commit in value:
-                _safe_cherry_pick(
+                if _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit["sha"],
                     source_branch=source.branch,
                     conflict_policy=conflict_policy,
                     commit_description=f"{commit['sha']} - {commit['commit_message']}",
-                )
-            gitwd.git.reset("--soft", f"HEAD~{len(value)}")
+                ):
+                    created_commit_count += 1
+                    newest_created_commit = commit
 
-            newest_bot_commit_message = value[-1]["commit_message"]
+            if newest_created_commit is None:
+                logging.info("Skipping squashed bot commit for %s because all picks were empty.", key)
+                continue
 
-            gitwd.git.commit("-m", newest_bot_commit_message, "--author", key)
+            # Capture author before reset makes the cherry-picked commits unreachable.
+            last_author = gitwd.head.commit.author
+            author_string = f"{last_author.name} <{last_author.email}>"
+
+            gitwd.git.reset("--soft", f"HEAD~{created_commit_count}")
+
+            newest_bot_commit_message = newest_created_commit["commit_message"]
+
+            gitwd.git.commit("-m", newest_bot_commit_message, "--author", author_string)
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
     logging.info("Preparing rebase branch")
 
