@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 from collections import defaultdict
+from collections.abc import Callable
 
 import git
 import git.compat
@@ -949,7 +950,7 @@ def _report_result(  # pylint: disable=R0917
     dest_url: str,
     slack_webhook: str,
     *,
-    notify_slack=None,
+    notify_slack: Callable[[str], None] | None = None,
 ) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
     message = None

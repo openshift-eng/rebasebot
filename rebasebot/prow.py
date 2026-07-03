@@ -30,6 +30,7 @@ class ProwJobContext:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> ProwJobContext:
+        """Build a context from standard Prow-injected environment variables."""
         if env is None:
             env = os.environ
         return cls(
@@ -40,6 +41,7 @@ class ProwJobContext:
 
     @property
     def is_rehearsal(self) -> bool:
+        """Return True when this run is a Prow rehearsal job rather than a real periodic."""
         if self.job_name is None and self.job_type is None:
             return False
         if self.job_name is not None and self.job_name.startswith("rehearse-"):
@@ -50,6 +52,7 @@ class ProwJobContext:
 
     @property
     def log_url(self) -> str | None:
+        """Return the Spyglass log URL for this Prow job, if name and build ID are known."""
         if self.job_name is not None and self.build_id is not None:
             return f"https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/{self.job_name}/{self.build_id}"
         return None
