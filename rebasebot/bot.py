@@ -438,12 +438,6 @@ def _identify_downstream_commit_phases(
     return phase1_lines, phase2_lines, cutoff_commits
 
 
-def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> str:
-    phase1_lines, phase2_lines, _ = _identify_downstream_commit_phases(gitwd, source, dest)
-    downstream_commits = "\n".join([*phase1_lines, *phase2_lines])
-    return downstream_commits
-
-
 def _detect_conflicting_files(gitwd: git.Repo, sha: str) -> set:
     """
     Probe a cherry-pick without -Xtheirs to detect which files conflict.

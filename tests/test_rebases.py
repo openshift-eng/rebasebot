@@ -1074,14 +1074,7 @@ fi"""
         assert result1, "First rebase run should succeed"
 
         # ── Simulate merging the rebase PR into dest (--no-ff) ─────────────────
-        dest_repo = Repo(dest.url)
-        dest_repo.git.checkout(dest.branch)
-
-        remote_name = "first_run_remote"
-        if remote_name not in [r.name for r in dest_repo.remotes]:
-            dest_repo.create_remote(remote_name, first_run_dir)
-        dest_repo.remotes[remote_name].fetch("rebase")
-        dest_repo.git.merge(f"{remote_name}/rebase", "--no-ff", "-m", "Merge rebase PR into main")
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "first_run_remote")
 
         # ── Create a feature branch and merge it with merge-only content ────────
         dest_repo.git.checkout("-b", "feature_branch")
@@ -1219,14 +1212,7 @@ fi"""
         args1 = _make_rebase_args(source, rebase, dest, first_run_dir)
         assert cli.rebasebot_run(args1, slack_webhook=None, github_app_wrapper=fake_github_provider)
 
-        dest_repo = Repo(dest.url)
-        dest_repo.git.checkout(dest.branch)
-
-        remote_name = "first_run_remote"
-        if remote_name not in [r.name for r in dest_repo.remotes]:
-            dest_repo.create_remote(remote_name, first_run_dir)
-        dest_repo.remotes[remote_name].fetch("rebase")
-        dest_repo.git.merge(f"{remote_name}/rebase", "--no-ff", "-m", "Merge rebase PR into main")
+        dest_repo = _merge_rebase_branch_into_dest(dest, first_run_dir, "first_run_remote")
 
         dest_repo.git.checkout("-b", "feature_branch")
         feature_file_path = os.path.join(dest.url, "feature.txt")
