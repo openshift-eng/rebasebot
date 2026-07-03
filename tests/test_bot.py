@@ -20,6 +20,7 @@ from rebasebot import lifecycle_hooks
 from rebasebot.bot import (
     PullRequestUpdateException,
     _add_to_rebase,
+    _build_slack_blocks,
     _is_pr_available,
     _is_pr_required,
     _report_result,
@@ -267,12 +268,45 @@ class TestIsPrRequired:
         assert _is_pr_required(gitwd, rebase, dest) is True
 
 
+class TestBuildSlackBlocks:
+    @pytest.mark.parametrize(
+        "message, emoji, log_url, expected_block_count",
+        [
+            ("All good", "✅", None, 1),
+            ("Something broke", "❌", None, 1),
+            ("Please help", "🖐️", None, 1),
+            (
+                "All good",
+                "✅",
+                "https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/job/123",
+                2,
+            ),
+        ],
+    )
+    def test_build_slack_blocks(self, message, emoji, log_url, expected_block_count):
+        blocks = _build_slack_blocks(message, emoji, log_url)
+
+        assert len(blocks) == expected_block_count
+        assert blocks[0]["type"] == "section"
+        assert blocks[0]["text"]["type"] == "mrkdwn"
+        assert blocks[0]["text"]["text"] == f"{emoji} {message}"
+
+        if log_url is not None:
+            assert blocks[1]["text"]["text"] == f"<{log_url}|View job log>"
+
+    def test_exception_text_in_fenced_code_block(self):
+        message = "I got an error:\n```boom```"
+        blocks = _build_slack_blocks(message, "❌", None)
+
+        assert blocks[0]["text"]["text"] == f"❌ {message}"
+
+
 class TestReportResult:
     dest_url = "https://github.com/user/repo"
     slack_webhook = "https://hooks.slack.com/services/..."
 
     @pytest.mark.parametrize(
-        "needs_rebase, pr_required, pr_available, pr_url, slack_message",
+        "needs_rebase, pr_required, pr_available, pr_url, slack_message, log_url",
         [
             # Cases when needs_rebase is True
             (
@@ -281,6 +315,7 @@ class TestReportResult:
                 False,
                 "https://github.com/user/repo/pull/123",
                 "I created a new rebase PR: https://github.com/user/repo/pull/123",
+                None,
             ),
             (
                 True,
@@ -288,9 +323,17 @@ class TestReportResult:
                 True,
                 "https://github.com/user/repo/pull/456",
                 "I updated existing rebase PR: https://github.com/user/repo/pull/456",
+                None,
             ),
             # Rebase performed but no changes between rebase and dest (no PR needed)
-            (True, False, False, None, f"Destination repo {dest_url} already contains the latest changes"),
+            (
+                True,
+                False,
+                False,
+                None,
+                f"Destination repo {dest_url} already contains the latest changes",
+                None,
+            ),
             # Cases when needs_rebase is False
             (
                 False,
@@ -298,8 +341,16 @@ class TestReportResult:
                 True,
                 "https://github.com/user/repo/pull/100",
                 "PR https://github.com/user/repo/pull/100 already contains the latest changes",
+                None,
             ),
-            (False, False, False, "", f"Destination repo {dest_url} already contains the latest changes"),
+            (
+                False,
+                False,
+                False,
+                "",
+                f"Destination repo {dest_url} already contains the latest changes",
+                None,
+            ),
             # Cases when hooks made changes
             (
                 False,
@@ -307,6 +358,7 @@ class TestReportResult:
                 False,
                 "https://github.com/user/repo/pull/200",
                 "I created a new rebase PR (hooks enabled): https://github.com/user/repo/pull/200",
+                None,
             ),
             (
                 False,
@@ -314,6 +366,16 @@ class TestReportResult:
                 True,
                 "https://github.com/user/repo/pull/201",
                 "I updated existing rebase PR (hooks enabled): https://github.com/user/repo/pull/201",
+                None,
+            ),
+            # Success message with a Prow log URL
+            (
+                True,
+                True,
+                False,
+                "https://github.com/user/repo/pull/999",
+                "I created a new rebase PR: https://github.com/user/repo/pull/999",
+                "https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/job/999",
             ),
         ],
     )
@@ -328,11 +390,39 @@ class TestReportResult:
         pr_available,
         pr_url,
         slack_message,
+        log_url,
     ):
-        _report_result(needs_rebase, pr_required, pr_available, pr_url, self.dest_url, self.slack_webhook)
+        _report_result(
+            needs_rebase,
+            pr_required,
+            pr_available,
+            pr_url,
+            self.dest_url,
+            self.slack_webhook,
+            log_url=log_url,
+        )
 
         mocked_logging_info.assert_called_once_with(slack_message)
-        mocked_message_slack.assert_called_once_with(self.slack_webhook, slack_message)
+        expected_blocks = _build_slack_blocks(slack_message, "✅", log_url)
+        mocked_message_slack.assert_called_once_with(self.slack_webhook, slack_message, expected_blocks)
+
+    @patch("logging.info")
+    def test_report_result_notify_slack_callback(self, mocked_logging_info):
+        slack_message = "I created a new rebase PR: https://github.com/user/repo/pull/123"
+        notify_slack = MagicMock()
+
+        _report_result(
+            True,
+            True,
+            False,
+            "https://github.com/user/repo/pull/123",
+            self.dest_url,
+            self.slack_webhook,
+            notify_slack=notify_slack,
+        )
+
+        mocked_logging_info.assert_called_once_with(slack_message)
+        notify_slack.assert_called_once_with(slack_message, "✅")
 
 
 class TestUpdatePrTitle:

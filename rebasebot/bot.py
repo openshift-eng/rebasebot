@@ -58,11 +58,35 @@ _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
 
 
-def _message_slack(webhook_url: str, msg: str) -> None:
+def _build_slack_blocks(message: str, emoji: str, log_url: str | None) -> list[dict]:
+    """Build a Slack Block Kit blocks array for a rebasebot alert."""
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{emoji} {message}",
+            },
+        },
+    ]
+    if log_url is not None:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"<{log_url}|View job log>",
+                },
+            },
+        )
+    return blocks
+
+
+def _message_slack(webhook_url: str, msg: str, blocks: list[dict]) -> None:
     """Send a message to Slack via a webhook if one is configured."""
     if webhook_url is None:
         return
-    requests.post(webhook_url, json={"text": msg}, timeout=5)
+    requests.post(webhook_url, json={"text": msg, "blocks": blocks}, timeout=5)
 
 
 def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> bool:
@@ -950,7 +974,8 @@ def _report_result(  # pylint: disable=R0917
     dest_url: str,
     slack_webhook: str,
     *,
-    notify_slack: Callable[[str], None] | None = None,
+    notify_slack: Callable[[str, str], None] | None = None,
+    log_url: str | None = None,
 ) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
     message = None
@@ -987,9 +1012,10 @@ def _report_result(  # pylint: disable=R0917
     if message is not None:
         logging.info(message)
         if notify_slack is not None:
-            notify_slack(message)
+            notify_slack(message, "✅")
         else:
-            _message_slack(slack_webhook, message)
+            blocks = _build_slack_blocks(message, "✅", log_url)
+            _message_slack(slack_webhook, message, blocks)
 
 
 def run(
@@ -1018,10 +1044,11 @@ def run(
     if prow_job is None:
         prow_job = ProwJobContext.from_env()
 
-    def notify_slack(msg: str) -> None:
+    def notify_slack(msg: str, emoji: str) -> None:
         if prow_job.is_rehearsal:
             return
-        _message_slack(slack_webhook, msg)
+        blocks = _build_slack_blocks(msg, emoji, prow_job.log_url)
+        _message_slack(slack_webhook, msg, blocks)
 
     gh_app = github_app_provider.github_app
     gh_cloner_app = github_app_provider.github_cloner_app
@@ -1045,12 +1072,13 @@ def run(
                 )
                 notify_slack(
                     f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting",
+                    "🖐️",
                 )
                 return True
 
     except Exception as ex:
         logging.exception("error fetching repo information from GitHub")
-        notify_slack(f"I got an error fetching repo information from GitHub: {ex}")
+        notify_slack(f"I got an error fetching repo information from GitHub:\n```{ex}```", "❌")
         return False
 
     try:
@@ -1080,7 +1108,8 @@ def run(
         )
         notify_slack(
             f"I got an error initializing the git directory with remotes: source repo {source.url}, "
-            f"destination repo {dest.url}, rebase repo {rebase.url}: {ex}",
+            f"destination repo {dest.url}, rebase repo {rebase.url}:\n```{ex}```",
+            "❌",
         )
         return False
 
@@ -1088,7 +1117,7 @@ def run(
         hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
     except Exception as ex:
         logging.exception("error fetching lifecycle hook scripts")
-        notify_slack(f"Failed to fetch lifecycle hook scripts: {ex}")
+        notify_slack(f"Failed to fetch lifecycle hook scripts:\n```{ex}```", "❌")
         return False
 
     try:
@@ -1131,8 +1160,9 @@ def run(
         notify_slack(
             f"Manual intervention is needed to rebase "
             f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
+            f"into {dest.ns}/{dest.name}:{dest.branch}:\n"
+            f"```{ex}```",
+            "🖐️",
         )
         return False
     except Exception as ex:
@@ -1143,8 +1173,9 @@ def run(
         notify_slack(
             f"I got an exception trying to rebase "
             f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
+            f"into {dest.ns}/{dest.name}:{dest.branch}:\n"
+            f"```{ex}```",
+            "❌",
         )
         return False
 
@@ -1171,14 +1202,16 @@ def run(
             notify_slack(
                 f"Manual intervention is needed to rebase "
                 f"{source.url}:{source.branch} "
-                f"into {dest.ns}/{dest.name}:{dest.branch}: "
-                f"{ex}",
+                f"into {dest.ns}/{dest.name}:{dest.branch}:\n"
+                f"```{ex}```",
+                "🖐️",
             )
             return False
         except Exception as ex:
             logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
             notify_slack(
-                f"I got an exception pushing to {rebase.ns}/{rebase.name}:{rebase.branch}: {ex}",
+                f"I got an exception pushing to {rebase.ns}/{rebase.name}:{rebase.branch}:\n```{ex}```",
+                "❌",
             )
             return False
 
@@ -1189,7 +1222,8 @@ def run(
         except Exception as ex:
             logging.exception(f"error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}")
             notify_slack(
-                f"I got an error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}",
+                f"I got an error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}:\n```{ex}```",
+                "❌",
             )
             return False
 
@@ -1217,18 +1251,22 @@ def run(
         notify_slack(
             f"Manual intervention is needed to rebase "
             f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
+            f"into {dest.ns}/{dest.name}:{dest.branch}:\n"
+            f"```{ex}```",
+            "🖐️",
         )
         return False
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
-        notify_slack(f"Failed to create a pull request: {ex}\n Response: {ex.response.text}")
+        notify_slack(
+            f"Failed to create a pull request: {ex}\nResponse:\n```{ex.response.text}```",
+            "❌",
+        )
 
         return False
     except Exception as ex:
         logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}")
-        notify_slack(f"I got an error creating a rebase PR in {dest.ns}/{dest.name}: {ex}")
+        notify_slack(f"I got an error creating a rebase PR in {dest.ns}/{dest.name}:\n```{ex}```", "❌")
 
         return False
 

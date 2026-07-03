@@ -9,6 +9,7 @@ from git import Repo
 
 from rebasebot import cli
 from rebasebot.bot import (
+    _build_slack_blocks,
     _init_working_dir,
     _needs_rebase,
     _prepare_rebase_branch,
@@ -474,6 +475,8 @@ class TestRebases:
 
         assert mocked_message_slack.call_args.args[0] == "test://webhook"
         assert mocked_message_slack.call_args.args[1].startswith("I created a new rebase PR:")
+        blocks = mocked_message_slack.call_args.args[2]
+        assert blocks[0]["text"]["text"].startswith("✅ I created a new rebase PR:")
 
         assert (
             log_graph
@@ -533,9 +536,9 @@ class TestRebases:
         args.ignore_manual_label = False
         args.dry_run = False
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
-        mocked_message_slack.assert_called_once_with(
-            None, f"Repo {dest.clone_url} has PR {pr.html_url} with 'rebase/manual' label, aborting"
-        )
+        expected_message = f"Repo {dest.clone_url} has PR {pr.html_url} with 'rebase/manual' label, aborting"
+        expected_blocks = _build_slack_blocks(expected_message, "🖐️", None)
+        mocked_message_slack.assert_called_once_with(None, expected_message, expected_blocks)
 
         assert result
 
