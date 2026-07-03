@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 from github import Auth, Github, GithubIntegration, UnknownObjectException
 
 logger = logging.getLogger()
-GITHUB_BRANCH_PATTERN = re.compile(r"^(?P<organization>[^/]+)/(?P<name>[^:]+):(?P<branch>.*)$")
+GITHUB_BRANCH_PATTERN = re.compile(r"^(?P<organization>[^/:]+)/(?P<name>[^/:]+):(?P<branch>[^:]+)$")
 
 
 @dataclass

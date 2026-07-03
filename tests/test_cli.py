@@ -101,6 +101,8 @@ class TestCliArgParser:
             "/kubernetes/autoscaler:master",
             "fooo",
             "asdasdasdqwe/asdasd\\asdsadasd",
+            "kubernetes/auto/scaler:master",
+            "kubernetes/autoscaler:",
         ),
     )
     @pytest.mark.parametrize("arg", ["source", "dest", "rebase"])
