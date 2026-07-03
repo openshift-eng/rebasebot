@@ -20,7 +20,8 @@ import logging
 from unittest.mock import MagicMock, patch
 
 from rebasebot import cli
-from rebasebot.bot import _build_pr_body, _init_working_dir, _prepare_rebase_branch, _safe_cherry_pick
+from rebasebot.bot import _init_working_dir, _prepare_rebase_branch, _safe_cherry_pick
+from rebasebot.pr_body import build_pr_body
 from rebasebot.prow import ProwJobContext
 
 from .conftest import CommitBuilder
@@ -239,7 +240,7 @@ class TestConflictPolicy:
         assert len(summary.content_loss_warnings) == 1
         assert summary.content_loss_warnings[0].file == "test.go"
         assert any("ebsKmsKeyId" in line for line in summary.content_loss_warnings[0].lost_lines)
-        pr_body = _build_pr_body(summary, source, dest, ProwJobContext.from_env())
+        pr_body = build_pr_body(summary, source, dest, ProwJobContext.from_env())
         assert "## ⚠️ Possible upstream content loss" in pr_body
         assert "<details>" in pr_body
         assert "<summary>" in pr_body
