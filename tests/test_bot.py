@@ -31,7 +31,7 @@ from rebasebot.bot import (
 )
 from rebasebot.github import GitHubBranch
 from rebasebot.prow import ProwJobContext
-from rebasebot.rebase_summary import RebaseSummary
+from rebasebot.rebase_summary import DroppedCommit, RebaseSummary
 
 from .conftest import CommitBuilder
 
@@ -590,6 +590,65 @@ class TestBuildPrBody:
             "- **1 new upstream commit**"
         )
         assert "## Logs" not in body
+
+    def test_with_dropped_commits(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(
+            upstream_commit_count=2,
+            dropped_commits=[
+                DroppedCommit(
+                    sha="abcdef1234567890",
+                    message="UPSTREAM: <carry>: excluded patch",
+                    reason="explicitly excluded via --exclude-commits",
+                ),
+                DroppedCommit(
+                    sha="1234567890abcdef",
+                    message="untagged commit",
+                    reason="dropped by tag policy",
+                ),
+            ],
+        )
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "## Dropped downstream commits" in body
+        assert "- `abcdef1` UPSTREAM: <carry>: excluded patch (explicitly excluded via --exclude-commits)" in body
+        assert "- `1234567` untagged commit (dropped by tag policy)" in body
+        assert "## ART pull request cherry-picked" not in body
+
+    def test_without_dropped_commits(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(upstream_commit_count=0)
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "## Dropped downstream commits" not in body
+
+    def test_dropped_commits_truncation(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        dropped_commits = [
+            DroppedCommit(
+                sha=f"{index:040x}",
+                message=f"commit {index}",
+                reason="dropped by tag policy",
+            )
+            for index in range(25)
+        ]
+        summary = RebaseSummary(upstream_commit_count=25, dropped_commits=dropped_commits)
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        dropped_section = body.split("## Dropped downstream commits\n", 1)[1]
+        assert dropped_section.count("- `") == 20
+        assert "- ... and 5 more" in dropped_section
+        assert "commit 19" in dropped_section
+        assert "commit 20" not in dropped_section
 
 
 class TestUpdatePrBody:

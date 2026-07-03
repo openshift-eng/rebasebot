@@ -37,7 +37,7 @@ from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
 from rebasebot.prow import ProwJobContext
-from rebasebot.rebase_summary import RebaseSummary
+from rebasebot.rebase_summary import DroppedCommit, RebaseSummary
 
 
 class RepoException(Exception):
@@ -57,6 +57,8 @@ MERGE_TMP_BRANCH = "merge-tmp"
 _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
+_DROPPED_COMMITS_DISPLAY_LIMIT = 20
+_GO_MODULES_CARRY_COMMIT_MESSAGE = "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase"
 
 
 def _build_slack_blocks(message: str, emoji: str, log_url: str | None) -> list[dict]:
@@ -497,9 +499,10 @@ def _do_rebase(
     bot_emails: list,
     exclude_commits: list,
     update_go_modules: bool,
-) -> None:
+) -> list[DroppedCommit]:
     logging.info("Performing rebase")
 
+    dropped_commits: list[DroppedCommit] = []
     allow_bot_squash = len(bot_emails) > 0
     normalized_bot_emails = {_normalize_bot_email(email) for email in bot_emails}
     if allow_bot_squash:
@@ -516,17 +519,38 @@ def _do_rebase(
 
         if _in_excluded_commits(sha, exclude_commits):
             logging.info("Explicitly dropping commit from rebase: %s", sha)
+            dropped_commits.append(
+                DroppedCommit(
+                    sha=sha,
+                    message=commit_message,
+                    reason="explicitly excluded via --exclude-commits",
+                )
+            )
             continue
 
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
             # and append such commit to a list of commits that we want to prune
-            if commit_message == "UPSTREAM: <carry>: Updating and vendoring " + "go modules after an upstream rebase":
+            if commit_message == _GO_MODULES_CARRY_COMMIT_MESSAGE:
                 logging.info("Dropping Go modules commit %s - %s", sha, commit_message)
+                dropped_commits.append(
+                    DroppedCommit(
+                        sha=sha,
+                        message=commit_message,
+                        reason="superseded by Go module regeneration",
+                    )
+                )
                 continue
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy, gitwd, source.branch):
             logging.info("Dropping commit: %s - %s", sha, commit_message)
+            dropped_commits.append(
+                DroppedCommit(
+                    sha=sha,
+                    message=commit_message,
+                    reason="dropped by tag policy",
+                )
+            )
             continue
 
         if allow_bot_squash:
@@ -576,6 +600,8 @@ def _do_rebase(
             newest_bot_commit_message = newest_created_commit["commit_message"]
 
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", author_string)
+
+    return dropped_commits
 
 
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
@@ -782,6 +808,16 @@ def _build_pr_body(
 
     if prow_job.log_url is not None:
         sections.append(f"## Logs\n\n[View job log]({prow_job.log_url})")
+
+    if summary.dropped_commits:
+        dropped_lines = [
+            f"- `{commit.sha[:7]}` {commit.message} ({commit.reason})"
+            for commit in summary.dropped_commits[:_DROPPED_COMMITS_DISPLAY_LIMIT]
+        ]
+        remaining = len(summary.dropped_commits) - _DROPPED_COMMITS_DISPLAY_LIMIT
+        if remaining > 0:
+            dropped_lines.append(f"- ... and {remaining} more")
+        sections.append("## Dropped downstream commits\n" + "\n".join(dropped_lines))
 
     return "\n\n".join(sections)
 
@@ -1173,7 +1209,7 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             _prepare_rebase_branch(gitwd, source, dest)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
-            _do_rebase(
+            rebase_summary.dropped_commits = _do_rebase(
                 gitwd=gitwd,
                 source=source,
                 dest=dest,

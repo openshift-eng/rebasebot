@@ -15,7 +15,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class DroppedCommit:
+    """A downstream commit omitted from the rebase branch."""
+
+    sha: str
+    message: str
+    reason: str
 
 
 @dataclass
@@ -23,3 +32,4 @@ class RebaseSummary:
     """Metadata about a rebase run, used when rendering the rebase PR body."""
 
     upstream_commit_count: int
+    dropped_commits: list[DroppedCommit] = field(default_factory=list)
