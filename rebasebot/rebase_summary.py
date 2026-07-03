@@ -27,9 +27,19 @@ class DroppedCommit:
     reason: str
 
 
+@dataclass(frozen=True)
+class ArtPrInfo:
+    """An ART pull request cherry-picked into the rebase branch."""
+
+    number: int
+    title: str
+    url: str
+
+
 @dataclass
 class RebaseSummary:
     """Metadata about a rebase run, used when rendering the rebase PR body."""
 
     upstream_commit_count: int
     dropped_commits: list[DroppedCommit] = field(default_factory=list)
+    art_pr: ArtPrInfo | None = None

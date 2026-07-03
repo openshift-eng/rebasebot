@@ -31,7 +31,7 @@ from rebasebot.bot import (
 )
 from rebasebot.github import GitHubBranch
 from rebasebot.prow import ProwJobContext
-from rebasebot.rebase_summary import DroppedCommit, RebaseSummary
+from rebasebot.rebase_summary import ArtPrInfo, DroppedCommit, RebaseSummary
 
 from .conftest import CommitBuilder
 
@@ -649,6 +649,53 @@ class TestBuildPrBody:
         assert "- ... and 5 more" in dropped_section
         assert "commit 19" in dropped_section
         assert "commit 20" not in dropped_section
+
+    def test_with_art_pr(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(
+            upstream_commit_count=1,
+            art_pr=ArtPrInfo(
+                number=42,
+                title="Update build image to be consistent with ART",
+                url="https://github.com/downstream/repo/pull/42",
+            ),
+        )
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "## ART pull request cherry-picked" in body
+        assert (
+            "[#42 Update build image to be consistent with ART](https://github.com/downstream/repo/pull/42)"
+        ) in body
+        assert "## Dropped downstream commits" not in body
+
+    def test_with_dropped_commits_and_art_pr(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(
+            upstream_commit_count=2,
+            dropped_commits=[
+                DroppedCommit(
+                    sha="abcdef1234567890",
+                    message="untagged commit",
+                    reason="dropped by tag policy",
+                )
+            ],
+            art_pr=ArtPrInfo(
+                number=7,
+                title="Update build image to be consistent with ART",
+                url="https://github.com/downstream/repo/pull/7",
+            ),
+        )
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "## Dropped downstream commits" in body
+        assert "## ART pull request cherry-picked" in body
+        assert body.index("## Dropped downstream commits") < body.index("## ART pull request cherry-picked")
 
 
 class TestUpdatePrBody:

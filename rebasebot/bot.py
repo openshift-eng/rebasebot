@@ -37,7 +37,7 @@ from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
 from rebasebot.prow import ProwJobContext
-from rebasebot.rebase_summary import DroppedCommit, RebaseSummary
+from rebasebot.rebase_summary import ArtPrInfo, DroppedCommit, RebaseSummary
 
 
 class RepoException(Exception):
@@ -710,7 +710,7 @@ def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
 
 def _cherrypick_art_pull_request(
     gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch, conflict_policy: str = "auto"
-) -> None:
+) -> ArtPrInfo | None:
     """
     Looks at the destination repository and if there is an open ART pull request
     that updates the build image, it includes it in the rebase.
@@ -738,6 +738,14 @@ def _cherrypick_art_pull_request(
                     conflict_policy=conflict_policy,
                     commit_description=f"ART PR commit {commit.sha}",
                 )
+
+            return ArtPrInfo(
+                number=pull_request.number,
+                title=pull_request.title,
+                url=pull_request.html_url,
+            )
+
+    return None
 
 
 def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
@@ -818,6 +826,12 @@ def _build_pr_body(
         if remaining > 0:
             dropped_lines.append(f"- ... and {remaining} more")
         sections.append("## Dropped downstream commits\n" + "\n".join(dropped_lines))
+
+    if summary.art_pr is not None:
+        sections.append(
+            "## ART pull request cherry-picked\n\n"
+            f"[#{summary.art_pr.number} {summary.art_pr.title}]({summary.art_pr.url})"
+        )
 
     return "\n\n".join(sections)
 
@@ -1221,7 +1235,7 @@ def run(
                 update_go_modules=update_go_modules,
             )
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-            _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
+            rebase_summary.art_pr = _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
         elif always_run_hooks:
             # When no rebase is needed but hooks should still run,
             # reset the rebase branch to dest (which already contains source)

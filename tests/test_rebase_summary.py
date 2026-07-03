@@ -17,12 +17,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from unittest.mock import MagicMock, patch
 
 import pytest
 from git import Repo
+from github3.pulls import ShortPullRequest
 
-from rebasebot.bot import _do_rebase, _init_working_dir, _prepare_rebase_branch
+from rebasebot.bot import _cherrypick_art_pull_request, _do_rebase, _init_working_dir, _prepare_rebase_branch
 from rebasebot.github import GitHubBranch
+from rebasebot.rebase_summary import ArtPrInfo
 
 from .conftest import CommitBuilder
 
@@ -125,3 +128,47 @@ class TestDoRebaseDroppedCommits:
         assert len(dropped) == 1
         assert dropped[0].message == _GO_MODULES_CARRY_COMMIT_MESSAGE
         assert dropped[0].reason == "superseded by Go module regeneration"
+
+
+class TestCherrypickArtPullRequest:
+    @patch("rebasebot.bot._safe_cherry_pick")
+    def test_returns_art_pr_info_when_matching_pr_exists(self, _mock_safe_cherry_pick, working_repo_context):
+        ctx = working_repo_context
+        art_pr = MagicMock(spec=ShortPullRequest)
+        art_pr.title = "Update build image to be consistent with ART"
+        art_pr.user = MagicMock(login="openshift-bot")
+        art_pr.number = 42
+        art_pr.html_url = "https://github.com/downstream/repo/pull/42"
+        repository = MagicMock()
+        repository.name = "fork"
+        repository.html_url = "https://github.com/downstream/fork"
+        art_pr.head = MagicMock(repository=repository, ref="art-update")
+        art_pr.commits.return_value = []
+
+        dest_repo = MagicMock()
+        dest_repo.pull_requests.return_value = [art_pr]
+
+        if "fork" not in [remote.name for remote in ctx.working_repo.remotes]:
+            ctx.working_repo.create_remote("fork", ctx.dest.url)
+
+        with patch("git.remote.Remote.fetch"):
+            result = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
+
+        assert result == ArtPrInfo(
+            number=42,
+            title="Update build image to be consistent with ART",
+            url="https://github.com/downstream/repo/pull/42",
+        )
+
+    def test_returns_none_when_no_matching_pr_exists(self, working_repo_context):
+        ctx = working_repo_context
+        other_pr = MagicMock(spec=ShortPullRequest)
+        other_pr.title = "Unrelated change"
+        other_pr.user = MagicMock(login="openshift-bot")
+
+        dest_repo = MagicMock()
+        dest_repo.pull_requests.return_value = [other_pr]
+
+        result = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
+
+        assert result is None
