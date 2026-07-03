@@ -972,10 +972,8 @@ def _report_result(  # pylint: disable=R0917
     pr_available: bool,
     pr_url: str,
     dest_url: str,
-    slack_webhook: str,
     *,
-    notify_slack: Callable[[str, str], None] | None = None,
-    log_url: str | None = None,
+    notify_slack: Callable[[str, str], None],
 ) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
     message = None
@@ -1011,11 +1009,7 @@ def _report_result(  # pylint: disable=R0917
 
     if message is not None:
         logging.info(message)
-        if notify_slack is not None:
-            notify_slack(message, "✅")
-        else:
-            blocks = _build_slack_blocks(message, "✅", log_url)
-            _message_slack(slack_webhook, message, blocks)
+        notify_slack(message, "✅")
 
 
 def run(
@@ -1259,7 +1253,7 @@ def run(
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
         notify_slack(
-            f"Failed to create a pull request: {ex}\nResponse:\n```{ex.response.text}```",
+            f"Failed to create a pull request:\n```{ex}```\nResponse:\n```{ex.response.text}```",
             "❌",
         )
 
@@ -1270,5 +1264,5 @@ def run(
 
         return False
 
-    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest.url, slack_webhook, notify_slack=notify_slack)
+    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest.url, notify_slack=notify_slack)
     return True
