@@ -88,10 +88,10 @@ class TestRehearsalSlackSuppression:
     @patch("rebasebot.bot._create_pr")
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_rehearsal_run_skips_slack_but_creates_pr(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         mocked_create_pr,
@@ -142,5 +142,5 @@ class TestRehearsalSlackSuppression:
             result = cli.rebasebot_run(args, slack_webhook="test://webhook", github_app_wrapper=fake_github_provider)
 
         assert result
-        mocked_message_slack.assert_not_called()
+        mocked_post.assert_not_called()
         mocked_create_pr.assert_called_once()

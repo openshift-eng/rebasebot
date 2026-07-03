@@ -20,18 +20,20 @@ import requests
 from rebasebot import cli, lifecycle_hooks
 from rebasebot.bot import (
     PullRequestUpdateException,
+    RepoException,
     _add_to_rebase,
     _build_pr_body,
-    _build_slack_blocks,
     _is_pr_available,
     _is_pr_required,
     _report_result,
     _update_pr_body,
     _update_pr_title,
+    notify_slack_error,
 )
 from rebasebot.github import GitHubBranch
 from rebasebot.prow import ProwJobContext
 from rebasebot.rebase_summary import ArtPrInfo, ContentLossWarning, DroppedCommit, RebaseSummary
+from rebasebot.slack import _build_slack_blocks
 
 from .conftest import CommitBuilder
 
@@ -275,39 +277,6 @@ class TestIsPrRequired:
         assert _is_pr_required(gitwd, rebase, dest) is True
 
 
-class TestBuildSlackBlocks:
-    @pytest.mark.parametrize(
-        "message, emoji, log_url, expected_block_count",
-        [
-            ("All good", "✅", None, 1),
-            ("Something broke", "❌", None, 1),
-            ("Please help", "🖐️", None, 1),
-            (
-                "All good",
-                "✅",
-                "https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/job/123",
-                2,
-            ),
-        ],
-    )
-    def test_build_slack_blocks(self, message, emoji, log_url, expected_block_count):
-        blocks = _build_slack_blocks(message, emoji, log_url)
-
-        assert len(blocks) == expected_block_count
-        assert blocks[0]["type"] == "section"
-        assert blocks[0]["text"]["type"] == "mrkdwn"
-        assert blocks[0]["text"]["text"] == f"{emoji} {message}"
-
-        if log_url is not None:
-            assert blocks[1]["text"]["text"] == f"<{log_url}|View job log>"
-
-    def test_exception_text_in_fenced_code_block(self):
-        message = "I got an error:\n```boom```"
-        blocks = _build_slack_blocks(message, "❌", None)
-
-        assert blocks[0]["text"]["text"] == f"❌ {message}"
-
-
 class TestReportResult:
     dest_url = "https://github.com/user/repo"
 
@@ -394,14 +363,75 @@ class TestReportResult:
         notify_slack.assert_called_once_with(slack_message, "✅")
 
 
+class TestNotifySlackError:
+    def test_repo_exception_uses_hand_emoji(self):
+        notifier = MagicMock()
+        ex = RepoException("manual fix needed")
+
+        notify_slack_error(notifier, "Something went wrong", ex)
+
+        notifier.notify.assert_called_once_with("Something went wrong:\n```manual fix needed```", "🖐️")
+
+    def test_lifecycle_hook_exception_uses_hand_emoji(self):
+        notifier = MagicMock()
+        ex = lifecycle_hooks.LifecycleHookScriptException("hook failed")
+
+        notify_slack_error(notifier, "Hook error", ex)
+
+        notifier.notify.assert_called_once_with("Hook error:\n```hook failed```", "🖐️")
+
+    def test_plain_exception_uses_cross_emoji(self):
+        notifier = MagicMock()
+        ex = Exception("boom")
+
+        notify_slack_error(notifier, "Something went wrong", ex)
+
+        notifier.notify.assert_called_once_with("Something went wrong:\n```boom```", "❌")
+
+    def test_http_error_appends_response_text(self):
+        notifier = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"message":"Validation Failed"}'
+        ex = requests.exceptions.HTTPError("422 Client Error")
+        ex.response = mock_response
+
+        notify_slack_error(notifier, "Failed to create a pull request", ex)
+
+        notifier.notify.assert_called_once_with(
+            "Failed to create a pull request:\n```422 Client Error```\nResponse:\n```"
+            '{"message":"Validation Failed"}```',
+            "❌",
+        )
+
+    def test_http_error_without_response_omits_response_block(self):
+        notifier = MagicMock()
+        ex = requests.exceptions.HTTPError("422 Client Error")
+        ex.response = None
+
+        notify_slack_error(notifier, "Failed to create a pull request", ex)
+
+        notifier.notify.assert_called_once_with(
+            "Failed to create a pull request:\n```422 Client Error```",
+            "❌",
+        )
+
+    def test_non_http_error_omits_response_block(self):
+        notifier = MagicMock()
+        ex = Exception("boom")
+
+        notify_slack_error(notifier, "Something went wrong", ex)
+
+        notifier.notify.assert_called_once_with("Something went wrong:\n```boom```", "❌")
+
+
 class TestRunSlackErrorMessages:
     @patch("rebasebot.bot._create_pr")
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_create_pr_http_error_fences_exception_and_response(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         mocked_create_pr,
@@ -454,7 +484,11 @@ class TestRunSlackErrorMessages:
             f"Failed to create a pull request:\n```{http_error}```\nResponse:\n```{mock_response.text}```"
         )
         expected_blocks = _build_slack_blocks(expected_message, "❌", None)
-        mocked_message_slack.assert_called_once_with("test://webhook", expected_message, expected_blocks)
+        mocked_post.assert_called_once_with(
+            "test://webhook",
+            json={"text": expected_message, "blocks": expected_blocks},
+            timeout=5,
+        )
 
 
 class TestUpdatePrTitle:

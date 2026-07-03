@@ -82,10 +82,10 @@ class TestConflictPolicy:
     @patch("rebasebot.bot._create_pr")
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_auto_policy_silent_on_conflict(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         mocked_create_pr,
@@ -135,10 +135,10 @@ class TestConflictPolicy:
     @patch("rebasebot.bot._create_pr")
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_warn_policy_logs_warning_on_content_loss(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         mocked_create_pr,
@@ -191,10 +191,10 @@ class TestConflictPolicy:
     @patch("rebasebot.bot._create_pr")
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_warn_policy_includes_content_loss_in_pr_body(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         mocked_create_pr,
@@ -249,10 +249,10 @@ class TestConflictPolicy:
     @patch("rebasebot.bot._create_pr")
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_strict_policy_fails_on_content_loss(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         mocked_create_pr,
@@ -298,10 +298,10 @@ class TestConflictPolicy:
     @patch("rebasebot.bot._create_pr")
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_strict_policy_succeeds_when_no_conflict(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         mocked_create_pr,

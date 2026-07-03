@@ -9,7 +9,6 @@ from git import Repo
 
 from rebasebot import cli
 from rebasebot.bot import (
-    _build_slack_blocks,
     _init_working_dir,
     _needs_rebase,
     _prepare_rebase_branch,
@@ -433,10 +432,10 @@ class TestRebases:
 
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_conflict(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         init_test_repositories,
@@ -474,9 +473,10 @@ class TestRebases:
         assert working_repo.head.ref.name == "rebase"
         log_graph = working_repo.git.log("--graph", "--oneline", "--pretty='<%an>, %s'")
 
-        assert mocked_message_slack.call_args.args[0] == "test://webhook"
-        assert mocked_message_slack.call_args.args[1].startswith("I created a new rebase PR:")
-        blocks = mocked_message_slack.call_args.args[2]
+        assert mocked_post.call_args.args[0] == "test://webhook"
+        posted_json = mocked_post.call_args.kwargs["json"]
+        assert posted_json["text"].startswith("I created a new rebase PR:")
+        blocks = posted_json["blocks"]
         assert blocks[0]["text"]["text"].startswith("✅ I created a new rebase PR:")
 
         assert (
@@ -495,12 +495,12 @@ class TestRebases:
 """.strip()  # noqa: W291
         )
 
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     @patch("rebasebot.bot._manual_rebase_pr_in_repo")
     def test_has_manual_rebase_pr(
         self,
         mocked_manual_rebase_pr_in_repo,
-        mocked_message_slack,
+        mocked_post,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
@@ -537,9 +537,7 @@ class TestRebases:
         args.ignore_manual_label = False
         args.dry_run = False
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
-        expected_message = f"Repo {dest.clone_url} has PR {pr.html_url} with 'rebase/manual' label, aborting"
-        expected_blocks = _build_slack_blocks(expected_message, "🖐️", None)
-        mocked_message_slack.assert_called_once_with(None, expected_message, expected_blocks)
+        mocked_post.assert_not_called()
 
         assert result
 
