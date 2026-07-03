@@ -28,6 +28,7 @@ from rebasebot.github import GitHubBranch
 from rebasebot.rebase_summary import ArtPrInfo
 
 from .conftest import CommitBuilder
+from .test_conflict_policy import _DOWNSTREAM_CARRY_CODE, _ORIGINAL_CODE, _UPSTREAM_ADDED_CODE
 
 _GO_MODULES_CARRY_COMMIT_MESSAGE = "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase"
 
@@ -67,7 +68,7 @@ class TestDoRebaseDroppedCommits:
         ctx.fetch_remotes()
         _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
 
-        dropped = _do_rebase(
+        dropped, _ = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
@@ -91,7 +92,7 @@ class TestDoRebaseDroppedCommits:
         ctx.fetch_remotes()
         _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
 
-        dropped = _do_rebase(
+        dropped, _ = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
@@ -114,7 +115,7 @@ class TestDoRebaseDroppedCommits:
         ctx.fetch_remotes()
         _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
 
-        dropped = _do_rebase(
+        dropped, _ = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
             dest=ctx.dest,
@@ -128,6 +129,72 @@ class TestDoRebaseDroppedCommits:
         assert len(dropped) == 1
         assert dropped[0].message == _GO_MODULES_CARRY_COMMIT_MESSAGE
         assert dropped[0].reason == "superseded by Go module regeneration"
+
+
+class TestDoRebaseContentLossWarnings:
+    def test_warn_policy_populates_content_loss_warnings(self, working_repo_context, fake_github_provider):
+        ctx = working_repo_context
+        CommitBuilder(ctx.source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
+        CommitBuilder(ctx.dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(ctx.source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
+        carry = (
+            CommitBuilder(ctx.dest)
+            .update_file("test.go", _DOWNSTREAM_CARRY_CODE)
+            .commit("UPSTREAM: <carry>: add snapshot timeout")
+        )
+        ctx.fetch_remotes()
+        _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
+
+        dropped, content_loss_warnings = _do_rebase(
+            gitwd=ctx.working_repo,
+            source=ctx.source,
+            dest=ctx.dest,
+            source_repo=fake_github_provider.github_app.repository.return_value,
+            tag_policy="soft",
+            conflict_policy="warn",
+            bot_emails=[],
+            exclude_commits=[],
+            update_go_modules=False,
+        )
+
+        assert dropped == []
+        assert len(content_loss_warnings) >= 1
+        kms_warnings = [
+            warning
+            for warning in content_loss_warnings
+            if warning.file == "test.go" and any("ebsKmsKeyId" in line for line in warning.lost_lines)
+        ]
+        assert kms_warnings
+        carry_warnings = [
+            warning for warning in kms_warnings if warning.message == "UPSTREAM: <carry>: add snapshot timeout"
+        ]
+        if carry_warnings:
+            assert carry_warnings[0].sha == carry.hexsha
+
+    def test_auto_policy_leaves_content_loss_warnings_empty(self, working_repo_context, fake_github_provider):
+        ctx = working_repo_context
+        CommitBuilder(ctx.source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
+        CommitBuilder(ctx.dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(ctx.source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
+        CommitBuilder(ctx.dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+            "UPSTREAM: <carry>: add snapshot timeout"
+        )
+        ctx.fetch_remotes()
+        _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
+
+        _, content_loss_warnings = _do_rebase(
+            gitwd=ctx.working_repo,
+            source=ctx.source,
+            dest=ctx.dest,
+            source_repo=fake_github_provider.github_app.repository.return_value,
+            tag_policy="soft",
+            conflict_policy="auto",
+            bot_emails=[],
+            exclude_commits=[],
+            update_go_modules=False,
+        )
+
+        assert content_loss_warnings == []
 
 
 class TestCherrypickArtPullRequest:
@@ -152,13 +219,14 @@ class TestCherrypickArtPullRequest:
             ctx.working_repo.create_remote("fork", ctx.dest.url)
 
         with patch("git.remote.Remote.fetch"):
-            result = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
+            result, content_loss = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
 
         assert result == ArtPrInfo(
             number=42,
             title="Update build image to be consistent with ART",
             url="https://github.com/downstream/repo/pull/42",
         )
+        assert content_loss == []
 
     def test_returns_none_when_no_matching_pr_exists(self, working_repo_context):
         ctx = working_repo_context
@@ -169,6 +237,7 @@ class TestCherrypickArtPullRequest:
         dest_repo = MagicMock()
         dest_repo.pull_requests.return_value = [other_pr]
 
-        result = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
+        result, content_loss = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
 
         assert result is None
+        assert content_loss == []

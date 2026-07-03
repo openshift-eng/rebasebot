@@ -23,6 +23,7 @@ import shutil
 import sys
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import git
 import git.compat
@@ -37,7 +38,7 @@ from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
 from rebasebot.prow import ProwJobContext
-from rebasebot.rebase_summary import ArtPrInfo, DroppedCommit, RebaseSummary
+from rebasebot.rebase_summary import ArtPrInfo, ContentLossWarning, DroppedCommit, RebaseSummary
 
 
 class RepoException(Exception):
@@ -57,8 +58,24 @@ MERGE_TMP_BRANCH = "merge-tmp"
 _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
+_PR_BODY_LOST_LINE_LIMIT = 20
 _DROPPED_COMMITS_DISPLAY_LIMIT = 20
 _GO_MODULES_CARRY_COMMIT_MESSAGE = "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase"
+
+
+@dataclass(frozen=True)
+class CherryPickResult:
+    """Outcome of a cherry-pick, including any detected upstream content loss."""
+
+    created_commit: bool
+    content_loss: list[tuple[str, list[str]]]
+
+
+def _content_loss_warnings(sha: str, message: str, result: CherryPickResult) -> list[ContentLossWarning]:
+    return [
+        ContentLossWarning(sha=sha, message=message, file=filename, lost_lines=lost_lines)
+        for filename, lost_lines in result.content_loss
+    ]
 
 
 def _build_slack_blocks(message: str, emoji: str, log_url: str | None) -> list[dict]:
@@ -433,7 +450,7 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
 
 def _safe_cherry_pick(
     gitwd: git.Repo, sha: str, source_branch: str, conflict_policy: str, commit_description: str
-) -> bool:
+) -> CherryPickResult:
     """
     Cherry-pick a commit with conflict detection based on conflict_policy.
 
@@ -442,7 +459,8 @@ def _safe_cherry_pick(
     -Xtheirs, then cherry-picks with -Xtheirs, then verifies only the
     files that actually conflicted for upstream content loss.
 
-    Returns True when the cherry-pick creates a commit and False when it is skipped as empty.
+    Returns a CherryPickResult indicating whether a commit was created and any
+    detected upstream content loss per file.
     """
     start_head = gitwd.head.commit.hexsha
 
@@ -458,14 +476,16 @@ def _safe_cherry_pick(
         if not _resolve_rebase_conflicts(gitwd):
             raise RepoException(f"Git rebase failed: {ex}") from ex
 
+    created_commit = gitwd.head.commit.hexsha != start_head
+
     # If no conflicts were detected, -Xtheirs had no effect — skip check
     if conflict_policy == "auto" or not conflicted_files:
-        return gitwd.head.commit.hexsha != start_head
+        return CherryPickResult(created_commit=created_commit, content_loss=[])
 
     # Only verify files that had actual merge conflicts
     lost_content = _check_upstream_content_loss(gitwd, source_branch, conflicted_files)
     if not lost_content:
-        return gitwd.head.commit.hexsha != start_head
+        return CherryPickResult(created_commit=created_commit, content_loss=[])
 
     for filename, lost_lines in lost_content:
         logging.warning(
@@ -485,7 +505,7 @@ def _safe_cherry_pick(
             f"upstream additions. Manual resolution is required."
         )
 
-    return gitwd.head.commit.hexsha != start_head
+    return CherryPickResult(created_commit=created_commit, content_loss=lost_content)
 
 
 def _do_rebase(
@@ -499,10 +519,11 @@ def _do_rebase(
     bot_emails: list,
     exclude_commits: list,
     update_go_modules: bool,
-) -> list[DroppedCommit]:
+) -> tuple[list[DroppedCommit], list[ContentLossWarning]]:
     logging.info("Performing rebase")
 
     dropped_commits: list[DroppedCommit] = []
+    content_loss_warnings: list[ContentLossWarning] = []
     allow_bot_squash = len(bot_emails) > 0
     normalized_bot_emails = {_normalize_bot_email(email) for email in bot_emails}
     if allow_bot_squash:
@@ -561,13 +582,14 @@ def _do_rebase(
 
         logging.info("Picking commit: %s - %s", sha, commit_message)
 
-        _safe_cherry_pick(
+        pick_result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=sha,
             source_branch=source.branch,
             conflict_policy=conflict_policy,
             commit_description=f"{sha} - {commit_message}",
         )
+        content_loss_warnings.extend(_content_loss_warnings(sha, commit_message, pick_result))
 
     # Here we cherry-pick the bot's commits and then squash them together
     # We also want the newest bot commit message to represent the squashed commits
@@ -577,13 +599,17 @@ def _do_rebase(
             created_commit_count = 0
             newest_created_commit = None
             for commit in value:
-                if _safe_cherry_pick(
+                pick_result = _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit["sha"],
                     source_branch=source.branch,
                     conflict_policy=conflict_policy,
                     commit_description=f"{commit['sha']} - {commit['commit_message']}",
-                ):
+                )
+                content_loss_warnings.extend(
+                    _content_loss_warnings(commit["sha"], commit["commit_message"], pick_result)
+                )
+                if pick_result.created_commit:
                     created_commit_count += 1
                     newest_created_commit = commit
 
@@ -601,7 +627,7 @@ def _do_rebase(
 
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", author_string)
 
-    return dropped_commits
+    return dropped_commits, content_loss_warnings
 
 
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
@@ -710,12 +736,13 @@ def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
 
 def _cherrypick_art_pull_request(
     gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch, conflict_policy: str = "auto"
-) -> ArtPrInfo | None:
+) -> tuple[ArtPrInfo | None, list[ContentLossWarning]]:
     """
     Looks at the destination repository and if there is an open ART pull request
     that updates the build image, it includes it in the rebase.
     """
     logging.info("Checking for ART pull request")
+    content_loss_warnings: list[ContentLossWarning] = []
     for pull_request in dest_repo.pull_requests(state="open", base=f"{dest.branch}"):
         assert isinstance(pull_request, ShortPullRequest)  # type hint
         if "consistent with ART" in pull_request.title and pull_request.user.login == "openshift-bot":
@@ -731,21 +758,26 @@ def _cherrypick_art_pull_request(
 
             for commit in pull_request.commits():
                 assert isinstance(commit, ShortCommit)
-                _safe_cherry_pick(
+                commit_message = commit.commit.message.split("\n", 1)[0] if commit.commit.message else commit.sha
+                pick_result = _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit.sha,
                     source_branch=dest.branch,
                     conflict_policy=conflict_policy,
                     commit_description=f"ART PR commit {commit.sha}",
                 )
+                content_loss_warnings.extend(_content_loss_warnings(commit.sha, commit_message, pick_result))
 
-            return ArtPrInfo(
-                number=pull_request.number,
-                title=pull_request.title,
-                url=pull_request.html_url,
+            return (
+                ArtPrInfo(
+                    number=pull_request.number,
+                    title=pull_request.title,
+                    url=pull_request.html_url,
+                ),
+                content_loss_warnings,
             )
 
-    return None
+    return None, content_loss_warnings
 
 
 def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
@@ -832,6 +864,37 @@ def _build_pr_body(
             "## ART pull request cherry-picked\n\n"
             f"[#{summary.art_pr.number} {summary.art_pr.title}]({summary.art_pr.url})"
         )
+
+    if summary.content_loss_warnings:
+        warnings_by_commit: dict[tuple[str, str], list[ContentLossWarning]] = {}
+        commit_order: list[tuple[str, str]] = []
+        for warning in summary.content_loss_warnings:
+            key = (warning.sha, warning.message)
+            if key not in warnings_by_commit:
+                warnings_by_commit[key] = []
+                commit_order.append(key)
+            warnings_by_commit[key].append(warning)
+
+        details_blocks: list[str] = []
+        for key in commit_order:
+            sha, message = key
+            file_sections: list[str] = []
+            for warning in warnings_by_commit[key]:
+                displayed_lines = warning.lost_lines[:_PR_BODY_LOST_LINE_LIMIT]
+                code_block = "\n".join(line.strip() for line in displayed_lines)
+                file_section = f"**{warning.file}**\n```\n{code_block}\n```"
+                remaining = len(warning.lost_lines) - _PR_BODY_LOST_LINE_LIMIT
+                if remaining > 0:
+                    file_section += f"\n... and {remaining} more lines"
+                file_sections.append(file_section)
+
+            details_blocks.append(
+                f"<details>\n<summary>`{sha[:7]}` {message}</summary>\n\n"
+                + "\n\n".join(file_sections)
+                + "\n\n</details>"
+            )
+
+        sections.append("## ⚠️ Possible upstream content loss\n\n" + "\n\n".join(details_blocks))
 
     return "\n\n".join(sections)
 
@@ -1223,7 +1286,7 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             _prepare_rebase_branch(gitwd, source, dest)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
-            rebase_summary.dropped_commits = _do_rebase(
+            rebase_summary.dropped_commits, rebase_summary.content_loss_warnings = _do_rebase(
                 gitwd=gitwd,
                 source=source,
                 dest=dest,
@@ -1235,7 +1298,10 @@ def run(
                 update_go_modules=update_go_modules,
             )
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-            rebase_summary.art_pr = _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
+            rebase_summary.art_pr, art_content_loss = _cherrypick_art_pull_request(
+                gitwd, dest_repo, dest, conflict_policy
+            )
+            rebase_summary.content_loss_warnings.extend(art_content_loss)
         elif always_run_hooks:
             # When no rebase is needed but hooks should still run,
             # reset the rebase branch to dest (which already contains source)

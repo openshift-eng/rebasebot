@@ -36,6 +36,16 @@ class ArtPrInfo:
     url: str
 
 
+@dataclass(frozen=True)
+class ContentLossWarning:
+    """Upstream content that may have been dropped during cherry-pick conflict resolution."""
+
+    sha: str
+    message: str
+    file: str
+    lost_lines: list[str]
+
+
 @dataclass
 class RebaseSummary:
     """Metadata about a rebase run, used when rendering the rebase PR body."""
@@ -43,3 +53,4 @@ class RebaseSummary:
     upstream_commit_count: int
     dropped_commits: list[DroppedCommit] = field(default_factory=list)
     art_pr: ArtPrInfo | None = None
+    content_loss_warnings: list[ContentLossWarning] = field(default_factory=list)

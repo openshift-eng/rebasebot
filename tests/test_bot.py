@@ -31,7 +31,7 @@ from rebasebot.bot import (
 )
 from rebasebot.github import GitHubBranch
 from rebasebot.prow import ProwJobContext
-from rebasebot.rebase_summary import ArtPrInfo, DroppedCommit, RebaseSummary
+from rebasebot.rebase_summary import ArtPrInfo, ContentLossWarning, DroppedCommit, RebaseSummary
 
 from .conftest import CommitBuilder
 
@@ -696,6 +696,107 @@ class TestBuildPrBody:
         assert "## Dropped downstream commits" in body
         assert "## ART pull request cherry-picked" in body
         assert body.index("## Dropped downstream commits") < body.index("## ART pull request cherry-picked")
+
+    def test_with_content_loss_warnings(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(
+            upstream_commit_count=1,
+            content_loss_warnings=[
+                ContentLossWarning(
+                    sha="abcdef1234567890",
+                    message="UPSTREAM: <carry>: add snapshot timeout",
+                    file="test.go",
+                    lost_lines=[
+                        '\tebsKmsKeyIDKey = "ebsKmsKeyId"',
+                        "\tebsKmsKeyId string",
+                    ],
+                )
+            ],
+        )
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "## ⚠️ Possible upstream content loss" in body
+        assert "<details>" in body
+        assert "<summary>`abcdef1` UPSTREAM: <carry>: add snapshot timeout</summary>" in body
+        assert "**test.go**" in body
+        assert 'ebsKmsKeyIDKey = "ebsKmsKeyId"' in body
+        assert "## Dropped downstream commits" not in body
+        assert "## ART pull request cherry-picked" not in body
+
+    def test_without_content_loss_warnings(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(upstream_commit_count=1)
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "## ⚠️ Possible upstream content loss" not in body
+
+    def test_content_loss_line_truncation(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        lost_lines = [f"lost line {index}" for index in range(25)]
+        summary = RebaseSummary(
+            upstream_commit_count=1,
+            content_loss_warnings=[
+                ContentLossWarning(
+                    sha="abcdef1234567890",
+                    message="conflicting commit",
+                    file="large.go",
+                    lost_lines=lost_lines,
+                )
+            ],
+        )
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "lost line 0" in body
+        assert "lost line 19" in body
+        assert "lost line 20" not in body
+        assert "... and 5 more lines" in body
+
+    def test_with_dropped_commits_art_pr_and_content_loss(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(
+            upstream_commit_count=2,
+            dropped_commits=[
+                DroppedCommit(
+                    sha="abcdef1234567890",
+                    message="untagged commit",
+                    reason="dropped by tag policy",
+                )
+            ],
+            art_pr=ArtPrInfo(
+                number=7,
+                title="Update build image to be consistent with ART",
+                url="https://github.com/downstream/repo/pull/7",
+            ),
+            content_loss_warnings=[
+                ContentLossWarning(
+                    sha="fedcba0987654321",
+                    message="UPSTREAM: <carry>: conflicting patch",
+                    file="test.go",
+                    lost_lines=["\tebsKmsKeyId string"],
+                )
+            ],
+        )
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        assert "## Dropped downstream commits" in body
+        assert "## ART pull request cherry-picked" in body
+        assert "## ⚠️ Possible upstream content loss" in body
+        assert body.index("## Dropped downstream commits") < body.index("## ART pull request cherry-picked")
+        assert body.index("## ART pull request cherry-picked") < body.index("## ⚠️ Possible upstream content loss")
+        assert "<details>" in body
+        assert "ebsKmsKeyId string" in body
 
 
 class TestUpdatePrBody:
