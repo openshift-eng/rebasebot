@@ -15,6 +15,7 @@ from rebasebot.bot import (
     _apply_merge_only_delta,
     _init_working_dir,
     _needs_rebase,
+    _normalize_bot_email,
     _prepare_rebase_branch,
     _tree_entry_for_path,
 )
@@ -151,6 +152,13 @@ class TestBotInternalHelpers:
         with pytest.raises(git.GitCommandError, match="ls-tree"):
             _tree_entry_for_path(gitwd, "missing-ref", "test.go")
 
+    def test_normalize_bot_email_only_rewrites_github_noreply_addresses(self):
+        assert (
+            _normalize_bot_email("12345+genbot@users.noreply.github.com")
+            == "genbot@users.noreply.github.com"
+        )
+        assert _normalize_bot_email("12345+genbot@example.com") == "12345+genbot@example.com"
+
 
 class TestRebases:
     def test_simple_dry_run(self, init_test_repositories, fake_github_provider, tmpdir):
@@ -256,10 +264,10 @@ class TestRebases:
             cb.commit("other upstream commit")
         with CommitBuilder(dest) as cb:
             cb.add_file("generated-test-genbot", "content")
-            cb.commit("commit #1 from genbot", committer_email="12345+genbot@example.com")
+            cb.commit("commit #1 from genbot", committer_email="12345+genbot@users.noreply.github.com")
         with CommitBuilder(dest) as cb:
             cb.add_file("generated-test-genbot-2", "content")
-            cb.commit("commit #2 from genbot", committer_email="12345+genbot@example.com")
+            cb.commit("commit #2 from genbot", committer_email="12345+genbot@users.noreply.github.com")
         with CommitBuilder(dest) as cb:
             cb.add_file("generated-test-ci", "content")
             cb.commit("commit #1 from ci nightly", committer_email="ci+nightly@example.com")
@@ -276,7 +284,11 @@ class TestRebases:
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
         args.tag_policy = "soft"
-        args.bot_emails = ["12345+genbot@example.com", "ci+nightly@example.com", "ops+nightly@example.com"]
+        args.bot_emails = [
+            "12345+genbot@users.noreply.github.com",
+            "ci+nightly@example.com",
+            "ops+nightly@example.com",
+        ]
         args.exclude_commits = []
         args.update_go_modules = False
         args.conflict_policy = "auto"
@@ -295,15 +307,15 @@ class TestRebases:
             == r"""
 * '<dest_ops+nightly@example.com>, commit #1 from ops nightly'
 * '<dest_ci+nightly@example.com>, commit #1 from ci nightly'
-* '<dest_12345+genbot@example.com>, commit #2 from genbot'
+* '<dest_12345+genbot@users.noreply.github.com>, commit #2 from genbot'
 * '<dest_author>, UPSTREAM: <carry>: our cool addition'
 *   '<test_rebasebot>, merge upstream/main into main'
 |\  
 | * '<source_author>, other upstream commit'
 * | '<dest_ops+nightly@example.com>, commit #1 from ops nightly'
 * | '<dest_ci+nightly@example.com>, commit #1 from ci nightly'
-* | '<dest_12345+genbot@example.com>, commit #2 from genbot'
-* | '<dest_12345+genbot@example.com>, commit #1 from genbot'
+* | '<dest_12345+genbot@users.noreply.github.com>, commit #2 from genbot'
+* | '<dest_12345+genbot@users.noreply.github.com>, commit #1 from genbot'
 * | '<dest_author>, UPSTREAM: <carry>: our cool addition'
 |/  
 * '<source_author>, Upstream commit'

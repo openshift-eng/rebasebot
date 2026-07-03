@@ -189,6 +189,10 @@ def _normalize_bot_email(email: str) -> str:
     if not sep:
         return email
 
+    domain = domain.lower()
+    if domain != "users.noreply.github.com":
+        return email
+
     prefix, plus, rest = local.partition("+")
     if plus and prefix.isdigit() and rest:
         return f"{rest}@{domain}"
