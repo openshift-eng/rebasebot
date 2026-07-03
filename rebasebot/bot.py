@@ -20,6 +20,7 @@ import builtins
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from collections import defaultdict
 
@@ -54,6 +55,46 @@ MERGE_TMP_BRANCH = "merge-tmp"
 _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
+_RECOVERED_MERGE_ONLY_CARRY_PREFIX = "UPSTREAM: <carry>: Recover merge-only delta from merge "
+
+
+def _synthetic_rebase_merge_message(source_branch: str, dest_branch: str) -> str:
+    return f"merge upstream/{source_branch} into {dest_branch}"
+
+
+def _merge_tree_write_tree(gitwd: git.Repo, merge_commit: Commit) -> str:
+    """Return the synthetic auto-merge tree SHA for a two-parent merge commit."""
+    parents = list(merge_commit.parents)
+    short_sha = merge_commit.hexsha[:12]
+    if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
+        raise RepoException(f"Failed to determine merge-only delta baseline for merge {short_sha}: expected 2 parents")
+
+    p1, p2 = parents[0].hexsha, parents[1].hexsha
+    try:
+        proc = subprocess.run(
+            ["git", "merge-tree", "--write-tree", p1, p2],
+            capture_output=True,
+            text=True,
+            cwd=gitwd.working_dir,
+        )
+        # merge-tree exits 0 for clean merge, 1 for conflicts.
+        # Either way the tree SHA is on the first line of stdout.
+        if proc.returncode not in (0, 1):
+            raise RepoException(
+                f"Failed to determine merge-only delta baseline for merge {short_sha}: "
+                f"git merge-tree exited {proc.returncode}: {proc.stderr.strip() or 'no stderr'}"
+            )
+        auto_tree = proc.stdout.strip().split("\n")[0].strip() if proc.stdout.strip() else ""
+        if not auto_tree:
+            raise RepoException(
+                f"Failed to determine merge-only delta baseline for merge {short_sha}: "
+                f"git merge-tree produced no tree SHA (exit {proc.returncode})"
+            )
+        return auto_tree
+    except OSError as ex:
+        raise RepoException(
+            f"Failed to determine merge-only delta baseline for merge {short_sha}: {ex}"
+        ) from ex
 
 
 def _message_slack(webhook_url: str, msg: str) -> None:
@@ -148,6 +189,10 @@ def _normalize_bot_email(email: str) -> str:
     if not sep:
         return email
 
+    domain = domain.lower()
+    if domain != "users.noreply.github.com":
+        return email
+
     prefix, plus, rest = local.partition("+")
     if plus and prefix.isdigit() and rest:
         return f"{rest}@{domain}"
@@ -155,29 +200,80 @@ def _normalize_bot_email(email: str) -> str:
     return email
 
 
-def _find_last_rebase_merge_commit(gitwd: git.Repo, ancestry_path_merges) -> Commit:
+def _is_recovered_merge_only_carry(commit_message: str) -> bool:
+    return commit_message.startswith(_RECOVERED_MERGE_ONLY_CARRY_PREFIX)
+
+
+def _tree_entry_for_path(gitwd: git.Repo, ref: str, path: str) -> str:
+    return gitwd.git.ls_tree(ref, "--", path).strip()
+
+
+def _is_commit_authored_by_current_git_user(commit: Commit, gitwd: git.Repo) -> bool:
+    try:
+        git_email = gitwd.config_reader().get_value("user", "email")
+    except Exception:  # pragma: no cover - config lookup failures fall back to legacy heuristics
+        return False
+
+    return commit.author.email == git_email and commit.committer.email == git_email
+
+
+def _is_rebasebot_synthetic_merge(
+    merge: Commit,
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    *,
+    first_parent_merge_shas: set[str],
+) -> bool:
+    parents = list(merge.parents)
+    if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
+        return False
+
+    # RebaseBot's synthetic upstream merge lives on the rebase branch and is later
+    # introduced into dest via the PR merge, so it is not on dest's first-parent path.
+    if merge.hexsha in first_parent_merge_shas:
+        return False
+
+    if merge.summary != _synthetic_rebase_merge_message(source.branch, dest.branch):
+        return False
+
+    # RebaseBot creates this synthetic merge locally with its configured git identity.
+    # A real upstream-sync merge can have the same tree shape and summary, so require
+    # bot authorship before treating it as an internal marker.
+    if not _is_commit_authored_by_current_git_user(merge, gitwd):
+        return False
+
+    upstream_parent = _find_source_parent_commit(parents, gitwd)
+    if upstream_parent is None:
+        return False
+
+    return merge.tree.hexsha == upstream_parent.tree.hexsha
+
+
+def _find_last_rebase_merge_commit(
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    ancestry_path_merges,
+    *,
+    first_parent_merge_shas: set[str],
+) -> Commit:
     logging.info("Searching for merge commit from previous rebasebot run to identify downstream commits")
     for merge_line in ancestry_path_merges:
         sha, _, _ = merge_line.split(" || ", 2)
 
         merge = gitwd.commit(sha)
-
-        # Last rebase merge commit has two parents.
-        parents = list(merge.parents)
-        if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
-            continue
-
-        # Identify the upstream parent: Merge parent that is reachable from any upstream branch.
-        upstream_parent = _find_source_parent_commit(parents, gitwd)
-        if upstream_parent is None:
-            continue
-
-        # The synthetic rebase merge uses the upstream tree as the merge tree.
-        # Therefore, the merge commit's tree must equal the upstream parent's tree.
-        if merge.tree.hexsha != upstream_parent.tree.hexsha:
+        if not _is_rebasebot_synthetic_merge(
+            merge,
+            gitwd,
+            source,
+            dest,
+            first_parent_merge_shas=first_parent_merge_shas,
+        ):
             continue
 
         logging.info("Found merge commit from previous rebase: %s", sha)
+        upstream_parent = _find_source_parent_commit(list(merge.parents), gitwd)
         logging.info("Its parent %s is on an upstream branch", upstream_parent.hexsha)
         return merge
     return None
@@ -192,7 +288,9 @@ def _find_source_parent_commit(parents: list, gitwd: git.Repo) -> Commit:
     return None
 
 
-def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> str:
+def _identify_downstream_commit_phases(
+    gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch
+) -> tuple[list[str], list[str], list[str]]:
     # Merge base is the last shared commit of source branch and destination branch
     merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
     logging.info(f"Merge base of source/{source.branch} and dest/{dest.branch}: %s", merge_base)
@@ -201,11 +299,20 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
     ancestry_path_merges = gitwd.git.log(
         _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{dest.branch}"
     ).splitlines()
+    first_parent_merge_shas = set(
+        gitwd.git.rev_list("--first-parent", "--merges", f"{merge_base}..dest/{dest.branch}").splitlines()
+    )
 
     val = "\n".join(ancestry_path_merges)
     logging.info(f"""Merges on ancestry-path from merge_base=({merge_base}) to dest/{dest.branch} branch:\n{val}""")
 
-    last_rebase_merge_commit = _find_last_rebase_merge_commit(gitwd, ancestry_path_merges)
+    last_rebase_merge_commit = _find_last_rebase_merge_commit(
+        gitwd,
+        source,
+        dest,
+        ancestry_path_merges,
+        first_parent_merge_shas=first_parent_merge_shas,
+    )
     cutoff_commits = []
 
     if last_rebase_merge_commit is None:
@@ -235,10 +342,11 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
 
     if not downstream_shas:
         logging.info("No downstream commits identified")
-        return ""
+        return [], [], cutoff_commits
 
     ordered_commits = []
     seen = set()
+    phase1_lines = []
 
     # Phase 1: Extract commits from the previous rebase PR first.
     # The rebase PR carries establish the baseline and must be cherry-picked
@@ -288,7 +396,6 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
             ).splitlines()
             # Keep only commits that are part of downstream set and not yet
             # emitted, so phase 1 establishes the carry baseline first.
-            phase1_lines = []
             phase1_extras = []
             for line in rebase_commits:
                 sha = line.split(" || ", 1)[0].strip()
@@ -305,7 +412,11 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
                     "Phase 1 sanity check failed: commits from the rebase PR range are not downstream commits:\n"
                     f"{extras_text}"
                 )
-            logging.info("Phase 1 - rebase PR carries (%d commits):\n%s", len(phase1_lines), "\n".join(phase1_lines))
+            logging.info(
+                "Phase 1 - rebase PR carries (%d commits):\n%s",
+                len(phase1_lines),
+                "\n".join(phase1_lines),
+            )
         else:
             logging.info("Could not find rebase PR merge on dest, skipping phase 1")
 
@@ -324,8 +435,7 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
         "\n".join(phase2_lines) if phase2_lines else "(none)",
     )
     logging.info("Total downstream commits: %d", len(ordered_commits))
-    downstream_commits = "\n".join(ordered_commits)
-    return downstream_commits
+    return phase1_lines, phase2_lines, cutoff_commits
 
 
 def _detect_conflicting_files(gitwd: git.Repo, sha: str) -> set:
@@ -459,6 +569,206 @@ def _safe_cherry_pick(
     return gitwd.head.commit.hexsha != start_head
 
 
+def _find_merge_only_deltas(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> list:
+    """
+    Find downstream two-parent merge commits with merge-only deltas in the later-run replay window.
+
+    A merge-only delta exists when the actual merge commit tree differs from the tree that
+    ``git merge-tree --write-tree parent1 parent2`` would produce automatically.
+
+    Returns a list of (merge_commit, diff_output) tuples in topo/history order.
+    Only looks for eligible merges in the "later-run path" (when a prior rebasebot merge exists).
+    """
+    merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
+    ancestry_path_merges = gitwd.git.log(
+        _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{dest.branch}"
+    ).splitlines()
+
+    first_parent_merge_shas = set(
+        gitwd.git.rev_list("--first-parent", "--merges", f"{merge_base}..dest/{dest.branch}").splitlines()
+    )
+    last_rebase_merge = _find_last_rebase_merge_commit(
+        gitwd,
+        source,
+        dest,
+        ancestry_path_merges,
+        first_parent_merge_shas=first_parent_merge_shas,
+    )
+    if last_rebase_merge is None:
+        logging.info(
+            "No prior rebase merge found; scanning for merge-only deltas from merge_base "
+            "(first-run onboarding path)"
+        )
+        cutoffs = [f"^{merge_base}"]
+    else:
+        cutoffs = [f"^{parent.hexsha}" for parent in last_rebase_merge.parents]
+
+    merge_lines = gitwd.git.log(
+        "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, "--merges",
+        *cutoffs, f"dest/{dest.branch}",
+    ).splitlines()
+    eligible_first_parent_merge_shas = set(
+        gitwd.git.rev_list("--first-parent", "--merges", *cutoffs, f"dest/{dest.branch}").splitlines()
+    )
+
+    result = []
+    for line in merge_lines:
+        if not line.strip():
+            continue
+        sha, _, _ = line.split(" || ", 2)
+        merge = gitwd.commit(sha)
+        parents = list(merge.parents)
+        if len(parents) != _MERGE_COMMIT_PARENT_COUNT:
+            continue
+
+        if _is_rebasebot_synthetic_merge(
+            merge,
+            gitwd,
+            source,
+            dest,
+            first_parent_merge_shas=eligible_first_parent_merge_shas,
+        ):
+            logging.info("Skipping synthetic rebase merge %s during merge-only delta scan", sha[:12])
+            continue
+
+        # Compute auto-merge tree baseline via git merge-tree --write-tree.
+        auto_tree = _merge_tree_write_tree(gitwd, merge)
+
+        if auto_tree == merge.tree.hexsha:
+            logging.info("No merge-only delta in merge %s", sha[:12])
+            continue
+
+        # Diff auto-merge tree against actual merge tree to find affected paths.
+        try:
+            diff = gitwd.git.diff_tree("--no-commit-id", "-r", auto_tree, merge.tree.hexsha)
+        except git.GitCommandError as ex:
+            raise RepoException(
+                f"Failed to diff merge-only delta for merge {sha[:12]}: {ex}"
+            ) from ex
+
+        if diff.strip():
+            logging.info("Found merge-only delta in downstream merge %s", sha[:12])
+            result.append((merge, diff))
+
+    return result
+
+
+def _apply_merge_only_delta(gitwd: git.Repo, merge_commit: Commit, diff_output: str) -> None:
+    """
+    Apply a synthetic carry commit that recovers merge-only content from a downstream merge commit.
+
+    Restores affected paths to the exact state in the original merge commit tree, then creates
+    a commit with message ``UPSTREAM: <carry>: Recover merge-only delta from merge {sha[:12]}``.
+
+    Raises RepoException if the commit cannot be applied cleanly.
+    """
+    sha = merge_commit.hexsha
+    short_sha = sha[:12]
+
+    # Parse the diff-tree output to classify affected paths.
+    added_or_modified: list[str] = []
+    deleted: list[str] = []
+    for line in diff_output.splitlines():
+        if not line.startswith(":"):
+            continue
+        tab_parts = line.split("\t", 1)
+        if len(tab_parts) < 2:
+            continue
+        meta_fields = tab_parts[0].lstrip(":").split()
+        if len(meta_fields) < 5:
+            continue
+        status = meta_fields[4][0]
+        path = tab_parts[1].split("\t")[0]  # handle renames: take src path
+        if status == "D":
+            deleted.append(path)
+        elif status == "R":
+            # Rename: remove old path, add new path
+            renamed_paths = tab_parts[1].split("\t")
+            deleted.append(renamed_paths[0])
+            if len(renamed_paths) > 1:
+                added_or_modified.append(renamed_paths[1])
+        else:
+            added_or_modified.append(path)
+
+    # Compare full tree entries so mode-only and other non-text changes are not mistaken for no-ops.
+    added_or_modified = list(dict.fromkeys(added_or_modified))
+    deleted = list(dict.fromkeys(deleted))
+    affected_paths = list(dict.fromkeys([*added_or_modified, *deleted]))
+    has_change = any(_tree_entry_for_path(gitwd, "HEAD", path) != _tree_entry_for_path(gitwd, sha, path) for path in affected_paths)
+
+    if not has_change:
+        logging.info("Merge-only delta from %s is a no-op after replay; skipping", short_sha)
+        return
+
+    baseline_tree = _merge_tree_write_tree(gitwd, merge_commit)
+    parent_refs = [parent.hexsha for parent in merge_commit.parents]
+    conflicting_paths = []
+    for path in affected_paths:
+        head_entry = _tree_entry_for_path(gitwd, "HEAD", path)
+        baseline_entry = _tree_entry_for_path(gitwd, baseline_tree, path)
+        target_entry = _tree_entry_for_path(gitwd, sha, path)
+        parent_entries = tuple(_tree_entry_for_path(gitwd, parent_ref, path) for parent_ref in parent_refs)
+        if head_entry not in (baseline_entry, target_entry, *parent_entries):
+            conflicting_paths.append(path)
+
+    if conflicting_paths:
+        conflicted = ", ".join(conflicting_paths)
+        logging.warning(
+            "Cannot apply merge-only delta from merge %s cleanly; paths diverged from replay baseline: %s",
+            short_sha,
+            conflicted,
+        )
+        raise RepoException(
+            f"Cannot apply merge-only delta from merge {short_sha} cleanly; "
+            f"rebased paths diverged from merge baseline: {conflicted}"
+        )
+
+    # Restore added/modified paths to their state in the merge commit's tree.
+    if added_or_modified:
+        try:
+            gitwd.git.checkout(sha, "--", *added_or_modified)
+        except git.GitCommandError as ex:
+            logging.warning(
+                "Cannot apply merge-only delta from merge %s cleanly; manual intervention required",
+                short_sha,
+            )
+            raise RepoException(
+                f"Failed to restore merge-only delta paths from merge {short_sha}: {ex}"
+            ) from ex
+
+    # Remove paths that were deleted in the merge commit relative to the auto-merge baseline.
+    for path in deleted:
+        try:
+            gitwd.git.rm("--force", "--ignore-unmatch", "--", path)
+        except git.GitCommandError as ex:
+            logging.warning(
+                "Cannot remove merge-only delta path %s from merge %s cleanly; manual intervention required",
+                path,
+                short_sha,
+            )
+            raise RepoException(
+                f"Failed to remove merge-only delta path {path} from merge {short_sha}: {ex}"
+            ) from ex
+
+    # Verify there are actually staged changes (guard against no-op after checkout).
+    try:
+        gitwd.git.diff("--cached", "--exit-code")
+        logging.info("No staged changes after applying merge-only delta from %s; skipping", short_sha)
+        return
+    except git.GitCommandError:
+        pass  # Non-zero exit code means staged changes exist — proceed.
+
+    commit_msg = f"UPSTREAM: <carry>: Recover merge-only delta from merge {short_sha}"
+    try:
+        gitwd.git.commit("-m", commit_msg)
+    except git.GitCommandError as ex:
+        raise RepoException(
+            f"Failed to create synthetic carry commit for merge-only delta from {short_sha}: {ex}"
+        ) from ex
+
+    logging.info("Created synthetic carry commit for merge-only delta from merge %s", short_sha)
+
+
 def _do_rebase(
     *,
     gitwd: git.Repo,
@@ -478,35 +788,38 @@ def _do_rebase(
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
-    downstream_commits = _identify_downstream_commits(gitwd, source, dest)
+    phase1_lines, phase2_lines, cutoff_commits = _identify_downstream_commit_phases(gitwd, source, dest)
+    phase1_shas = {line.split(" || ", 1)[0].strip() for line in phase1_lines if line.strip()}
+    phase2_shas = {line.split(" || ", 1)[0].strip() for line in phase2_lines if line.strip()}
+    merge_only_deltas = {merge.hexsha: (merge, diff) for merge, diff in _find_merge_only_deltas(gitwd, source, dest)}
 
     commits_to_squash = defaultdict(list)
 
-    for commit_line in downstream_commits.splitlines():
+    def _replay_commit_line(commit_line: str) -> None:
         # Commit contains the message for logging purposes,
         # trim on the first space to get just the commit sha
         sha, commit_message, committer_email = commit_line.split(" || ", 2)
 
         if _in_excluded_commits(sha, exclude_commits):
             logging.info("Explicitly dropping commit from rebase: %s", sha)
-            continue
+            return
 
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
             # and append such commit to a list of commits that we want to prune
             if commit_message == "UPSTREAM: <carry>: Updating and vendoring " + "go modules after an upstream rebase":
                 logging.info("Dropping Go modules commit %s - %s", sha, commit_message)
-                continue
+                return
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy, gitwd, source.branch):
             logging.info("Dropping commit: %s - %s", sha, commit_message)
-            continue
+            return
 
-        if allow_bot_squash:
+        if allow_bot_squash and not _is_recovered_merge_only_carry(commit_message):
             email = _normalize_bot_email(committer_email)
             if email in normalized_bot_emails:
                 commits_to_squash[email].append({"sha": sha, "commit_message": commit_message})
-                continue
+                return
 
         logging.info("Picking commit: %s - %s", sha, commit_message)
 
@@ -517,6 +830,33 @@ def _do_rebase(
             conflict_policy=conflict_policy,
             commit_description=f"{sha} - {commit_message}",
         )
+
+    for commit_line in phase1_lines:
+        _replay_commit_line(commit_line)
+
+    phase2_history_lines = gitwd.git.log(
+        "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, *cutoff_commits, f"dest/{dest.branch}"
+    ).splitlines()
+    for history_line in phase2_history_lines:
+        if not history_line.strip():
+            continue
+
+        sha, _, _ = history_line.split(" || ", 2)
+        if sha in phase1_shas:
+            continue
+
+        merge_only_delta = merge_only_deltas.get(sha)
+        if merge_only_delta is not None:
+            merge_commit, diff_output = merge_only_delta
+            if _in_excluded_commits(merge_commit.hexsha, exclude_commits):
+                logging.info("Explicitly skipping merge-only delta recovery from merge %s", merge_commit.hexsha)
+                continue
+            logging.info("Recovering merge-only delta from downstream merge %s", merge_commit.hexsha[:12])
+            _apply_merge_only_delta(gitwd, merge_commit, diff_output)
+            continue
+
+        if sha in phase2_shas:
+            _replay_commit_line(history_line)
 
     # Here we cherry-pick the bot's commits and then squash them together
     # We also want the newest bot commit message to represent the squashed commits
@@ -549,8 +889,6 @@ def _do_rebase(
             newest_bot_commit_message = newest_created_commit["commit_message"]
 
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", author_string)
-
-
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
     logging.info("Preparing rebase branch")
 
@@ -575,7 +913,7 @@ def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBr
         "-p",
         MERGE_TMP_BRANCH,
         "-m",
-        f"merge upstream/{source.branch} into {dest.branch}",
+        _synthetic_rebase_merge_message(source.branch, dest.branch),
     )
     logging.info(f"Merging upstream/{source.branch} into {dest.branch}")
 
