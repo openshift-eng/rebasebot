@@ -798,6 +798,52 @@ class TestBuildPrBody:
         assert "<details>" in body
         assert "ebsKmsKeyId string" in body
 
+    def test_full_section_ordering_with_all_sections_and_log_url(self):
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(
+            upstream_commit_count=2,
+            dropped_commits=[
+                DroppedCommit(
+                    sha="abcdef1234567890",
+                    message="untagged commit",
+                    reason="dropped by tag policy",
+                )
+            ],
+            art_pr=ArtPrInfo(
+                number=7,
+                title="Update build image to be consistent with ART",
+                url="https://github.com/downstream/repo/pull/7",
+            ),
+            content_loss_warnings=[
+                ContentLossWarning(
+                    sha="fedcba0987654321",
+                    message="UPSTREAM: <carry>: conflicting patch",
+                    file="test.go",
+                    lost_lines=["\tebsKmsKeyId string"],
+                )
+            ],
+        )
+        prow_job = ProwJobContext(
+            job_name="periodic-openshift-release-rebasebot",
+            job_type="periodic",
+            build_id="12345",
+        )
+
+        body = _build_pr_body(summary, source, dest, prow_job)
+
+        section_headings = [
+            "## Summary",
+            "## Dropped downstream commits",
+            "## ART pull request cherry-picked",
+            "## ⚠️ Possible upstream content loss",
+            "## Logs",
+        ]
+        indices = [body.index(heading) for heading in section_headings]
+        assert indices == sorted(indices), "PR body sections must appear in order: " + " → ".join(
+            heading.removeprefix("## ").removeprefix("⚠️ ") for heading in section_headings
+        )
+
 
 class TestUpdatePrBody:
     def test_success(self):

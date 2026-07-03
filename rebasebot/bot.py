@@ -846,9 +846,6 @@ def _build_pr_body(
     ]
     sections.append("## Summary\n" + "\n".join(summary_lines))
 
-    if prow_job.log_url is not None:
-        sections.append(f"## Logs\n\n[View job log]({prow_job.log_url})")
-
     if summary.dropped_commits:
         dropped_lines = [
             f"- `{commit.sha[:7]}` {commit.message} ({commit.reason})"
@@ -895,6 +892,9 @@ def _build_pr_body(
             )
 
         sections.append("## ⚠️ Possible upstream content loss\n\n" + "\n\n".join(details_blocks))
+
+    if prow_job.log_url is not None:
+        sections.append(f"## Logs\n\n[View job log]({prow_job.log_url})")
 
     return "\n\n".join(sections)
 
