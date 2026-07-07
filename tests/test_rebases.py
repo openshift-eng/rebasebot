@@ -1093,3 +1093,42 @@ fi"""
         assert f"{dest.url}:{dest.branch}" in body
         assert "1 new upstream commit" in body
         assert prow_job.log_url in body
+
+    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._is_pr_available")
+    def test_pr_body_untouched_on_quiet_run(
+        self,
+        mocked_is_pr_available,
+        mocked_push_rebase_branch,
+        init_test_repositories,
+        fake_github_provider,
+        tmpdir,
+    ):
+        """A run with no new upstream commits must not clobber a previously-rendered,
+        content-rich PR body with an empty one: rebase_summary only carries fresh data
+        when needs_rebase is True.
+        """
+        source, rebase, dest = init_test_repositories
+
+        self._setup_github_provider(fake_github_provider)
+        mocked_push_rebase_branch.return_value = True
+
+        pull_req = MagicMock()
+        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.update.return_value = True
+        pull_req.html_url = "https://github.com/dest/dest/pull/1"
+        mocked_is_pr_available.return_value = pull_req, True
+
+        prow_job = ProwJobContext(
+            job_name="periodic-openshift-release-rebasebot",
+            job_type="periodic",
+            build_id="888",
+        )
+        args = self._make_rebase_args(source, dest, rebase, tmpdir)
+
+        with patch("rebasebot.prow.ProwJobContext.from_env", return_value=prow_job):
+            result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result
+        body_updates = [call for call in pull_req.update.call_args_list if "body" in call.kwargs]
+        assert not body_updates

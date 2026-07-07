@@ -1288,7 +1288,12 @@ def run(
         # the branch was rebased, but the open PR already exists, update its title and body.
         try:
             _update_pr_title(gitwd, pull_req, source, dest)
-            _update_pr_body(pull_req, rebase_summary, source, dest, prow_job)
+            # Only regenerate the body when a rebase actually ran this run: rebase_summary
+            # only carries fresh data in that case. On a quiet run (no upstream commits),
+            # rebase_summary is empty and would clobber the accurate body from the last
+            # real rebase with one describing zero commits/drops/content-loss.
+            if needs_rebase:
+                _update_pr_body(pull_req, rebase_summary, source, dest, prow_job)
         except Exception as ex:
             logging.exception(f"error updating PR {dest.ns}/{dest.name} #{pull_req.id}")
             notify_slack_error(
