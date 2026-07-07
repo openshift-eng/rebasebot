@@ -46,7 +46,7 @@ class ContentLossWarning:
     lost_lines: list[str]
 
 
-@dataclass
+@dataclass(frozen=True)
 class RebaseSummary:
     """Metadata about a rebase run, used when rendering the rebase PR body."""
 

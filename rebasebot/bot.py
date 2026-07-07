@@ -1190,13 +1190,15 @@ def run(
             upstream_commit_count = int(gitwd.git.rev_list("--count", f"dest/{dest.branch}..source/{source.branch}"))
         else:
             upstream_commit_count = 0
-        rebase_summary = RebaseSummary(upstream_commit_count=upstream_commit_count)
+        dropped_commits: list[DroppedCommit] = []
+        art_pr: ArtPrInfo | None = None
+        content_loss_warnings: list[ContentLossWarning] = []
 
         if needs_rebase:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             _prepare_rebase_branch(gitwd, source, dest)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
-            rebase_summary.dropped_commits, rebase_summary.content_loss_warnings = _do_rebase(
+            dropped_commits, content_loss_warnings = _do_rebase(
                 gitwd=gitwd,
                 source=source,
                 dest=dest,
@@ -1208,10 +1210,8 @@ def run(
                 update_go_modules=update_go_modules,
             )
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-            rebase_summary.art_pr, art_content_loss = _cherrypick_art_pull_request(
-                gitwd, dest_repo, dest, conflict_policy
-            )
-            rebase_summary.content_loss_warnings.extend(art_content_loss)
+            art_pr, art_content_loss = _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
+            content_loss_warnings = content_loss_warnings + art_content_loss
         elif always_run_hooks:
             # When no rebase is needed but hooks should still run,
             # reset the rebase branch to dest (which already contains source)
@@ -1224,6 +1224,13 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
+
+        rebase_summary = RebaseSummary(
+            upstream_commit_count=upstream_commit_count,
+            dropped_commits=dropped_commits,
+            art_pr=art_pr,
+            content_loss_warnings=content_loss_warnings,
+        )
 
     except (RepoException, LifecycleHookScriptException) as ex:
         logging.error(
