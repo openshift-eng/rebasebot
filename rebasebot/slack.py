@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import requests
 
 from rebasebot.prow import ProwJobContext
@@ -48,7 +50,10 @@ def _message_slack(webhook_url: str | None, msg: str, blocks: list[dict]) -> Non
     """Send a message to Slack via a webhook if one is configured."""
     if webhook_url is None:
         return
-    requests.post(webhook_url, json={"text": msg, "blocks": blocks}, timeout=5)
+    try:
+        requests.post(webhook_url, json={"text": msg, "blocks": blocks}, timeout=5).raise_for_status()
+    except requests.exceptions.RequestException:
+        logging.exception("Failed to post Slack notification")
 
 
 class SlackNotifier:
