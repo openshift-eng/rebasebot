@@ -1041,41 +1041,42 @@ def _report_result(  # pylint: disable=R0917
     pr_required: bool,
     pr_available: bool,
     pr_url: str,
-    dest_url: str,
+    dest: GitHubBranch,
     *,
     notify_slack: Callable[[str, str], None],
 ) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
+    label = dest.label
     message = None
     if needs_rebase:
         if not pr_available:
             if pr_required:
                 # Case 1: either source or dest repos were updated and there is no PR yet.
                 # We create a new PR then.
-                message = f"I created a new rebase PR: {pr_url}"
+                message = f"Created a new rebase PR for `{label}`: <{pr_url}|view PR>"
             else:
                 # Rebase was performed but rebase branch has same content as dest.
                 # No PR is required.
-                message = f"Destination repo {dest_url} already contains the latest changes"
+                message = f"`{label}` already contains the latest changes"
         else:
             # Case 2: repos were updated recently, but we already have an open PR.
             # We updated the exiting PR.
-            message = f"I updated existing rebase PR: {pr_url}"
+            message = f"Updated the rebase PR for `{label}`: <{pr_url}|view PR>"
     elif pr_url:
         if pr_required and not pr_available:
             # Case 3: No rebase needed, but hooks made changes requiring a new PR.
-            message = f"I created a new rebase PR (hooks enabled): {pr_url}"
+            message = f"Created a new rebase PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
         elif pr_required and pr_available:
             # Case 4: No rebase needed, but hooks made changes to an existing PR.
-            message = f"I updated existing rebase PR (hooks enabled): {pr_url}"
+            message = f"Updated the rebase PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
         elif pr_available:
             # Case 5: we created a PR, but no changes were done to the repos after that.
             # Just inform that the PR is in a good shape.
-            message = f"PR {pr_url} already contains the latest changes"
+            message = f"`{label}` already contains the latest changes: <{pr_url}|view PR>"
     else:
         # Case 6: source and dest repos are the same (git diff is empty), and there is no PR.
         # Just inform that there is nothing to update in the dest repository.
-        message = f"Destination repo {dest_url} already contains the latest changes"
+        message = f"`{label}` already contains the latest changes"
 
     if message is not None:
         logging.info(message)
@@ -1134,14 +1135,14 @@ def run(
                     f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
                 )
                 notifier.notify(
-                    f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting",
+                    f"`{dest.label}` has `rebase/manual` label set on <{pull_req.html_url}|PR> — skipping",
                     "🖐️",
                 )
                 return True
 
     except Exception as ex:
         logging.exception("error fetching repo information from GitHub")
-        notify_slack_error(notifier, "I got an error fetching repo information from GitHub", ex)
+        notify_slack_error(notifier, f"Failed to fetch repo information from GitHub for `{dest.label}`", ex)
         return False
 
     try:
@@ -1171,8 +1172,8 @@ def run(
         )
         notify_slack_error(
             notifier,
-            f"I got an error initializing the git directory with remotes: source repo {source.url}, "
-            f"destination repo {dest.url}, rebase repo {rebase.url}",
+            f"Failed to initialize git working directory for `{dest.label}` "
+            f"(source `{source.url}`, rebase `{rebase.url}`)",
             ex,
         )
         return False
@@ -1181,7 +1182,7 @@ def run(
         hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
     except Exception as ex:
         logging.exception("error fetching lifecycle hook scripts")
-        notify_slack_error(notifier, "Failed to fetch lifecycle hook scripts", ex)
+        notify_slack_error(notifier, f"Failed to fetch lifecycle hook scripts for `{dest.label}`", ex)
         return False
 
     try:
@@ -1246,9 +1247,7 @@ def run(
 
         notify_slack_error(
             notifier,
-            f"I got an exception trying to rebase "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}",
+            f"Failed to rebase `{source.url}:{source.branch}` into `{dest.label}`",
             ex,
         )
         return False
@@ -1279,7 +1278,7 @@ def run(
             logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
             notify_slack_error(
                 notifier,
-                f"I got an exception pushing to {rebase.ns}/{rebase.name}:{rebase.branch}",
+                f"Failed to push rebase branch to `{rebase.label}` for `{dest.label}`",
                 ex,
             )
             return False
@@ -1297,7 +1296,7 @@ def run(
             logging.exception(f"error updating PR {dest.ns}/{dest.name} #{pull_req.id}")
             notify_slack_error(
                 notifier,
-                f"I got an error updating PR {dest.ns}/{dest.name} #{pull_req.id}",
+                f"Failed to update PR #{pull_req.id} for `{dest.label}`",
                 ex,
             )
             return False
@@ -1329,14 +1328,14 @@ def run(
         return False
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
-        notify_slack_error(notifier, "Failed to create a pull request", ex)
+        notify_slack_error(notifier, f"Failed to create a pull request for `{dest.label}`", ex)
 
         return False
     except Exception as ex:
         logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}")
-        notify_slack_error(notifier, f"I got an error creating a rebase PR in {dest.ns}/{dest.name}", ex)
+        notify_slack_error(notifier, f"Failed to create a rebase PR for `{dest.label}`", ex)
 
         return False
 
-    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest.url, notify_slack=notifier.notify)
+    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest, notify_slack=notifier.notify)
     return True

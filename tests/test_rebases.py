@@ -475,9 +475,9 @@ class TestRebases:
 
         assert mocked_post.call_args.args[0] == "test://webhook"
         posted_json = mocked_post.call_args.kwargs["json"]
-        assert posted_json["text"].startswith("I created a new rebase PR:")
+        assert posted_json["text"].startswith(f"Created a new rebase PR for `{dest.label}`:")
         blocks = posted_json["blocks"]
-        assert blocks[0]["text"]["text"].startswith("✅ I created a new rebase PR:")
+        assert blocks[0]["text"]["text"].startswith(f"✅ Created a new rebase PR for `{dest.label}`:")
 
         assert (
             log_graph

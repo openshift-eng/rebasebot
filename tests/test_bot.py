@@ -278,7 +278,8 @@ class TestIsPrRequired:
 
 
 class TestReportResult:
-    dest_url = "https://github.com/user/repo"
+    dest = GitHubBranch(url="https://github.com/user/repo", ns="user", name="repo", branch="main")
+    label = dest.label
 
     @pytest.mark.parametrize(
         "needs_rebase, pr_required, pr_available, pr_url, slack_message",
@@ -289,14 +290,14 @@ class TestReportResult:
                 True,
                 False,
                 "https://github.com/user/repo/pull/123",
-                "I created a new rebase PR: https://github.com/user/repo/pull/123",
+                f"Created a new rebase PR for `{label}`: <https://github.com/user/repo/pull/123|view PR>",
             ),
             (
                 True,
                 False,
                 True,
                 "https://github.com/user/repo/pull/456",
-                "I updated existing rebase PR: https://github.com/user/repo/pull/456",
+                f"Updated the rebase PR for `{label}`: <https://github.com/user/repo/pull/456|view PR>",
             ),
             # Rebase performed but no changes between rebase and dest (no PR needed)
             (
@@ -304,7 +305,7 @@ class TestReportResult:
                 False,
                 False,
                 None,
-                f"Destination repo {dest_url} already contains the latest changes",
+                f"`{label}` already contains the latest changes",
             ),
             # Cases when needs_rebase is False
             (
@@ -312,14 +313,14 @@ class TestReportResult:
                 False,
                 True,
                 "https://github.com/user/repo/pull/100",
-                "PR https://github.com/user/repo/pull/100 already contains the latest changes",
+                f"`{label}` already contains the latest changes: <https://github.com/user/repo/pull/100|view PR>",
             ),
             (
                 False,
                 False,
                 False,
                 "",
-                f"Destination repo {dest_url} already contains the latest changes",
+                f"`{label}` already contains the latest changes",
             ),
             # Cases when hooks made changes
             (
@@ -327,14 +328,15 @@ class TestReportResult:
                 True,
                 False,
                 "https://github.com/user/repo/pull/200",
-                "I created a new rebase PR (hooks enabled): https://github.com/user/repo/pull/200",
+                f"Created a new rebase PR for `{label}` (hooks enabled): "
+                "<https://github.com/user/repo/pull/200|view PR>",
             ),
             (
                 False,
                 True,
                 True,
                 "https://github.com/user/repo/pull/201",
-                "I updated existing rebase PR (hooks enabled): https://github.com/user/repo/pull/201",
+                f"Updated the rebase PR for `{label}` (hooks enabled): <https://github.com/user/repo/pull/201|view PR>",
             ),
         ],
     )
@@ -355,7 +357,7 @@ class TestReportResult:
             pr_required,
             pr_available,
             pr_url,
-            self.dest_url,
+            self.dest,
             notify_slack=notify_slack,
         )
 
@@ -481,7 +483,8 @@ class TestRunSlackErrorMessages:
 
         assert result is False
         expected_message = (
-            f"Failed to create a pull request:\n```{http_error}```\nResponse:\n```{mock_response.text}```"
+            f"Failed to create a pull request for `{dest.label}`:\n"
+            f"```{http_error}```\nResponse:\n```{mock_response.text}```"
         )
         expected_blocks = _build_slack_blocks(expected_message, "❌", None)
         mocked_post.assert_called_once_with(
