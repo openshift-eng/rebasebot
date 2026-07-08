@@ -1132,3 +1132,53 @@ fi"""
         assert result
         body_updates = [call for call in pull_req.update.call_args_list if "body" in call.kwargs]
         assert not body_updates
+
+    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._is_pr_available")
+    def test_pr_body_refreshed_on_hooks_only_run(
+        self,
+        mocked_is_pr_available,
+        mocked_push_rebase_branch,
+        init_test_repositories,
+        fake_github_provider,
+        tmpdir,
+    ):
+        """A hooks-only run (always_run_hooks=True, no rebase needed) never has real rebase
+        data to lose -- _do_rebase()/_cherrypick_art_pull_request() never run on this path,
+        even when the PR was first created via this same path -- so it's safe (and desirable,
+        for a fresh log link) to refresh the body here, unlike the fully idle case above.
+        """
+        source, rebase, dest = init_test_repositories
+
+        pre_rebase_hook_script = "#!/bin/bash\ntouch pre-rebase-hook.success"
+        with CommitBuilder(dest) as cb:
+            cb.add_file("pre-rebase-hook-script.sh", pre_rebase_hook_script)
+            cb.commit("UPSTREAM: <carry>: add test hook script")
+
+        self._setup_github_provider(fake_github_provider)
+        mocked_push_rebase_branch.return_value = True
+
+        pull_req = MagicMock()
+        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.update.return_value = True
+        pull_req.html_url = "https://github.com/dest/dest/pull/1"
+        mocked_is_pr_available.return_value = pull_req, True
+
+        prow_job = ProwJobContext(
+            job_name="periodic-openshift-release-rebasebot",
+            job_type="periodic",
+            build_id="888",
+        )
+        args = self._make_rebase_args(source, dest, rebase, tmpdir)
+        args.always_run_hooks = True
+        args.pre_rebase_hook = [f"git:dest/{dest.branch}:pre-rebase-hook-script.sh"]
+
+        with patch("rebasebot.prow.ProwJobContext.from_env", return_value=prow_job):
+            result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result
+        body_updates = [call for call in pull_req.update.call_args_list if "body" in call.kwargs]
+        assert len(body_updates) == 1
+        body = body_updates[0].kwargs["body"]
+        assert "0 new upstream commits" in body
+        assert prow_job.log_url in body

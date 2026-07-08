@@ -1288,11 +1288,14 @@ def run(
         # the branch was rebased, but the open PR already exists, update its title and body.
         try:
             _update_pr_title(gitwd, pull_req, source, dest)
-            # Only regenerate the body when a rebase actually ran this run: rebase_summary
-            # only carries fresh data in that case. On a quiet run (no upstream commits),
-            # rebase_summary is empty and would clobber the accurate body from the last
-            # real rebase with one describing zero commits/drops/content-loss.
-            if needs_rebase:
+            # Only regenerate the body when the working tree was actually touched this run
+            # (a real rebase, or an always-run-hooks pass). rebase_summary is empty on a
+            # truly idle run, and _do_rebase()/_cherrypick_art_pull_request() never run in
+            # the always-run-hooks-only path either, so a PR born from hooks alone never
+            # has rich data to lose. The only case with real data at risk is a fully idle
+            # run (neither branch above executed), where the PR body may still describe an
+            # earlier real rebase.
+            if needs_rebase or always_run_hooks:
                 _update_pr_body(pull_req, rebase_summary, source, dest, prow_job)
         except Exception as ex:
             logging.exception(f"error updating PR {dest.ns}/{dest.name} #{pull_req.id}")
