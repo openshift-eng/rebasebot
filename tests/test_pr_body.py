@@ -37,7 +37,7 @@ class TestBuildPrBody:
             "- **Destination**: `https://github.com/downstream/repo:release`\n"
             "- **3 new upstream commits**\n\n"
             "## Logs\n\n"
-            "[View job log](https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/"
+            "[View job log](https://prow.ci.openshift.org/view/gs/test-platform-results/logs/"
             "periodic-openshift-release-rebasebot/12345)"
         )
 

@@ -30,7 +30,7 @@ class TestProwJobContext:
         )
         assert ctx.is_rehearsal is False
         assert (
-            ctx.log_url == "https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/"
+            ctx.log_url == "https://prow.ci.openshift.org/view/gs/test-platform-results/logs/"
             "periodic-openshift-release-rebasebot/1234567890"
         )
 
@@ -42,7 +42,7 @@ class TestProwJobContext:
         )
         assert ctx.is_rehearsal is True
         assert (
-            ctx.log_url == "https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/"
+            ctx.log_url == "https://prow.ci.openshift.org/view/gs/test-platform-results/logs/"
             "rehearse-1234-periodic-openshift-release-rebasebot/9876543210"
         )
 
@@ -80,7 +80,7 @@ class TestProwJobContext:
         assert ctx.is_rehearsal is False
         assert (
             ctx.log_url
-            == "https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/periodic-openshift-release-rebasebot/555"
+            == "https://prow.ci.openshift.org/view/gs/test-platform-results/logs/periodic-openshift-release-rebasebot/555"
         )
 
 

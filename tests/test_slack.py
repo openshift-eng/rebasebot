@@ -14,6 +14,7 @@
 from unittest.mock import patch
 
 import pytest
+import requests
 
 from rebasebot.prow import ProwJobContext
 from rebasebot.slack import SlackNotifier, _build_slack_blocks
@@ -29,7 +30,7 @@ class TestBuildSlackBlocks:
             (
                 "All good",
                 "✅",
-                "https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/job/123",
+                "https://prow.ci.openshift.org/view/gs/test-platform-results/logs/job/123",
                 2,
             ),
         ],
@@ -104,3 +105,19 @@ class TestSlackNotifier:
             json={"text": message, "blocks": expected_blocks},
             timeout=5,
         )
+
+    @patch("rebasebot.slack.requests.post")
+    def test_webhook_failure_does_not_propagate(self, mocked_post):
+        mocked_post.side_effect = requests.exceptions.ConnectionError("boom")
+        prow_job = ProwJobContext(job_name="periodic-job", job_type="periodic", build_id="99")
+        notifier = SlackNotifier("test://webhook", prow_job)
+
+        notifier.notify("hello", "✅")  # must not raise
+
+    @patch("rebasebot.slack.requests.post")
+    def test_webhook_http_error_does_not_propagate(self, mocked_post):
+        mocked_post.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError("404")
+        prow_job = ProwJobContext(job_name="periodic-job", job_type="periodic", build_id="99")
+        notifier = SlackNotifier("test://webhook", prow_job)
+
+        notifier.notify("hello", "✅")  # must not raise

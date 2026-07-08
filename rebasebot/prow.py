@@ -54,5 +54,5 @@ class ProwJobContext:
     def log_url(self) -> str | None:
         """Return the Spyglass log URL for this Prow job, if name and build ID are known."""
         if self.job_name is not None and self.build_id is not None:
-            return f"https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/{self.job_name}/{self.build_id}"
+            return f"https://prow.ci.openshift.org/view/gs/test-platform-results/logs/{self.job_name}/{self.build_id}"
         return None
