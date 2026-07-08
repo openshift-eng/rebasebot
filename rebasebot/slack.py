@@ -52,8 +52,10 @@ def _message_slack(webhook_url: str | None, msg: str, blocks: list[dict]) -> Non
         return
     try:
         requests.post(webhook_url, json={"text": msg, "blocks": blocks}, timeout=5).raise_for_status()
-    except requests.exceptions.RequestException:
-        logging.exception("Failed to post Slack notification")
+    except requests.exceptions.RequestException as ex:
+        # Don't log the exception (str(ex)/traceback embeds the request URL, which
+        # for a Slack webhook includes a secret token) or the webhook_url itself.
+        logging.error("Failed to post Slack notification (%s)", type(ex).__name__)
 
 
 class SlackNotifier:

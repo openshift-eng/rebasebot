@@ -121,3 +121,20 @@ class TestSlackNotifier:
         notifier = SlackNotifier("test://webhook", prow_job)
 
         notifier.notify("hello", "✅")  # must not raise
+
+    @patch("rebasebot.slack.requests.post")
+    def test_webhook_failure_does_not_log_secret_url(self, mocked_post, caplog):
+        # A RequestException's message embeds the request URL, which for a real
+        # Slack webhook includes a secret token. Make sure that never ends up in logs.
+        secret_webhook = "https://hooks.slack.com/services/SECRET/TOKEN/abc"
+        mocked_post.side_effect = requests.exceptions.ConnectionError(
+            f"Max retries exceeded with url: {secret_webhook}"
+        )
+        prow_job = ProwJobContext(job_name="periodic-job", job_type="periodic", build_id="99")
+        notifier = SlackNotifier(secret_webhook, prow_job)
+
+        notifier.notify("hello", "✅")
+
+        assert secret_webhook not in caplog.text
+        assert "SECRET" not in caplog.text
+        assert "Failed to post Slack notification" in caplog.text
