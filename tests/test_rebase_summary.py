@@ -135,12 +135,12 @@ class TestDoRebaseContentLossWarnings:
     def test_warn_policy_populates_content_loss_warnings(self, working_repo_context, fake_github_provider):
         ctx = working_repo_context
         CommitBuilder(ctx.source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
-        CommitBuilder(ctx.dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        sync_base_carry = (
+            CommitBuilder(ctx.dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        )
         CommitBuilder(ctx.source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
-        carry = (
-            CommitBuilder(ctx.dest)
-            .update_file("test.go", _DOWNSTREAM_CARRY_CODE)
-            .commit("UPSTREAM: <carry>: add snapshot timeout")
+        CommitBuilder(ctx.dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+            "UPSTREAM: <carry>: add snapshot timeout"
         )
         ctx.fetch_remotes()
         _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
@@ -165,11 +165,12 @@ class TestDoRebaseContentLossWarnings:
             if warning.file == "test.go" and any("ebsKmsKeyId" in line for line in warning.lost_lines)
         ]
         assert kms_warnings
-        carry_warnings = [
-            warning for warning in kms_warnings if warning.message == "UPSTREAM: <carry>: add snapshot timeout"
-        ]
-        if carry_warnings:
-            assert carry_warnings[0].sha == carry.hexsha
+        # The KMS lines are lost when "sync base" re-overwrites test.go with the
+        # pre-KMS content on top of source (which by then already has KMS support),
+        # not when "add snapshot timeout" is cherry-picked afterward.
+        carry_warnings = [warning for warning in kms_warnings if warning.message == "UPSTREAM: <carry>: sync base"]
+        assert carry_warnings
+        assert carry_warnings[0].sha == sync_base_carry.hexsha
 
     def test_auto_policy_leaves_content_loss_warnings_empty(self, working_repo_context, fake_github_provider):
         ctx = working_repo_context
