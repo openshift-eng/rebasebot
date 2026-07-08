@@ -22,6 +22,8 @@ import os
 import shutil
 import sys
 from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import git
 import git.compat
@@ -35,6 +37,10 @@ from github3.repos.repo import Repository
 from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
+from rebasebot.pr_body import build_pr_body
+from rebasebot.prow import ProwJobContext
+from rebasebot.rebase_summary import ArtPrInfo, ContentLossWarning, DroppedCommit, RebaseSummary
+from rebasebot.slack import SlackNotifier
 
 
 class RepoException(Exception):
@@ -54,13 +60,39 @@ MERGE_TMP_BRANCH = "merge-tmp"
 _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
+_GO_MODULES_CARRY_COMMIT_MESSAGE = "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase"
 
 
-def _message_slack(webhook_url: str, msg: str) -> None:
-    """Send a message to Slack via a webhook if one is configured."""
-    if webhook_url is None:
-        return
-    requests.post(webhook_url, json={"text": msg}, timeout=5)
+@dataclass(frozen=True)
+class CherryPickResult:
+    """Outcome of a cherry-pick, including any detected upstream content loss."""
+
+    created_commit: bool
+    content_loss: list[tuple[str, list[str]]]
+
+
+def _content_loss_warnings(sha: str, message: str, result: CherryPickResult) -> list[ContentLossWarning]:
+    return [
+        ContentLossWarning(sha=sha, message=message, file=filename, lost_lines=lost_lines)
+        for filename, lost_lines in result.content_loss
+    ]
+
+
+def notify_slack_error(notifier: SlackNotifier, description: str, ex: Exception) -> None:
+    """Report an exception to Slack, inferring emoji and message detail from the exception itself.
+
+    `description` should be a plain sentence with no trailing punctuation and no
+    exception text embedded — this function appends the fenced exception text
+    (and, for HTTPError, the fenced response body) itself.
+    """
+    if isinstance(ex, (RepoException, LifecycleHookScriptException)):
+        emoji = "🖐️"
+    else:
+        emoji = "❌"
+    message = f"{description}:\n```{ex}```"
+    if isinstance(ex, requests.exceptions.HTTPError) and ex.response is not None:
+        message += f"\nResponse:\n```{ex.response.text}```"
+    notifier.notify(message, emoji)
 
 
 def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> bool:
@@ -404,7 +436,7 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
 
 def _safe_cherry_pick(
     gitwd: git.Repo, sha: str, source_branch: str, conflict_policy: str, commit_description: str
-) -> bool:
+) -> CherryPickResult:
     """
     Cherry-pick a commit with conflict detection based on conflict_policy.
 
@@ -413,7 +445,8 @@ def _safe_cherry_pick(
     -Xtheirs, then cherry-picks with -Xtheirs, then verifies only the
     files that actually conflicted for upstream content loss.
 
-    Returns True when the cherry-pick creates a commit and False when it is skipped as empty.
+    Returns a CherryPickResult indicating whether a commit was created and any
+    detected upstream content loss per file.
     """
     start_head = gitwd.head.commit.hexsha
 
@@ -429,14 +462,16 @@ def _safe_cherry_pick(
         if not _resolve_rebase_conflicts(gitwd):
             raise RepoException(f"Git rebase failed: {ex}") from ex
 
+    created_commit = gitwd.head.commit.hexsha != start_head
+
     # If no conflicts were detected, -Xtheirs had no effect — skip check
     if conflict_policy == "auto" or not conflicted_files:
-        return gitwd.head.commit.hexsha != start_head
+        return CherryPickResult(created_commit=created_commit, content_loss=[])
 
     # Only verify files that had actual merge conflicts
     lost_content = _check_upstream_content_loss(gitwd, source_branch, conflicted_files)
     if not lost_content:
-        return gitwd.head.commit.hexsha != start_head
+        return CherryPickResult(created_commit=created_commit, content_loss=[])
 
     for filename, lost_lines in lost_content:
         logging.warning(
@@ -456,7 +491,7 @@ def _safe_cherry_pick(
             f"upstream additions. Manual resolution is required."
         )
 
-    return gitwd.head.commit.hexsha != start_head
+    return CherryPickResult(created_commit=created_commit, content_loss=lost_content)
 
 
 def _do_rebase(
@@ -470,9 +505,11 @@ def _do_rebase(
     bot_emails: list,
     exclude_commits: list,
     update_go_modules: bool,
-) -> None:
+) -> tuple[list[DroppedCommit], list[ContentLossWarning]]:
     logging.info("Performing rebase")
 
+    dropped_commits: list[DroppedCommit] = []
+    content_loss_warnings: list[ContentLossWarning] = []
     allow_bot_squash = len(bot_emails) > 0
     normalized_bot_emails = {_normalize_bot_email(email) for email in bot_emails}
     if allow_bot_squash:
@@ -489,17 +526,38 @@ def _do_rebase(
 
         if _in_excluded_commits(sha, exclude_commits):
             logging.info("Explicitly dropping commit from rebase: %s", sha)
+            dropped_commits.append(
+                DroppedCommit(
+                    sha=sha,
+                    message=commit_message,
+                    reason="explicitly excluded via --exclude-commits",
+                )
+            )
             continue
 
         if update_go_modules:
             # If we find a commit with such name, we know that it is a go mod update commit
             # and append such commit to a list of commits that we want to prune
-            if commit_message == "UPSTREAM: <carry>: Updating and vendoring " + "go modules after an upstream rebase":
+            if commit_message == _GO_MODULES_CARRY_COMMIT_MESSAGE:
                 logging.info("Dropping Go modules commit %s - %s", sha, commit_message)
+                dropped_commits.append(
+                    DroppedCommit(
+                        sha=sha,
+                        message=commit_message,
+                        reason="superseded by Go module regeneration",
+                    )
+                )
                 continue
 
         if not _add_to_rebase(commit_message, source_repo, tag_policy, gitwd, source.branch):
             logging.info("Dropping commit: %s - %s", sha, commit_message)
+            dropped_commits.append(
+                DroppedCommit(
+                    sha=sha,
+                    message=commit_message,
+                    reason="dropped by tag policy",
+                )
+            )
             continue
 
         if allow_bot_squash:
@@ -510,13 +568,14 @@ def _do_rebase(
 
         logging.info("Picking commit: %s - %s", sha, commit_message)
 
-        _safe_cherry_pick(
+        pick_result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=sha,
             source_branch=source.branch,
             conflict_policy=conflict_policy,
             commit_description=f"{sha} - {commit_message}",
         )
+        content_loss_warnings.extend(_content_loss_warnings(sha, commit_message, pick_result))
 
     # Here we cherry-pick the bot's commits and then squash them together
     # We also want the newest bot commit message to represent the squashed commits
@@ -526,13 +585,17 @@ def _do_rebase(
             created_commit_count = 0
             newest_created_commit = None
             for commit in value:
-                if _safe_cherry_pick(
+                pick_result = _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit["sha"],
                     source_branch=source.branch,
                     conflict_policy=conflict_policy,
                     commit_description=f"{commit['sha']} - {commit['commit_message']}",
-                ):
+                )
+                content_loss_warnings.extend(
+                    _content_loss_warnings(commit["sha"], commit["commit_message"], pick_result)
+                )
+                if pick_result.created_commit:
                     created_commit_count += 1
                     newest_created_commit = commit
 
@@ -549,6 +612,8 @@ def _do_rebase(
             newest_bot_commit_message = newest_created_commit["commit_message"]
 
             gitwd.git.commit("-m", newest_bot_commit_message, "--author", author_string)
+
+    return dropped_commits, content_loss_warnings
 
 
 def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
@@ -657,12 +722,13 @@ def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
 
 def _cherrypick_art_pull_request(
     gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch, conflict_policy: str = "auto"
-) -> None:
+) -> tuple[ArtPrInfo | None, list[ContentLossWarning]]:
     """
     Looks at the destination repository and if there is an open ART pull request
     that updates the build image, it includes it in the rebase.
     """
     logging.info("Checking for ART pull request")
+    content_loss_warnings: list[ContentLossWarning] = []
     for pull_request in dest_repo.pull_requests(state="open", base=f"{dest.branch}"):
         assert isinstance(pull_request, ShortPullRequest)  # type hint
         if "consistent with ART" in pull_request.title and pull_request.user.login == "openshift-bot":
@@ -678,13 +744,26 @@ def _cherrypick_art_pull_request(
 
             for commit in pull_request.commits():
                 assert isinstance(commit, ShortCommit)
-                _safe_cherry_pick(
+                commit_message = commit.commit.message.split("\n", 1)[0] if commit.commit.message else commit.sha
+                pick_result = _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit.sha,
                     source_branch=dest.branch,
                     conflict_policy=conflict_policy,
                     commit_description=f"ART PR commit {commit.sha}",
                 )
+                content_loss_warnings.extend(_content_loss_warnings(commit.sha, commit_message, pick_result))
+
+            return (
+                ArtPrInfo(
+                    number=pull_request.number,
+                    title=pull_request.title,
+                    url=pull_request.html_url,
+                ),
+                content_loss_warnings,
+            )
+
+    return None, content_loss_warnings
 
 
 def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
@@ -737,6 +816,8 @@ def _create_pr(
     source: GitHubBranch,
     rebase: GitHubBranch,
     gitwd: git.Repo,
+    summary: RebaseSummary,
+    prow_job: ProwJobContext,
     title_prefix: str = "",
 ) -> str:
     source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
@@ -759,6 +840,7 @@ def _create_pr(
         f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
         data={
             "title": title,
+            "body": build_pr_body(summary, source, dest, prow_job),
             "head": rebase.branch,
             "head_repo": f"{rebase.ns}/{rebase.name}",
             "base": dest.branch,
@@ -915,6 +997,20 @@ def _push_rebase_branch(gitwd: git.Repo, rebase: GitHubBranch) -> None:
         raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
 
 
+def _update_pr_body(
+    pull_req: ShortPullRequest,
+    summary: RebaseSummary,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    prow_job: ProwJobContext,
+) -> None:
+    """Regenerate and overwrite the pull request body on every push."""
+    body = build_pr_body(summary, source, dest, prow_job)
+    logging.info("Updating pull request body")
+    if not pull_req.update(body=body):
+        raise PullRequestUpdateException(f"Error updating body for pull request: {pull_req.html_url}")
+
+
 def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHubBranch, dest: GitHubBranch) -> None:
     """Updates the pull request title to match the current state of the rebase branch
     Only updates the title if the title contains the word Merge.
@@ -941,43 +1037,50 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
 
 
 def _report_result(  # pylint: disable=R0917
-    needs_rebase: bool, pr_required: bool, pr_available: bool, pr_url: str, dest_url: str, slack_webhook: str
+    needs_rebase: bool,
+    pr_required: bool,
+    pr_available: bool,
+    pr_url: str,
+    dest: GitHubBranch,
+    *,
+    notify_slack: Callable[[str, str], None],
 ) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
+    label = dest.label
     message = None
     if needs_rebase:
         if not pr_available:
             if pr_required:
                 # Case 1: either source or dest repos were updated and there is no PR yet.
                 # We create a new PR then.
-                message = f"I created a new rebase PR: {pr_url}"
+                message = f"Created a new rebase PR for `{label}`: <{pr_url}|view PR>"
             else:
                 # Rebase was performed but rebase branch has same content as dest.
                 # No PR is required.
-                message = f"Destination repo {dest_url} already contains the latest changes"
+                message = f"`{label}` already contains the latest changes"
         else:
             # Case 2: repos were updated recently, but we already have an open PR.
             # We updated the exiting PR.
-            message = f"I updated existing rebase PR: {pr_url}"
+            message = f"Updated the rebase PR for `{label}`: <{pr_url}|view PR>"
     elif pr_url:
         if pr_required and not pr_available:
             # Case 3: No rebase needed, but hooks made changes requiring a new PR.
-            message = f"I created a new rebase PR (hooks enabled): {pr_url}"
+            message = f"Created a new rebase PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
         elif pr_required and pr_available:
             # Case 4: No rebase needed, but hooks made changes to an existing PR.
-            message = f"I updated existing rebase PR (hooks enabled): {pr_url}"
+            message = f"Updated the rebase PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
         elif pr_available:
             # Case 5: we created a PR, but no changes were done to the repos after that.
             # Just inform that the PR is in a good shape.
-            message = f"PR {pr_url} already contains the latest changes"
+            message = f"`{label}` already contains the latest changes: <{pr_url}|view PR>"
     else:
         # Case 6: source and dest repos are the same (git diff is empty), and there is no PR.
         # Just inform that there is nothing to update in the dest repository.
-        message = f"Destination repo {dest_url} already contains the latest changes"
+        message = f"`{label}` already contains the latest changes"
 
     if message is not None:
         logging.info(message)
-        _message_slack(slack_webhook, message)
+        notify_slack(message, "✅")
 
 
 def run(
@@ -1000,8 +1103,17 @@ def run(
     ignore_manual_label: bool = False,
     always_run_hooks: bool = False,
     title_prefix: str = "",
+    prow_job: ProwJobContext | None = None,
 ) -> bool:
     """Run Rebase Bot."""
+    if prow_job is None:
+        prow_job = ProwJobContext.from_env()
+
+    notifier = SlackNotifier(slack_webhook, prow_job)
+    manual_intervention_description = (
+        f"Manual intervention is needed to rebase {source.url}:{source.branch} into {dest.ns}/{dest.name}:{dest.branch}"
+    )
+
     gh_app = github_app_provider.github_app
     gh_cloner_app = github_app_provider.github_cloner_app
 
@@ -1022,15 +1134,15 @@ def run(
                 logging.info(
                     f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
                 )
-                _message_slack(
-                    slack_webhook,
-                    f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting",
+                notifier.notify(
+                    f"`{dest.label}` has `rebase/manual` label set on <{pull_req.html_url}|PR> — skipping",
+                    "🖐️",
                 )
                 return True
 
     except Exception as ex:
         logging.exception("error fetching repo information from GitHub")
-        _message_slack(slack_webhook, f"I got an error fetching repo information from GitHub: {ex}")
+        notify_slack_error(notifier, f"Failed to fetch repo information from GitHub for `{dest.label}`", ex)
         return False
 
     try:
@@ -1058,10 +1170,11 @@ def run(
                 "rebase_repo": rebase.url,
             },
         )
-        _message_slack(
-            slack_webhook,
-            f"I got an error initializing the git directory with remotes: source repo {source.url}, "
-            f"destination repo {dest.url}, rebase repo {rebase.url}: {ex}",
+        notify_slack_error(
+            notifier,
+            f"Failed to initialize git working directory for `{dest.label}` "
+            f"(source `{source.url}`, rebase `{rebase.url}`)",
+            ex,
         )
         return False
 
@@ -1069,16 +1182,24 @@ def run(
         hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
     except Exception as ex:
         logging.exception("error fetching lifecycle hook scripts")
-        _message_slack(slack_webhook, f"Failed to fetch lifecycle hook scripts: {ex}")
+        notify_slack_error(notifier, f"Failed to fetch lifecycle hook scripts for `{dest.label}`", ex)
         return False
 
     try:
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
+            upstream_commit_count = int(gitwd.git.rev_list("--count", f"dest/{dest.branch}..source/{source.branch}"))
+        else:
+            upstream_commit_count = 0
+        dropped_commits: list[DroppedCommit] = []
+        art_pr: ArtPrInfo | None = None
+        content_loss_warnings: list[ContentLossWarning] = []
+
+        if needs_rebase:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             _prepare_rebase_branch(gitwd, source, dest)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
-            _do_rebase(
+            dropped_commits, content_loss_warnings = _do_rebase(
                 gitwd=gitwd,
                 source=source,
                 dest=dest,
@@ -1090,7 +1211,8 @@ def run(
                 update_go_modules=update_go_modules,
             )
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-            _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
+            art_pr, art_content_loss = _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
+            content_loss_warnings = content_loss_warnings + art_content_loss
         elif always_run_hooks:
             # When no rebase is needed but hooks should still run,
             # reset the rebase branch to dest (which already contains source)
@@ -1104,30 +1226,29 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
 
+        rebase_summary = RebaseSummary(
+            upstream_commit_count=upstream_commit_count,
+            dropped_commits=dropped_commits,
+            art_pr=art_pr,
+            content_loss_warnings=content_loss_warnings,
+        )
+
     except (RepoException, LifecycleHookScriptException) as ex:
         logging.error(
             f"Manual intervention is needed to rebase {source.url}:{source.branch} "
             f"into {dest.ns}/{dest.name}:{dest.branch}"
         )
-        _message_slack(
-            slack_webhook,
-            f"Manual intervention is needed to rebase "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
-        )
+        notify_slack_error(notifier, manual_intervention_description, ex)
         return False
     except Exception as ex:
         logging.exception(
             f"exception when trying to rebase {source.url}:{source.branch} into {dest.ns}/{dest.name}:{dest.branch}"
         )
 
-        _message_slack(
-            slack_webhook,
-            f"I got an exception trying to rebase "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
+        notify_slack_error(
+            notifier,
+            f"Failed to rebase `{source.url}:{source.branch}` into `{dest.label}`",
+            ex,
         )
         return False
 
@@ -1151,31 +1272,32 @@ def run(
                 f"Manual intervention is needed to rebase {source.url}:{source.branch} "
                 f"into {dest.ns}/{dest.name}:{dest.branch}"
             )
-            _message_slack(
-                slack_webhook,
-                f"Manual intervention is needed to rebase "
-                f"{source.url}:{source.branch} "
-                f"into {dest.ns}/{dest.name}:{dest.branch}: "
-                f"{ex}",
-            )
+            notify_slack_error(notifier, manual_intervention_description, ex)
             return False
         except Exception as ex:
             logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
-            _message_slack(
-                slack_webhook,
-                f"I got an exception pushing to {rebase.ns}/{rebase.name}:{rebase.branch}: {ex}",
+            notify_slack_error(
+                notifier,
+                f"Failed to push rebase branch to `{rebase.label}` for `{dest.label}`",
+                ex,
             )
             return False
 
     if pr_available:
-        # the branch was rebased, but the open PR already exists, update its title.
+        # the branch was rebased, but the open PR already exists, update its title and body.
         try:
             _update_pr_title(gitwd, pull_req, source, dest)
+            # Skip only on a fully idle run: rebase_summary is empty there and could
+            # clobber a body describing an earlier real rebase. always_run_hooks never
+            # populates rebase_summary either, so refreshing on that path is always safe.
+            if needs_rebase or always_run_hooks:
+                _update_pr_body(pull_req, rebase_summary, source, dest, prow_job)
         except Exception as ex:
-            logging.exception(f"error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}")
-            _message_slack(
-                slack_webhook,
-                f"I got an error changing title of PR {dest.ns}/{dest.name} #{pull_req.id}: {ex}",
+            logging.exception(f"error updating PR {dest.ns}/{dest.name} #{pull_req.id}")
+            notify_slack_error(
+                notifier,
+                f"Failed to update PR #{pull_req.id} for `{dest.label}`",
+                ex,
             )
             return False
 
@@ -1190,6 +1312,8 @@ def run(
                     source=source,
                     rebase=rebase,
                     gitwd=gitwd,
+                    summary=rebase_summary,
+                    prow_job=prow_job,
                     title_prefix=title_prefix,
                 )
             else:
@@ -1200,24 +1324,18 @@ def run(
             f"Manual intervention is needed to rebase {source.url}:{source.branch} "
             f"into {dest.ns}/{dest.name}:{dest.branch}"
         )
-        _message_slack(
-            slack_webhook,
-            f"Manual intervention is needed to rebase "
-            f"{source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}: "
-            f"{ex}",
-        )
+        notify_slack_error(notifier, manual_intervention_description, ex)
         return False
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
-        _message_slack(slack_webhook, f"Failed to create a pull request: {ex}\n Response: {ex.response.text}")
+        notify_slack_error(notifier, f"Failed to create a pull request for `{dest.label}`", ex)
 
         return False
     except Exception as ex:
         logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}")
-        _message_slack(slack_webhook, f"I got an error creating a rebase PR in {dest.ns}/{dest.name}: {ex}")
+        notify_slack_error(notifier, f"Failed to create a rebase PR for `{dest.label}`", ex)
 
         return False
 
-    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest.url, slack_webhook)
+    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest, notify_slack=notifier.notify)
     return True

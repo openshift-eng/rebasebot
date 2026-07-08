@@ -41,6 +41,11 @@ class GitHubBranch:
     name: str
     branch: str
 
+    @property
+    def label(self) -> str:
+        """A short human-readable identifier, e.g. 'openshift/api:main'."""
+        return f"{self.ns}/{self.name}:{self.branch}"
+
 
 def parse_github_branch(repository_string) -> GitHubBranch:
     """

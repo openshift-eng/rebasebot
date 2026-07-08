@@ -31,6 +31,16 @@ T = TypeVar("T")
 
 YieldFixture = Generator[T, None, None]
 
+_PROW_ENV_VARS = ("JOB_NAME", "JOB_TYPE", "BUILD_ID")
+
+
+@pytest.fixture(autouse=True)
+def isolate_prow_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear ambient Prow env vars so tests are isolated from the CI runner."""
+    for var in _PROW_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
 _GO_CODE = """
 package main
 import (

@@ -15,17 +15,27 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
-from rebasebot import lifecycle_hooks
+from rebasebot import cli, lifecycle_hooks
 from rebasebot.bot import (
     PullRequestUpdateException,
+    RepoException,
     _add_to_rebase,
     _is_pr_available,
     _is_pr_required,
     _report_result,
+    _update_pr_body,
     _update_pr_title,
+    notify_slack_error,
 )
 from rebasebot.github import GitHubBranch
+from rebasebot.pr_body import build_pr_body
+from rebasebot.prow import ProwJobContext
+from rebasebot.rebase_summary import RebaseSummary
+from rebasebot.slack import _build_slack_blocks
+
+from .conftest import CommitBuilder
 
 
 class TestGoMod:
@@ -268,8 +278,8 @@ class TestIsPrRequired:
 
 
 class TestReportResult:
-    dest_url = "https://github.com/user/repo"
-    slack_webhook = "https://hooks.slack.com/services/..."
+    dest = GitHubBranch(url="https://github.com/user/repo", ns="user", name="repo", branch="main")
+    label = dest.label
 
     @pytest.mark.parametrize(
         "needs_rebase, pr_required, pr_available, pr_url, slack_message",
@@ -280,48 +290,59 @@ class TestReportResult:
                 True,
                 False,
                 "https://github.com/user/repo/pull/123",
-                "I created a new rebase PR: https://github.com/user/repo/pull/123",
+                f"Created a new rebase PR for `{label}`: <https://github.com/user/repo/pull/123|view PR>",
             ),
             (
                 True,
                 False,
                 True,
                 "https://github.com/user/repo/pull/456",
-                "I updated existing rebase PR: https://github.com/user/repo/pull/456",
+                f"Updated the rebase PR for `{label}`: <https://github.com/user/repo/pull/456|view PR>",
             ),
             # Rebase performed but no changes between rebase and dest (no PR needed)
-            (True, False, False, None, f"Destination repo {dest_url} already contains the latest changes"),
+            (
+                True,
+                False,
+                False,
+                None,
+                f"`{label}` already contains the latest changes",
+            ),
             # Cases when needs_rebase is False
             (
                 False,
                 False,
                 True,
                 "https://github.com/user/repo/pull/100",
-                "PR https://github.com/user/repo/pull/100 already contains the latest changes",
+                f"`{label}` already contains the latest changes: <https://github.com/user/repo/pull/100|view PR>",
             ),
-            (False, False, False, "", f"Destination repo {dest_url} already contains the latest changes"),
+            (
+                False,
+                False,
+                False,
+                "",
+                f"`{label}` already contains the latest changes",
+            ),
             # Cases when hooks made changes
             (
                 False,
                 True,
                 False,
                 "https://github.com/user/repo/pull/200",
-                "I created a new rebase PR (hooks enabled): https://github.com/user/repo/pull/200",
+                f"Created a new rebase PR for `{label}` (hooks enabled): "
+                "<https://github.com/user/repo/pull/200|view PR>",
             ),
             (
                 False,
                 True,
                 True,
                 "https://github.com/user/repo/pull/201",
-                "I updated existing rebase PR (hooks enabled): https://github.com/user/repo/pull/201",
+                f"Updated the rebase PR for `{label}` (hooks enabled): <https://github.com/user/repo/pull/201|view PR>",
             ),
         ],
     )
     @patch("logging.info")
-    @patch("rebasebot.bot._message_slack")
     def test_report_result(
         self,
-        mocked_message_slack,
         mocked_logging_info,
         needs_rebase,
         pr_required,
@@ -329,10 +350,148 @@ class TestReportResult:
         pr_url,
         slack_message,
     ):
-        _report_result(needs_rebase, pr_required, pr_available, pr_url, self.dest_url, self.slack_webhook)
+        notify_slack = MagicMock()
+
+        _report_result(
+            needs_rebase,
+            pr_required,
+            pr_available,
+            pr_url,
+            self.dest,
+            notify_slack=notify_slack,
+        )
 
         mocked_logging_info.assert_called_once_with(slack_message)
-        mocked_message_slack.assert_called_once_with(self.slack_webhook, slack_message)
+        notify_slack.assert_called_once_with(slack_message, "✅")
+
+
+class TestNotifySlackError:
+    def test_repo_exception_uses_hand_emoji(self):
+        notifier = MagicMock()
+        ex = RepoException("manual fix needed")
+
+        notify_slack_error(notifier, "Something went wrong", ex)
+
+        notifier.notify.assert_called_once_with("Something went wrong:\n```manual fix needed```", "🖐️")
+
+    def test_lifecycle_hook_exception_uses_hand_emoji(self):
+        notifier = MagicMock()
+        ex = lifecycle_hooks.LifecycleHookScriptException("hook failed")
+
+        notify_slack_error(notifier, "Hook error", ex)
+
+        notifier.notify.assert_called_once_with("Hook error:\n```hook failed```", "🖐️")
+
+    def test_plain_exception_uses_cross_emoji(self):
+        notifier = MagicMock()
+        ex = Exception("boom")
+
+        notify_slack_error(notifier, "Something went wrong", ex)
+
+        notifier.notify.assert_called_once_with("Something went wrong:\n```boom```", "❌")
+
+    def test_http_error_appends_response_text(self):
+        notifier = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"message":"Validation Failed"}'
+        ex = requests.exceptions.HTTPError("422 Client Error")
+        ex.response = mock_response
+
+        notify_slack_error(notifier, "Failed to create a pull request", ex)
+
+        notifier.notify.assert_called_once_with(
+            "Failed to create a pull request:\n```422 Client Error```\nResponse:\n```"
+            '{"message":"Validation Failed"}```',
+            "❌",
+        )
+
+    def test_http_error_without_response_omits_response_block(self):
+        notifier = MagicMock()
+        ex = requests.exceptions.HTTPError("422 Client Error")
+        ex.response = None
+
+        notify_slack_error(notifier, "Failed to create a pull request", ex)
+
+        notifier.notify.assert_called_once_with(
+            "Failed to create a pull request:\n```422 Client Error```",
+            "❌",
+        )
+
+    def test_non_http_error_omits_response_block(self):
+        notifier = MagicMock()
+        ex = Exception("boom")
+
+        notify_slack_error(notifier, "Something went wrong", ex)
+
+        notifier.notify.assert_called_once_with("Something went wrong:\n```boom```", "❌")
+
+
+class TestRunSlackErrorMessages:
+    @patch("rebasebot.bot._create_pr")
+    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._is_pr_available")
+    @patch("rebasebot.slack.requests.post")
+    def test_create_pr_http_error_fences_exception_and_response(
+        self,
+        mocked_post,
+        mocked_is_pr_available,
+        mocked_push_rebase_branch,
+        mocked_create_pr,
+        init_test_repositories,
+        fake_github_provider,
+        tmpdir,
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).update_file("test.go", "new content").commit("update test.go")
+        CommitBuilder(dest).remove_file("test.go").commit("remove test.go")
+        with CommitBuilder(dest) as cb:
+            cb.commit("Empty commit")
+
+        mocked_is_pr_available.return_value = None, False
+        mocked_push_rebase_branch.return_value = True
+
+        mock_response = MagicMock()
+        mock_response.text = '{"message":"Validation Failed"}'
+        http_error = requests.exceptions.HTTPError("422 Client Error: Unprocessable Entity")
+        http_error.response = mock_response
+        mocked_create_pr.side_effect = http_error
+
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.conflict_policy = "auto"
+        args.ignore_manual_label = False
+        args.dry_run = False
+        args.always_run_hooks = False
+        args.title_prefix = ""
+        args.pre_rebase_hook = None
+        args.pre_carry_commit_hook = None
+        args.post_rebase_hook = None
+        args.pre_push_rebase_branch_hook = None
+        args.pre_create_pr_hook = None
+
+        result = cli.rebasebot_run(args, slack_webhook="test://webhook", github_app_wrapper=fake_github_provider)
+
+        assert result is False
+        expected_message = (
+            f"Failed to create a pull request for `{dest.label}`:\n"
+            f"```{http_error}```\nResponse:\n```{mock_response.text}```"
+        )
+        expected_blocks = _build_slack_blocks(expected_message, "❌", None)
+        mocked_post.assert_called_once_with(
+            "test://webhook",
+            json={"text": expected_message, "blocks": expected_blocks},
+            timeout=5,
+        )
 
 
 class TestUpdatePrTitle:
@@ -426,3 +585,29 @@ class TestUpdatePrTitle:
         pull_req.update.assert_called_once_with(
             title=f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
         )
+
+
+class TestUpdatePrBody:
+    def test_success(self):
+        pull_req = MagicMock()
+        pull_req.update.return_value = True
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(upstream_commit_count=2)
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        _update_pr_body(pull_req, summary, source, dest, prow_job)
+
+        pull_req.update.assert_called_once_with(body=build_pr_body(summary, source, dest, prow_job))
+
+    def test_failure(self):
+        pull_req = MagicMock()
+        pull_req.update.return_value = False
+        pull_req.html_url = "https://github.com/downstream/repo/pull/1"
+        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
+        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        summary = RebaseSummary(upstream_commit_count=2)
+        prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
+
+        with pytest.raises(PullRequestUpdateException, match="Error updating body for pull request"):
+            _update_pr_body(pull_req, summary, source, dest, prow_job)

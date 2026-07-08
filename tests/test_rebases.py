@@ -14,6 +14,7 @@ from rebasebot.bot import (
     _prepare_rebase_branch,
 )
 from rebasebot.github import GitHubBranch, parse_github_branch
+from rebasebot.prow import ProwJobContext
 
 from .conftest import CommitBuilder
 
@@ -431,10 +432,10 @@ class TestRebases:
 
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     def test_conflict(
         self,
-        mocked_message_slack,
+        mocked_post,
         mocked_is_pr_available,
         mocked_push_rebase_branch,
         init_test_repositories,
@@ -472,8 +473,11 @@ class TestRebases:
         assert working_repo.head.ref.name == "rebase"
         log_graph = working_repo.git.log("--graph", "--oneline", "--pretty='<%an>, %s'")
 
-        assert mocked_message_slack.call_args.args[0] == "test://webhook"
-        assert mocked_message_slack.call_args.args[1].startswith("I created a new rebase PR:")
+        assert mocked_post.call_args.args[0] == "test://webhook"
+        posted_json = mocked_post.call_args.kwargs["json"]
+        assert posted_json["text"].startswith(f"Created a new rebase PR for `{dest.label}`:")
+        blocks = posted_json["blocks"]
+        assert blocks[0]["text"]["text"].startswith(f"✅ Created a new rebase PR for `{dest.label}`:")
 
         assert (
             log_graph
@@ -491,12 +495,12 @@ class TestRebases:
 """.strip()  # noqa: W291
         )
 
-    @patch("rebasebot.bot._message_slack")
+    @patch("rebasebot.slack.requests.post")
     @patch("rebasebot.bot._manual_rebase_pr_in_repo")
     def test_has_manual_rebase_pr(
         self,
         mocked_manual_rebase_pr_in_repo,
-        mocked_message_slack,
+        mocked_post,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
@@ -533,9 +537,7 @@ class TestRebases:
         args.ignore_manual_label = False
         args.dry_run = False
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
-        mocked_message_slack.assert_called_once_with(
-            None, f"Repo {dest.clone_url} has PR {pr.html_url} with 'rebase/manual' label, aborting"
-        )
+        mocked_post.assert_not_called()
 
         assert result
 
@@ -965,3 +967,218 @@ fi"""
         # The hook should have succeeded (exit 0), proving DOWNSTREAM_OWNERS existed
         # which means hooks ran on dest branch, not source branch
         assert "hook-verified-carry.txt" in os.listdir(tmpdir)
+
+    @staticmethod
+    def _setup_github_provider(fake_github_provider):
+        def fake_repository_func(namespace, name):
+            repository = MagicMock()
+            repository.clone_url = f"https://github.com/{namespace}/{name}"
+            return repository
+
+        fake_github_provider.github_app.repository = fake_repository_func
+        fake_github_provider.github_cloner_app.repository = fake_repository_func
+
+    @staticmethod
+    def _make_rebase_args(source, dest, rebase, tmpdir):
+        args = MagicMock()
+        args.source = source
+        args.source_repo = None
+        args.dest = dest
+        args.rebase = rebase
+        args.working_dir = tmpdir
+        args.git_username = "test_rebasebot"
+        args.git_email = "test@rebasebot.ocp"
+        args.tag_policy = "soft"
+        args.bot_emails = []
+        args.exclude_commits = []
+        args.update_go_modules = False
+        args.conflict_policy = "auto"
+        args.ignore_manual_label = False
+        args.dry_run = False
+        args.always_run_hooks = False
+        args.title_prefix = ""
+        args.pre_rebase_hook = None
+        args.pre_carry_commit_hook = None
+        args.post_rebase_hook = None
+        args.pre_push_rebase_branch_hook = None
+        args.pre_create_pr_hook = None
+        return args
+
+    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._is_pr_available")
+    def test_pr_body_on_create(
+        self,
+        mocked_is_pr_available,
+        mocked_push_rebase_branch,
+        init_test_repositories,
+        fake_github_provider,
+        tmpdir,
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "fiz").commit("other upstream commit")
+
+        self._setup_github_provider(fake_github_provider)
+        mocked_is_pr_available.return_value = None, False
+        mocked_push_rebase_branch.return_value = True
+
+        captured_pr_data = {}
+
+        def fake_post(_url, data, json=True):
+            captured_pr_data.update(data)
+            response = MagicMock()
+            response.json.return_value = {"html_url": "https://github.com/dest/dest/pull/1"}
+            return response
+
+        fake_github_provider.github_app._post = fake_post
+
+        prow_job = ProwJobContext(
+            job_name="periodic-openshift-release-rebasebot",
+            job_type="periodic",
+            build_id="999",
+        )
+        args = self._make_rebase_args(source, dest, rebase, tmpdir)
+
+        with patch("rebasebot.prow.ProwJobContext.from_env", return_value=prow_job):
+            result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result
+        body = captured_pr_data["body"]
+        assert body
+        assert "automated rebase PR generated by RebaseBot" in body
+        assert f"{source.url}:{source.branch}" in body
+        assert f"{dest.url}:{dest.branch}" in body
+        assert "1 new upstream commit" in body
+        assert prow_job.log_url in body
+        assert "View job log" in body
+
+    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._is_pr_available")
+    def test_pr_body_on_update(
+        self,
+        mocked_is_pr_available,
+        mocked_push_rebase_branch,
+        init_test_repositories,
+        fake_github_provider,
+        tmpdir,
+    ):
+        source, rebase, dest = init_test_repositories
+        CommitBuilder(source).add_file("baz.txt", "fiz").commit("other upstream commit")
+
+        self._setup_github_provider(fake_github_provider)
+        mocked_push_rebase_branch.return_value = True
+
+        pull_req = MagicMock()
+        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.update.return_value = True
+        pull_req.html_url = "https://github.com/dest/dest/pull/1"
+        mocked_is_pr_available.return_value = pull_req, True
+
+        prow_job = ProwJobContext(
+            job_name="periodic-openshift-release-rebasebot",
+            job_type="periodic",
+            build_id="888",
+        )
+        args = self._make_rebase_args(source, dest, rebase, tmpdir)
+
+        with patch("rebasebot.prow.ProwJobContext.from_env", return_value=prow_job):
+            result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result
+        body_updates = [call for call in pull_req.update.call_args_list if "body" in call.kwargs]
+        assert len(body_updates) == 1
+        body = body_updates[0].kwargs["body"]
+        assert body
+        assert "automated rebase PR generated by RebaseBot" in body
+        assert f"{source.url}:{source.branch}" in body
+        assert f"{dest.url}:{dest.branch}" in body
+        assert "1 new upstream commit" in body
+        assert prow_job.log_url in body
+
+    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._is_pr_available")
+    def test_pr_body_untouched_on_quiet_run(
+        self,
+        mocked_is_pr_available,
+        mocked_push_rebase_branch,
+        init_test_repositories,
+        fake_github_provider,
+        tmpdir,
+    ):
+        """A run with no new upstream commits must not clobber a previously-rendered,
+        content-rich PR body with an empty one: rebase_summary only carries fresh data
+        when needs_rebase is True.
+        """
+        source, rebase, dest = init_test_repositories
+
+        self._setup_github_provider(fake_github_provider)
+        mocked_push_rebase_branch.return_value = True
+
+        pull_req = MagicMock()
+        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.update.return_value = True
+        pull_req.html_url = "https://github.com/dest/dest/pull/1"
+        mocked_is_pr_available.return_value = pull_req, True
+
+        prow_job = ProwJobContext(
+            job_name="periodic-openshift-release-rebasebot",
+            job_type="periodic",
+            build_id="888",
+        )
+        args = self._make_rebase_args(source, dest, rebase, tmpdir)
+
+        with patch("rebasebot.prow.ProwJobContext.from_env", return_value=prow_job):
+            result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result
+        body_updates = [call for call in pull_req.update.call_args_list if "body" in call.kwargs]
+        assert not body_updates
+
+    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._is_pr_available")
+    def test_pr_body_refreshed_on_hooks_only_run(
+        self,
+        mocked_is_pr_available,
+        mocked_push_rebase_branch,
+        init_test_repositories,
+        fake_github_provider,
+        tmpdir,
+    ):
+        """A hooks-only run (always_run_hooks=True, no rebase needed) never has real rebase
+        data to lose -- _do_rebase()/_cherrypick_art_pull_request() never run on this path,
+        even when the PR was first created via this same path -- so it's safe (and desirable,
+        for a fresh log link) to refresh the body here, unlike the fully idle case above.
+        """
+        source, rebase, dest = init_test_repositories
+
+        pre_rebase_hook_script = "#!/bin/bash\ntouch pre-rebase-hook.success"
+        with CommitBuilder(dest) as cb:
+            cb.add_file("pre-rebase-hook-script.sh", pre_rebase_hook_script)
+            cb.commit("UPSTREAM: <carry>: add test hook script")
+
+        self._setup_github_provider(fake_github_provider)
+        mocked_push_rebase_branch.return_value = True
+
+        pull_req = MagicMock()
+        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.update.return_value = True
+        pull_req.html_url = "https://github.com/dest/dest/pull/1"
+        mocked_is_pr_available.return_value = pull_req, True
+
+        prow_job = ProwJobContext(
+            job_name="periodic-openshift-release-rebasebot",
+            job_type="periodic",
+            build_id="888",
+        )
+        args = self._make_rebase_args(source, dest, rebase, tmpdir)
+        args.always_run_hooks = True
+        args.pre_rebase_hook = [f"git:dest/{dest.branch}:pre-rebase-hook-script.sh"]
+
+        with patch("rebasebot.prow.ProwJobContext.from_env", return_value=prow_job):
+            result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
+
+        assert result
+        body_updates = [call for call in pull_req.update.call_args_list if "body" in call.kwargs]
+        assert len(body_updates) == 1
+        body = body_updates[0].kwargs["body"]
+        assert "0 new upstream commits" in body
+        assert prow_job.log_url in body
