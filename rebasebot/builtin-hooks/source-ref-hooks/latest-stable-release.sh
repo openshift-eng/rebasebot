@@ -15,12 +15,10 @@ fi
 
 
 # Fetch latest stable release tag
-UPSTREAM_VERSION=$(curl -s \
-    --header "X-GitHub-Api-Version:2022-11-28" \
-    "https://api.github.com/repos/$REBASEBOT_SOURCE_REPO/releases" | \
-    grep '"tag_name":' | \
-    grep -vE '(alpha|beta|rc)' | \
-    sed -E 's/.*"([^"]+)".*/\1/' | \
+UPSTREAM_VERSION=$(git ls-remote --tags \
+    "https://github.com/$REBASEBOT_SOURCE_REPO" | \
+    sed 's|.*refs/tags/||' | \
+    grep -vE '(\^{}|alpha|beta|rc)' | \
     sed '/-/!{s/$/_/}' | \
     sort -V | \
     sed 's/_$//' | \
