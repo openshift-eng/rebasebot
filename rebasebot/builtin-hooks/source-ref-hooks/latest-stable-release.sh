@@ -18,7 +18,8 @@ fi
 UPSTREAM_VERSION=$(git ls-remote --tags \
     "https://github.com/$REBASEBOT_SOURCE_REPO" | \
     sed 's|.*refs/tags/||' | \
-    grep -vE '(\^{}|alpha|beta|rc)' | \
+    grep -vF '^{}' | \
+    grep -vE '(alpha|beta|rc)' | \
     sed '/-/!{s/$/_/}' | \
     sort -V | \
     sed 's/_$//' | \
