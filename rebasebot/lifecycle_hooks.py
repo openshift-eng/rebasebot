@@ -25,7 +25,8 @@ from enum import Enum
 
 import git
 import git.repo
-from github3.repos.contents import Contents
+from github import GithubException
+from github.ContentFile import ContentFile
 
 from rebasebot.github import GithubAppProvider, parse_github_branch
 
@@ -126,22 +127,34 @@ class LifecycleHookScript:
             raise ValueError(f"Failed to retrieve script from git reference {git_path}") from e
 
     def _fetch_from_github_api(
-        self, *, github, organization: str, name: str, git_repo_path_to_script: str, branch: str, script_file_path: str
-    ):
+        self,
+        *,
+        github: GithubAppProvider,
+        organization: str,
+        name: str,
+        git_repo_path_to_script: str,
+        branch: str,
+        script_file_path: str,
+    ) -> None:
         """Fetches script from GitHub API."""
+        error_message = (
+            f"Failed to retrieve script from github organization={organization}, "
+            f"name={name}, branch={branch}, path={git_repo_path_to_script},"
+        )
+
         try:
-            script: Contents = _fetch_file_from_github(github, organization, name, branch, git_repo_path_to_script)
-            with open(
-                script_file_path,
-                "wb",
-            ) as f:
-                f.write(script.decoded)
+            script: ContentFile = _fetch_file_from_github(github, organization, name, branch, git_repo_path_to_script)
+        except ValueError:
+            raise
+        except GithubException as e:
+            raise ValueError(error_message) from e
+
+        try:
+            with open(script_file_path, "wb") as f:
+                f.write(script.decoded_content)
             os.chmod(script_file_path, 0o700)  # Make it executable
-        except Exception as e:
-            raise ValueError(
-                f"Failed to retrieve script from github organization={organization}, "
-                f"name={name}, branch={branch}, path={git_repo_path_to_script},"
-            ) from e
+        except OSError as e:
+            raise ValueError(error_message) from e
 
     def _extract_script_details(self, script_location: str, temp_hook_dir: str) -> tuple[str, str, str]:
         """Extracts script details and generates the script file path."""
@@ -155,7 +168,12 @@ class LifecycleHookScript:
         script_file_path = f"{temp_hook_dir}/{basename}-{hash_suffix}{ext}"
         return git_ref, file_path, script_file_path
 
-    def fetch_script(self, temp_hook_dir: str, gitwd: git.Repo = None, github: GithubAppProvider = None):
+    def fetch_script(
+        self,
+        temp_hook_dir: str,
+        gitwd: git.Repo | None = None,
+        github: GithubAppProvider | None = None,
+    ) -> None:
         """Fetches the script from a git repository and stores it in a temporary directory.
         Prefers github API when source is GitHub, otherwise uses generic git library when available.
         """
@@ -205,7 +223,7 @@ class LifecycleHookScript:
     def __str__(self):
         return self.script_location
 
-    def __call__(self, cwd: str = None) -> LifecycleHookScriptResult:
+    def __call__(self, cwd: str | None = None) -> LifecycleHookScriptResult:
         with subprocess.Popen(
             [self.script_file_path],
             stdout=subprocess.PIPE,
@@ -236,10 +254,20 @@ class LifecycleHookScript:
             return LifecycleHookScriptResult(return_code=return_code, stdout=stdout_lines, stderr=stderr_lines)
 
 
-def _fetch_file_from_github(github, organization, name, branch, git_repo_path_to_script) -> Contents:
-    return github.github_cloner_app.repository(owner=organization, repository=name).file_contents(
-        git_repo_path_to_script, ref=branch
-    )
+def _fetch_file_from_github(
+    github: GithubAppProvider, organization: str, name: str, branch: str, git_repo_path_to_script: str
+) -> ContentFile:
+    repo = github.github_cloner_app.get_repo(f"{organization}/{name}")
+    content = repo.get_contents(git_repo_path_to_script, ref=branch)
+    if isinstance(content, list):
+        raise ValueError(
+            f"Hook path '{git_repo_path_to_script}' in {organization}/{name}@{branch} is a directory, expected a file"
+        )
+    if not isinstance(content, ContentFile):
+        raise ValueError(
+            f"Hook path '{git_repo_path_to_script}' in {organization}/{name}@{branch} did not resolve to a file"
+        )
+    return content
 
 
 def _fetch_branch(gitwd: git.Repo, remote: str, branch: str, ref_filter: str | None = None):

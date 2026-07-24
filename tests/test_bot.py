@@ -16,12 +16,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from github import GithubException
 
 from rebasebot import cli, lifecycle_hooks
 from rebasebot.bot import (
     PullRequestUpdateException,
     RepoException,
     _add_to_rebase,
+    _cherrypick_art_pull_request,
     _is_pr_available,
     _is_pr_required,
     _report_result,
@@ -199,45 +201,39 @@ class TestIsPrAvailable:
         rebase = MagicMock()
         rebase.ns = "test-namespace"
         rebase.name = "rebase-repo"
+        rebase.full_name = "test-namespace/rebase-repo"
         rebase.branch = "rebase-branch"
         return rebase
 
     def test_is_pr_available(self, dest_repo, dest, rebase):
         # Test when pull request exists
         gh_pr = MagicMock()
-        gh_pr.as_dict.return_value = {"head": {"repo": {"full_name": "test-namespace/rebase-repo"}}}
+        gh_pr.head.repo.full_name = "test-namespace/rebase-repo"
         gh_pr.head.ref = rebase.branch
         gh_pr.state = "open"
-        dest_repo.pull_requests.return_value = [gh_pr]
+        dest_repo.get_pulls.return_value = [gh_pr]
 
         pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
-        dest_repo.pull_requests.assert_called_once_with(base="dest-branch", state="open")
+        dest_repo.get_pulls.assert_called_once_with(base="dest-branch", state="open")
         assert pr == gh_pr
         assert pr_available is True
 
     def test_is_pr_available_not_found(self, dest_repo, dest, rebase):
         # Test when pull request doesn't exist
-        dest_repo.pull_requests.return_value = []
+        dest_repo.get_pulls.return_value = []
         pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
-        dest_repo.pull_requests.assert_called_with(base="dest-branch", state="open")
+        dest_repo.get_pulls.assert_called_with(base="dest-branch", state="open")
         assert pr is None
         assert pr_available is False
 
-    def test_is_pr_available_closed(self, dest_repo, dest, rebase):
+    def test_is_pr_available_skips_deleted_head_repo(self, dest_repo, dest, rebase):
         gh_pr = MagicMock()
-        gh_pr.as_dict.return_value = {"head": {"repo": {"full_name": "test-namespace/rebase-repo"}}}
-        gh_pr.head.ref = rebase.branch
-        gh_pr.state = "closed"
-
-        # Mock pull_requests to return only PRs that match the requested state
-        def mock_pull_requests(*, base, state):
-            all_prs = [gh_pr]
-            return [pr for pr in all_prs if pr.state == state]
-
-        dest_repo.pull_requests.side_effect = mock_pull_requests
+        gh_pr.head.repo = None
+        gh_pr.html_url = "https://github.com/test-namespace/dest-repo/pull/1"
+        dest_repo.get_pulls.return_value = [gh_pr]
 
         pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
-        dest_repo.pull_requests.assert_called_once_with(base="dest-branch", state="open")
+        dest_repo.get_pulls.assert_called_once_with(base="dest-branch", state="open")
         assert pr is None
         assert pr_available is False
 
@@ -275,6 +271,29 @@ class TestIsPrRequired:
     def test_missing_remote_refs_returns_true(self, dest, rebase):
         gitwd = self._gitwd_with_refs(dest_has_ref=False, rebase_has_ref=False)
         assert _is_pr_required(gitwd, rebase, dest) is True
+
+
+class TestCherryPickArtPullRequest:
+    @patch("rebasebot.bot._safe_cherry_pick")
+    def test_skips_pull_request_with_deleted_head_repo(self, mocked_safe_cherry_pick, caplog):
+        gitwd = MagicMock()
+        gitwd.remotes = {}
+        dest_repo = MagicMock()
+        dest = MagicMock(branch="dest-branch")
+        caplog.set_level("WARNING")
+        pull_request = MagicMock()
+        pull_request.title = "Keep branch consistent with ART"
+        pull_request.user.login = "openshift-bot"
+        pull_request.head = MagicMock(repo=None)
+        pull_request.html_url = "https://github.com/test-namespace/dest-repo/pull/1"
+        dest_repo.get_pulls.return_value = [pull_request]
+
+        _cherrypick_art_pull_request(gitwd, dest_repo, dest)
+
+        dest_repo.get_pulls.assert_called_once_with(state="open", base="dest-branch")
+        gitwd.create_remote.assert_not_called()
+        mocked_safe_cherry_pick.assert_not_called()
+        assert "Skipping PR with deleted head repository" in caplog.text
 
 
 class TestReportResult:
@@ -431,7 +450,7 @@ class TestRunSlackErrorMessages:
     @patch("rebasebot.bot._push_rebase_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
-    def test_create_pr_http_error_fences_exception_and_response(
+    def test_create_pr_github_exception_fences_exception(
         self,
         mocked_post,
         mocked_is_pr_available,
@@ -450,11 +469,8 @@ class TestRunSlackErrorMessages:
         mocked_is_pr_available.return_value = None, False
         mocked_push_rebase_branch.return_value = True
 
-        mock_response = MagicMock()
-        mock_response.text = '{"message":"Validation Failed"}'
-        http_error = requests.exceptions.HTTPError("422 Client Error: Unprocessable Entity")
-        http_error.response = mock_response
-        mocked_create_pr.side_effect = http_error
+        github_error = GithubException(422, {"message": "Validation Failed"}, None)
+        mocked_create_pr.side_effect = github_error
 
         args = MagicMock()
         args.source = source
@@ -482,10 +498,7 @@ class TestRunSlackErrorMessages:
         result = cli.rebasebot_run(args, slack_webhook="test://webhook", github_app_wrapper=fake_github_provider)
 
         assert result is False
-        expected_message = (
-            f"Failed to create a pull request for `{dest.label}`:\n"
-            f"```{http_error}```\nResponse:\n```{mock_response.text}```"
-        )
+        expected_message = f"Failed to create a pull request for `{dest.label}`:\n```{github_error}```"
         expected_blocks = _build_slack_blocks(expected_message, "❌", None)
         mocked_post.assert_called_once_with(
             "test://webhook",
@@ -502,7 +515,6 @@ class TestUpdatePrTitle:
         gitwd.git.rev_parse.return_value = "abcdefg"
         pull_req = MagicMock()
         pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
-        pull_req.update.return_value = True
         source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
         dest = MagicMock(branch="main")
 
@@ -511,9 +523,7 @@ class TestUpdatePrTitle:
         except Exception as ex:
             raise AssertionError("Unexpected exception") from ex
 
-        pull_req.update.assert_called_once_with(
-            title=f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
-        )
+        pull_req.edit.assert_called_once_with(title=f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}")
 
     def test_jira_link(self):
         gitwd = MagicMock()
@@ -521,7 +531,6 @@ class TestUpdatePrTitle:
         pull_req = MagicMock()
         pull_req.title = "OCPCLOUD-2051: Merge "
         "https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
-        pull_req.update.return_value = True
         source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
         dest = MagicMock(branch="main")
 
@@ -530,7 +539,7 @@ class TestUpdatePrTitle:
         except Exception as ex:
             raise AssertionError("Unexpected exception") from ex
 
-        pull_req.update.assert_called_once_with(
+        pull_req.edit.assert_called_once_with(
             title=f"OCPCLOUD-2051: Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
         )
 
@@ -541,7 +550,6 @@ class TestUpdatePrTitle:
         pull_req.title = (
             "UPSTREAM-SYNC: Merge https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
         )
-        pull_req.update.return_value = True
         source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
         dest = MagicMock(branch="main")
 
@@ -550,7 +558,7 @@ class TestUpdatePrTitle:
         except Exception as ex:
             raise AssertionError(f"Unexpected exception: {ex}") from ex
 
-        pull_req.update.assert_called_once_with(
+        pull_req.edit.assert_called_once_with(
             title=f"UPSTREAM-SYNC: Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
         )
 
@@ -559,7 +567,6 @@ class TestUpdatePrTitle:
         gitwd.git.rev_parse.return_value = "abcdefg"
         pull_req = MagicMock()
         pull_req.title = "OCPCLOUD-2051: Manual rebase to lastest upstream version"
-        pull_req.update.return_value = True
         source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
         dest = MagicMock(branch="main")
 
@@ -568,29 +575,26 @@ class TestUpdatePrTitle:
         except Exception as ex:
             raise AssertionError("Unexpected exception") from ex
 
-        pull_req.update.assert_not_called()
+        pull_req.edit.assert_not_called()
 
     def test_failure(self):
         gitwd = MagicMock()
         gitwd.git.rev_parse.return_value = "abcdefg"
         pull_req = MagicMock()
         pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
-        pull_req.update.return_value = False
+        pull_req.edit.side_effect = GithubException(500, {"message": "API error"})
         source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
         dest = MagicMock(branch="main")
 
         with pytest.raises(PullRequestUpdateException, match="Error updating title for pull request"):
             _update_pr_title(gitwd, pull_req, source, dest)
 
-        pull_req.update.assert_called_once_with(
-            title=f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
-        )
+        pull_req.edit.assert_called_once_with(title=f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}")
 
 
 class TestUpdatePrBody:
     def test_success(self):
         pull_req = MagicMock()
-        pull_req.update.return_value = True
         source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
         dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
         summary = RebaseSummary(upstream_commit_count=2)
@@ -598,11 +602,11 @@ class TestUpdatePrBody:
 
         _update_pr_body(pull_req, summary, source, dest, prow_job)
 
-        pull_req.update.assert_called_once_with(body=build_pr_body(summary, source, dest, prow_job))
+        pull_req.edit.assert_called_once_with(body=build_pr_body(summary, source, dest, prow_job))
 
     def test_failure(self):
         pull_req = MagicMock()
-        pull_req.update.return_value = False
+        pull_req.edit.side_effect = GithubException(500, {"message": "API error"})
         pull_req.html_url = "https://github.com/downstream/repo/pull/1"
         source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
         dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
