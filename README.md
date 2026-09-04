@@ -139,6 +139,18 @@ If for some reason you don't want to include some commits in your rebase PR, you
 ...
 ```
 
+### PR labels
+
+If you want the bot to automatically add labels to pull requests it creates, use the `--pr-labels` option. Multiple labels can be specified separated by spaces.
+
+```txt
+...
+--pr-labels tide/merge-method-rebase do-not-squash \
+...
+```
+
+Labels are only added when a new PR is created — existing PRs are not relabeled on subsequent runs.
+
 ## Manual Override
 
 Sometimes on repositories where the bot is configured it might be necessary to

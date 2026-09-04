@@ -819,6 +819,7 @@ def _create_pr(
     summary: RebaseSummary,
     prow_job: ProwJobContext,
     title_prefix: str = "",
+    pr_labels: list[str] | None = None,
 ) -> str:
     source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
 
@@ -851,6 +852,22 @@ def _create_pr(
 
     logging.debug(gh_pr.json())
     gh_pr.raise_for_status()
+
+    if pr_labels:
+        pr_number = gh_pr.json()["number"]
+        label_resp = gh_app._post(
+            f"https://api.github.com/repos/{dest.ns}/{dest.name}/issues/{pr_number}/labels",
+            data={"labels": pr_labels},
+            json=True,
+        )
+        if label_resp.status_code == requests.codes.ok:
+            logging.info("Added labels %s to PR #%d", pr_labels, pr_number)
+        else:
+            logging.warning(
+                "Failed to add labels to PR #%d: %s",
+                pr_number,
+                label_resp.text,
+            )
 
     return gh_pr.json()["html_url"]
 
@@ -1103,6 +1120,7 @@ def run(
     ignore_manual_label: bool = False,
     always_run_hooks: bool = False,
     title_prefix: str = "",
+    pr_labels: list[str] | None = None,
     prow_job: ProwJobContext | None = None,
 ) -> bool:
     """Run Rebase Bot."""
@@ -1315,6 +1333,7 @@ def run(
                     summary=rebase_summary,
                     prow_job=prow_job,
                     title_prefix=title_prefix,
+                    pr_labels=pr_labels,
                 )
             else:
                 logging.info("No PR required - no changes between rebase and dest.")

@@ -997,6 +997,7 @@ fi"""
         args.dry_run = False
         args.always_run_hooks = False
         args.title_prefix = ""
+        args.pr_labels = None
         args.pre_rebase_hook = None
         args.pre_carry_commit_hook = None
         args.post_rebase_hook = None

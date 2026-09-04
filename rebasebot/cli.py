@@ -279,6 +279,16 @@ def _parse_cli_arguments():
         help="Prefix to prepend to PR titles. For example, 'UPSTREAM-SYNC' will create "
         "titles like 'UPSTREAM-SYNC: Merge ...'.",
     )
+    parser.add_argument(
+        "--pr-labels",
+        type=str,
+        nargs="*",
+        required=False,
+        default=None,
+        help="Labels to add to pull requests created by the bot. "
+        "Multiple labels can be specified separated by spaces. "
+        "Example: --pr-labels tide/merge-method-rebase do-not-squash",
+    )
 
     return parser.parse_args()
 
@@ -373,6 +383,7 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
                 hooks=hooks,
                 always_run_hooks=args.always_run_hooks,
                 title_prefix=args.title_prefix,
+                pr_labels=args.pr_labels,
             )
         finally:
             os.chdir(original_cwd)
