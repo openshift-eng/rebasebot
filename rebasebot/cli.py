@@ -383,8 +383,8 @@ def main():
     """Rebase Bot entry point function."""
     args = _parse_cli_arguments()
 
-    # Silence info logs from github3
-    logger = logging.getLogger("github3")
+    # Silence info logs from PyGithub
+    logger = logging.getLogger("github")
     logger.setLevel(logging.WARN)
 
     slack_webhook = None
