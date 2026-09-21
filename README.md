@@ -98,6 +98,8 @@ It's useful only with Golang repositories, which require a `vendor` folder with 
 
 *Note: Internally this is implemented using lifecycle hook script and is equivalent to passing `--post-rebase-hook _BUILTIN_/update_go_modules.sh` parameter.*
 
+For repositories without a `vendor/` tree, use `--post-rebase-hook _BUILTIN_/update_go_modules_no_vendor.sh` instead (tidy/sync only, no vendoring).
+
 ### Slack Webhook
 
 If you want to be notified in Slack about the status of recent rebases, you can set ``--slack-webhook` option. The value here is the path to a local file with the webhook url.

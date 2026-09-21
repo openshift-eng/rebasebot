@@ -140,6 +140,90 @@ class TestGoMod:
         assert commits[0].message == "tidy and vendor go stuff\n"
 
 
+class TestGoModNoVendor:
+    _COMMIT_MESSAGE = "UPSTREAM: <drop>: Updating go modules after an upstream rebase\n"
+
+    def _args_stub(_, repo_dir, source) -> MagicMock:
+        args = MagicMock()
+        args.source = source
+        args.dest = GitHubBranch(repo_dir, "example", "foo", "dest")
+        args.rebase = GitHubBranch(repo_dir, "example", "foo", "rebase")
+        args.working_dir = repo_dir
+        args.git_username = "unittest"
+        args.git_email = "unit@test.org"
+        return args
+
+    def test_update_and_commit_without_vendor(self, tmp_go_app_repo, monkeypatch):
+        repo_dir, repo = tmp_go_app_repo
+
+        monkeypatch.chdir(repo_dir)
+        os.system("go mod init example.com/foo")
+        repo.git.add(all=True)
+        repo.git.commit("-m", "Init go module")
+
+        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        repo.create_remote("source", source.url)
+        repo.remotes.source.fetch(source.branch)
+
+        lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
+        script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules_no_vendor.sh")
+        result = script()
+
+        assert result.return_code == 0
+        commits = list(repo.iter_commits())
+        assert len(commits) == 3
+        assert commits[0].message == self._COMMIT_MESSAGE
+        assert not os.path.isdir(os.path.join(repo_dir, "vendor"))
+
+    def test_update_and_commit_go_workspace_without_vendor(self, tmp_go_app_repo, monkeypatch):
+        repo_dir, repo = tmp_go_app_repo
+
+        monkeypatch.chdir(repo_dir)
+        os.system("go mod init example.com/foo")
+        os.system("go work init .")
+        repo.git.add(all=True)
+        repo.git.commit("-m", "Init go workspace")
+
+        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        repo.create_remote("source", source.url)
+        repo.remotes.source.fetch(source.branch)
+
+        lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
+        script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules_no_vendor.sh")
+        result = script()
+
+        assert result.return_code == 0
+        assert not os.path.isdir(os.path.join(repo_dir, "vendor"))
+        commits = list(repo.iter_commits())
+        # go work sync may or may not dirty the tree; never vendor.
+        if len(commits) == 3:
+            assert commits[0].message == self._COMMIT_MESSAGE
+        else:
+            assert len(commits) == 2
+            assert commits[0].message == "Init go workspace\n"
+
+    def test_update_fails_on_broken_go_mod(self, tmp_go_app_repo, monkeypatch):
+        repo_dir, repo = tmp_go_app_repo
+
+        monkeypatch.chdir(repo_dir)
+        os.system("go mod init example.com/foo")
+        with open(os.path.join(repo_dir, "go.mod"), "w") as f:
+            f.write("this is not a valid go.mod\n")
+        repo.git.add(all=True)
+        repo.git.commit("-m", "Init broken go module")
+
+        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        repo.create_remote("source", source.url)
+        repo.remotes.source.fetch(source.branch)
+
+        lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
+        script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules_no_vendor.sh")
+        result = script()
+
+        assert result.return_code != 0
+        assert not os.path.isdir(os.path.join(repo_dir, "vendor"))
+
+
 class TestCommitMessageTags:
     @pytest.mark.parametrize(
         "pr_is_merged,commit_message,tag_policy,expected",

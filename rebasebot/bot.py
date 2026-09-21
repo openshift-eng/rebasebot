@@ -61,6 +61,10 @@ _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
 _GO_MODULES_CARRY_COMMIT_MESSAGE = "UPSTREAM: <carry>: Updating and vendoring go modules after an upstream rebase"
+# Raise rename similarity on cherry-picks so weak vendor/header matches are less
+# likely; keep-versus-delete still uses the picked commit's real path list.
+_CHERRY_PICK_FIND_RENAMES = "-Xfind-renames=70"
+_CHERRY_PICK_STRATEGY_OPTIONS = ("-Xtheirs", _CHERRY_PICK_FIND_RENAMES)
 
 
 @dataclass(frozen=True)
@@ -364,8 +368,9 @@ def _detect_conflicting_files(gitwd: git.Repo, sha: str) -> set:
     """
     Probe a cherry-pick without -Xtheirs to detect which files conflict.
 
-    Attempts the cherry-pick with --no-commit (no merge strategy), records
-    any unmerged files, then resets to the original state.
+    Attempts the cherry-pick with --no-commit (no "theirs" strategy) using the
+    same find-renames threshold as the real apply, records any unmerged files,
+    then resets to the original state.
 
     Returns a set of filenames that had merge conflicts, or an empty set
     if the cherry-pick would apply cleanly.
@@ -374,7 +379,7 @@ def _detect_conflicting_files(gitwd: git.Repo, sha: str) -> set:
     conflicted = set()
 
     try:
-        gitwd.git.cherry_pick(sha, "--no-commit")
+        gitwd.git.cherry_pick(sha, "--no-commit", _CHERRY_PICK_FIND_RENAMES)
     except git.GitCommandError:
         # Conflicts exist — record which files are unmerged
         try:
@@ -394,6 +399,20 @@ def _detect_conflicting_files(gitwd: git.Repo, sha: str) -> set:
             os.remove(state_path)
 
     return conflicted
+
+
+def _unescape_git_path(path: str) -> str:
+    """Decode a git C-quoted path from --name-only / status --porcelain output."""
+    if path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+        path = path.encode("ascii").decode("unicode_escape").encode("latin1").decode(git.compat.defenc)
+    return path
+
+
+def _picked_commit_paths(gitwd: git.Repo, sha: str) -> set[str]:
+    """Return paths touched by sha with rename detection disabled."""
+    output = gitwd.git.diff_tree("--no-renames", "--no-commit-id", "--name-only", "-r", sha)
+    return {_unescape_git_path(line) for line in output.splitlines() if line}
 
 
 def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files: set | None = None) -> list:
@@ -455,11 +474,11 @@ def _safe_cherry_pick(
     if conflict_policy != "auto":
         conflicted_files = _detect_conflicting_files(gitwd, sha)
 
-    # Phase 2: actual cherry-pick with -Xtheirs
+    # Phase 2: actual cherry-pick with -Xtheirs and find-renames threshold
     try:
-        gitwd.git.cherry_pick(f"{sha}", "-Xtheirs")
+        gitwd.git.cherry_pick(f"{sha}", *_CHERRY_PICK_STRATEGY_OPTIONS)
     except git.GitCommandError as ex:
-        if not _resolve_rebase_conflicts(gitwd):
+        if not _resolve_rebase_conflicts(gitwd, sha):
             raise RepoException(f"Git rebase failed: {ex}") from ex
 
     created_commit = gitwd.head.commit.hexsha != start_head
@@ -654,7 +673,7 @@ def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBr
     gitwd.git.checkout("-b", "rebase", commit)
 
 
-def _resolve_conflict(gitwd: git.Repo) -> bool:
+def _resolve_conflict(gitwd: git.Repo, sha: str) -> bool:
     status = gitwd.git.status(porcelain=True)
 
     if not status:
@@ -663,7 +682,8 @@ def _resolve_conflict(gitwd: git.Repo) -> bool:
         return True
 
     # Conflict prefixes in porcelain mode that we can fix.
-    # In all next cases we delete the conflicting files.
+    # Delete-shaped conflicts: remove only if the path is in the picked commit's
+    # real (no-rename) path list; otherwise keep HEAD's version.
     # UD - Modified/Deleted
     # DU - Deleted/Modified
     # AU - Renamed/Deleted
@@ -674,25 +694,43 @@ def _resolve_conflict(gitwd: git.Repo) -> bool:
     # Non-conflict status prefixes that we should ignore
     allowed_status_prefixes = ["M  ", "D  ", "A  ", "R  ", "C  "]
 
+    picked_paths = _picked_commit_paths(gitwd, sha)
     unresolvable = False
     files_to_delete = []
+    files_to_keep = []
     for line in status.splitlines():
         logging.info("Resolving conflict: %s", line)
         file_status = line[:3]
         if file_status in allowed_status_prefixes:
-            # There is a conflict we can't resolve
+            # Already staged non-conflict change — leave alone
             continue
         if file_status not in allowed_conflict_prefixes:
             # There is a conflict we can't resolve
             logging.info("Unresolvable conflict: %s", line)
             unresolvable = True
-        filename = line[3:].rstrip("\n")
-        # Special characters are escaped
-        if filename[0] == filename[-1] == '"':
-            filename = filename[1:-1]
-            filename = filename.encode("ascii").decode("unicode_escape").encode("latin1").decode(git.compat.defenc)
-        files_to_delete.append(filename)
-        logging.info("Deleting conflicting file: %s", filename)
+            continue
+        filename = _unescape_git_path(line[3:].rstrip("\n"))
+        if filename in picked_paths:
+            files_to_delete.append(filename)
+        else:
+            files_to_keep.append(filename)
+
+    if files_to_keep:
+        logging.info(
+            "Keeping paths not in picked commit %s (false rename/delete): %s",
+            sha,
+            ", ".join(files_to_keep),
+        )
+    if files_to_delete:
+        logging.info(
+            "Deleting paths present in picked commit %s: %s",
+            sha,
+            ", ".join(files_to_delete),
+        )
+
+    for keep_file in files_to_keep:
+        gitwd.git.checkout("HEAD", "--", keep_file)
+        gitwd.git.add(keep_file)
 
     for ud_file in files_to_delete:
         gitwd.git.rm(ud_file)
@@ -703,21 +741,29 @@ def _resolve_conflict(gitwd: git.Repo) -> bool:
         logging.error("Unresolvable conflict. Aborting rebase.")
         return False
 
+    # If resolution left the index identical to HEAD, skip rather than
+    # creating an empty commit (common when vendor deletes are already applied
+    # and only false rename/delete conflicts remained).
+    if not gitwd.git.diff("HEAD") and not gitwd.git.diff("--cached"):
+        logging.info("Conflict resolution left no changes versus HEAD; skipping pick %s", sha)
+        gitwd.git.cherry_pick("--skip")
+        return True
+
     gitwd.git.commit("--no-edit")
 
     return True
 
 
-def _resolve_rebase_conflicts(gitwd: git.Repo) -> bool:
+def _resolve_rebase_conflicts(gitwd: git.Repo, sha: str) -> bool:
     try:
-        if not _resolve_conflict(gitwd):
+        if not _resolve_conflict(gitwd, sha):
             return False
 
         logging.info("Conflict has been resolved. Continue rebase.")
 
         return True
     except git.GitCommandError:
-        return _resolve_rebase_conflicts(gitwd)
+        return _resolve_rebase_conflicts(gitwd, sha)
 
 
 def _cherrypick_art_pull_request(

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from unittest.mock import MagicMock, patch
 
 from rebasebot import cli
@@ -421,3 +422,166 @@ class TestSafeCherryPickReturnValue:
 
         assert result.created_commit is True
         assert result.content_loss == []
+
+
+# Shared blob content used to provoke false rename/delete conflicts: a large
+# downstream delete set plus a new upstream file with near-identical content.
+_VENDOR_BLOB = 'package labels\n\nconst LabelKey = "app"\n' * 3
+_VENDOR_FILE_COUNT = 20
+_E2E_LABELS_FILE = "e2e_labels.go"
+_E2E_LABELS_CONTENT = _VENDOR_BLOB + "// upstream e2e labels\n"
+
+
+def _vendor_filename(index: int) -> str:
+    return f"vendor_{index:02d}.go"
+
+
+def _vendor_content(index: int) -> str:
+    return _VENDOR_BLOB + f"// vendor file {index}\n"
+
+
+def _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir):
+    gitwd = _init_working_dir(
+        source=source,
+        dest=dest,
+        rebase=rebase,
+        github_app_provider=fake_github_provider,
+        git_username="test_rebasebot",
+        git_email="test@rebasebot.ocp",
+        workdir=tmpdir,
+    )
+    gitwd.remotes.source.fetch(source.branch)
+    gitwd.remotes.dest.fetch(dest.branch)
+    _prepare_rebase_branch(gitwd, source, dest)
+    return gitwd
+
+
+def _setup_vendor_files_on_source_and_dest(source, dest):
+    source_builder = CommitBuilder(source)
+    dest_builder = CommitBuilder(dest)
+    for i in range(_VENDOR_FILE_COUNT):
+        source_builder.add_file(_vendor_filename(i), _vendor_content(i))
+        dest_builder.add_file(_vendor_filename(i), _vendor_content(i))
+    source_builder.commit("add vendor stand-ins")
+    dest_builder.commit("UPSTREAM: <carry>: add vendor stand-ins")
+
+
+class TestFalseRenameDeleteResolution:
+    """Regression tests for false rename/delete keep-versus-delete handling."""
+
+    def test_false_rename_delete_keeps_head_file(self, init_test_repositories, fake_github_provider, tmpdir):
+        """HEAD file not listed in the picked commit survives a false rename/delete conflict."""
+        source, rebase, dest = init_test_repositories
+        _setup_vendor_files_on_source_and_dest(source, dest)
+
+        source_drop = CommitBuilder(source)
+        for i in range(_VENDOR_FILE_COUNT):
+            source_drop.remove_file(_vendor_filename(i))
+        source_drop.add_file(_E2E_LABELS_FILE, _E2E_LABELS_CONTENT).commit(
+            "upstream: drop vendor stand-ins, add e2e labels"
+        )
+
+        dest_pick = CommitBuilder(dest)
+        for i in range(_VENDOR_FILE_COUNT):
+            dest_pick.remove_file(_vendor_filename(i))
+        # Extra path so the pick still has a real change after keeping the false rename.
+        carry = dest_pick.add_file("carry_marker.txt", "marker\n").commit("UPSTREAM: <carry>: remove vendor stand-ins")
+
+        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        assert _E2E_LABELS_FILE in gitwd.git.ls_files().splitlines()
+
+        result = _safe_cherry_pick(
+            gitwd=gitwd,
+            sha=carry.hexsha,
+            source_branch=source.branch,
+            conflict_policy="auto",
+            commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove vendor stand-ins",
+        )
+
+        assert result.created_commit is True
+        assert _E2E_LABELS_FILE in gitwd.git.ls_files().splitlines()
+        assert "carry_marker.txt" in gitwd.git.ls_files().splitlines()
+        with open(f"{gitwd.working_dir}/{_E2E_LABELS_FILE}", encoding="utf8") as f:
+            assert f.read() == _E2E_LABELS_CONTENT
+
+    def test_legitimate_delete_removes_path(self, init_test_repositories, fake_github_provider, tmpdir):
+        """A path listed in the picked commit is still removed on modify/delete conflict."""
+        source, rebase, dest = init_test_repositories
+
+        CommitBuilder(source).update_file("test.go", "upstream modified content\n").commit("modify test.go")
+        carry = CommitBuilder(dest).remove_file("test.go").commit("UPSTREAM: <carry>: remove test.go")
+
+        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        assert "test.go" in gitwd.git.ls_files().splitlines()
+
+        result = _safe_cherry_pick(
+            gitwd=gitwd,
+            sha=carry.hexsha,
+            source_branch=source.branch,
+            conflict_policy="auto",
+            commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove test.go",
+        )
+
+        assert result.created_commit is True
+        assert "test.go" not in gitwd.git.ls_files().splitlines()
+
+    def test_legitimate_delete_removes_non_ascii_path(self, init_test_repositories, fake_github_provider, tmpdir):
+        """Quoted non-ASCII paths in the picked commit still delete (path unescape must match)."""
+        source, rebase, dest = init_test_repositories
+        non_ascii_name = "café.txt"
+
+        CommitBuilder(source).add_file(non_ascii_name, "upstream café\n").commit("add non-ascii file")
+        CommitBuilder(dest).add_file(non_ascii_name, "downstream café\n").commit(
+            "UPSTREAM: <carry>: add non-ascii file"
+        )
+        CommitBuilder(source).update_file(non_ascii_name, "upstream modified café\n").commit(
+            "modify non-ascii file upstream"
+        )
+        carry = CommitBuilder(dest).remove_file(non_ascii_name).commit("UPSTREAM: <carry>: remove non-ascii file")
+
+        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        non_ascii_path = os.path.join(gitwd.working_dir, non_ascii_name)
+        assert os.path.exists(non_ascii_path)
+
+        result = _safe_cherry_pick(
+            gitwd=gitwd,
+            sha=carry.hexsha,
+            source_branch=source.branch,
+            conflict_policy="auto",
+            commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove non-ascii file",
+        )
+
+        assert result.created_commit is True
+        assert not os.path.exists(non_ascii_path)
+
+    def test_empty_after_resolution_skips_pick(self, init_test_repositories, fake_github_provider, tmpdir):
+        """Keeping false renames with no remaining changes skips instead of failing or empty-committing."""
+        source, rebase, dest = init_test_repositories
+        _setup_vendor_files_on_source_and_dest(source, dest)
+
+        source_drop = CommitBuilder(source)
+        for i in range(_VENDOR_FILE_COUNT):
+            source_drop.remove_file(_vendor_filename(i))
+        source_drop.add_file(_E2E_LABELS_FILE, _E2E_LABELS_CONTENT).commit(
+            "upstream: drop vendor stand-ins, add e2e labels"
+        )
+
+        dest_pick = CommitBuilder(dest)
+        for i in range(_VENDOR_FILE_COUNT):
+            dest_pick.remove_file(_vendor_filename(i))
+        carry = dest_pick.commit("UPSTREAM: <carry>: remove vendor stand-ins")
+
+        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        head_before = gitwd.head.commit.hexsha
+
+        result = _safe_cherry_pick(
+            gitwd=gitwd,
+            sha=carry.hexsha,
+            source_branch=source.branch,
+            conflict_policy="auto",
+            commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove vendor stand-ins",
+        )
+
+        assert result.created_commit is False
+        assert gitwd.head.commit.hexsha == head_before
+        assert _E2E_LABELS_FILE in gitwd.git.ls_files().splitlines()
