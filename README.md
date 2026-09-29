@@ -52,7 +52,11 @@ Resolve and merge upstream into downstream manually, then rerun the bot.
 `PRE_PUSH_REBASE_BRANCH` run on the result. These hooks must commit their changes,
 preserve both histories and remain on `rebase`. `PRE_CREATE_PR` must not change
 commits because it runs after publication. `--update-go-modules` remains supported
-through its post-rebase hook. The existing hook names and environment variables
+through its post-rebase hook. The builtin Go-module update hooks reset `go.mod`
+and `go.sum` from `source/$REBASEBOT_SOURCE` before updating dependencies. This
+can remove downstream dependency overrides even though their commits remain in
+ancestry. Use a custom post-rebase hook if you need to retain the merged manifests
+and downstream overrides. The existing hook names and environment variables
 are unchanged. With `--always-run-hooks`, pre/post hooks also run when upstream
 is already contained; otherwise that ancestry check makes the run a no-op.
 
@@ -66,7 +70,8 @@ case integrate its merge commit manually without squashing.
 Switching from replay to merge preserves the current downstream tip, including
 existing replay history. Close any pending replay PR and preferably choose a new
 `--rebase` branch when switching modes (the bot force-updates that branch).
-Once downstream contains a merge-mode sync, the bot refuses replay mode: switching
+Once downstream-only history contains a merge-mode sync (excluding pinned upstream
+ancestry), the bot refuses replay mode: switching
 back requires a deliberately prepared replay baseline maintained manually.
 Do not alternate modes on the same downstream history. Merge-mode commits carry
 an identifying message marker; preserve their messages for this safety check.

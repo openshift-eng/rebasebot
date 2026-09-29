@@ -264,3 +264,173 @@ def test_replay_to_merge_and_back_requires_manual_baseline(merge_run):
     downstream_repo.git.fetch(options["working_dir"], "rebase")
     downstream_repo.git.merge("--ff-only", "FETCH_HEAD")
     assert not bot.run(**{**options, "sync_mode": "replay"})
+
+
+@pytest.mark.parametrize("setting,value", [("branch.rebase.mergeOptions", "-Xours"), ("pull.twohead", "ours")])
+def test_inherited_merge_settings_cannot_discard_conflicts(merge_run, setting, value):
+    options, create_pr = merge_run
+    options["dry_run"] = False
+    upstream = CommitBuilder(options["source"]).update_file("test.go", "upstream").commit("upstream conflict")
+    downstream = CommitBuilder(options["dest"]).update_file("test.go", "downstream").commit("downstream conflict")
+
+    def hook(*, hook):
+        if hook == LifecycleHook.PRE_REBASE:
+            work_repo(options).git.config(setting, value)
+
+    options["hooks"].execute_scripts_for_hook.side_effect = hook
+    assert not bot.run(**options)
+    repo = work_repo(options)
+    assert repo.head.commit == downstream
+    assert not repo.is_ancestor(upstream, "HEAD")
+    assert not repo.is_dirty(untracked_files=True)
+    assert not Path(repo.git_dir, "MERGE_HEAD").exists()
+    assert not git.Repo(options["rebase"].url).heads
+    create_pr.assert_not_called()
+
+
+@pytest.mark.parametrize("hook_commits", [False, True])
+def test_upstream_rollback_replaces_same_tree_pending_merge(merge_run, hook_commits, monkeypatch):
+    options, _ = merge_run
+    options["dry_run"] = False
+    selected = CommitBuilder(options["source"]).commit("selected upstream")
+    withdrawn = CommitBuilder(options["source"]).commit("withdrawn upstream")
+
+    def hook(*, hook):
+        if hook_commits and hook in (LifecycleHook.PRE_REBASE, LifecycleHook.POST_REBASE):
+            work_repo(options).git.commit("--allow-empty", "-m", f"hook {hook}")
+
+    options["hooks"].execute_scripts_for_hook.side_effect = hook
+    assert bot.run(**options)
+    remote = git.Repo(options["rebase"].url)
+    old_head = remote.head.commit
+    git.Repo(options["source"].url).git.reset("--hard", selected.hexsha)
+    options["working_dir"] += "-rollback"
+    assert bot.run(**options)
+    assert remote.head.commit.tree == old_head.tree
+    assert remote.is_ancestor(selected, "HEAD")
+    assert not remote.is_ancestor(withdrawn, "HEAD")
+    replacement = remote.head.commit
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2030-01-01T00:00:00+0000")
+    assert bot.run(**options)
+    assert remote.head.commit == replacement
+    assert work_repo(options).head.commit != replacement
+
+
+@pytest.mark.parametrize("failure", ["pending_merge", "nested_repo", "rename", "delete"])
+def test_hook_state_failure_restores_workspace_and_allows_retry(merge_run, failure, caplog):
+    options, create_pr = merge_run
+    options["dry_run"] = False
+    CommitBuilder(options["source"]).commit("upstream advance")
+    downstream = git.Repo(options["dest"].url).head.commit
+    outside = Path(options["working_dir"]).parent / "outside-repo"
+    git.Repo.init(outside)
+    (outside / "file").write_text("preserve")
+
+    def hook(*, hook):
+        if hook != LifecycleHook.POST_REBASE:
+            return
+        repo = work_repo(options)
+        if failure == "pending_merge":
+            repo.git.checkout("-b", "hook-side", downstream.hexsha)
+            repo.git.commit("--allow-empty", "-m", "hook side")
+            repo.git.checkout("rebase")
+            repo.git.merge("--no-commit", "--no-ff", "hook-side")
+            assert not repo.is_dirty(untracked_files=True)
+            assert Path(repo.git_dir, "MERGE_HEAD").exists()
+        elif failure == "nested_repo":
+            nested = Path(repo.working_dir, "generated-repo")
+            git.Repo.init(nested)
+            (nested / "file").write_text("unfinished")
+            Path(repo.working_dir, "outside-link").symlink_to(outside, target_is_directory=True)
+        else:
+            if failure == "rename":
+                repo.git.branch("-m", "hook-branch")
+            else:
+                repo.git.checkout("--detach")
+                repo.git.branch("-D", "rebase")
+            repo.git.commit("--allow-empty", "-m", "hook change")
+            raise LifecycleHookScriptException("original hook failure")
+
+    options["hooks"].execute_scripts_for_hook.side_effect = hook
+    assert not bot.run(**options)
+    repo = work_repo(options)
+    assert repo.head.commit == downstream
+    assert repo.active_branch.name == "rebase"
+    assert not repo.is_dirty(untracked_files=True)
+    assert not Path(repo.git_dir, "MERGE_HEAD").exists()
+    assert not Path(repo.working_dir, "generated-repo").exists()
+    assert (outside / ".git").is_dir()
+    assert (outside / "file").read_text() == "preserve"
+    if failure in ("rename", "delete"):
+        assert "original hook failure" in caplog.text
+    assert not git.Repo(options["rebase"].url).heads
+    create_pr.assert_not_called()
+    options["hooks"].execute_scripts_for_hook.side_effect = None
+    assert bot.run(**options)
+    assert not repo.is_dirty(untracked_files=True)
+    create_pr.assert_called_once()
+
+
+def test_default_replay_accepts_upstream_inherited_merge_marker(merge_run):
+    options, _ = merge_run
+    source = git.Repo(options["source"].url)
+    source.git.checkout("-b", "upstream-side")
+    source.git.commit("--allow-empty", "-m", "upstream side")
+    source.git.checkout(options["source"].branch)
+    source.git.merge("--no-ff", "-m", merge_sync.MODE_MARKER, "upstream-side")
+    downstream = git.Repo(options["dest"].url)
+    downstream.git.fetch(options["source"].url, options["source"].branch)
+    downstream.git.reset("--hard", "FETCH_HEAD")
+    CommitBuilder(options["dest"]).add_file("carry", "carry").commit("downstream carry")
+    CommitBuilder(options["source"]).commit("new upstream")
+    del options["sync_mode"]
+    assert bot.run(**options)
+    assert work_repo(options).git.show("HEAD:carry") == "carry"
+
+
+@pytest.mark.parametrize("operation", ["cherry-pick", "rebase"])
+def test_tree_clean_sequencer_failure_and_retry(tmp_go_app_repo, operation):
+    _, repo = tmp_go_app_repo
+    downstream = repo.head.commit.hexsha
+    repo.git.checkout("-b", "rebase")
+    hooks = MagicMock()
+
+    def hook(*, hook):
+        if operation == "cherry-pick":
+            repo.git.checkout("-b", "side")
+            repo.git.commit("--allow-empty", "-m", "empty one")
+            first = repo.head.commit.hexsha
+            repo.git.commit("--allow-empty", "-m", "empty two")
+            second = repo.head.commit.hexsha
+            repo.git.checkout("rebase")
+            with pytest.raises(git.GitCommandError):
+                repo.git.cherry_pick(first, second)
+            assert Path(repo.git_dir, "sequencer").is_dir()
+            assert Path(repo.git_dir, "CHERRY_PICK_HEAD").exists()
+        else:
+            repo.git.commit("--allow-empty", "-m", "edit me")
+            with repo.git.custom_environment(GIT_SEQUENCE_EDITOR="sed -i s/^pick/edit/"):
+                repo.git.rebase("-i", "HEAD^")
+            assert Path(repo.git_dir, "rebase-merge").is_dir()
+        assert not repo.is_dirty(untracked_files=True)
+
+    hooks.execute_scripts_for_hook.side_effect = hook
+    with pytest.raises(merge_sync.MergeSyncError, match="finish all Git operations"):
+        merge_sync.execute_hook(repo, hooks, LifecycleHook.POST_REBASE, downstream)
+    assert repo.head.commit.hexsha == downstream
+    assert repo.active_branch.name == "rebase"
+    assert not any(Path(repo.git_dir, name).exists() for name in merge_sync.OPERATION_STATE)
+    assert not repo.is_dirty(untracked_files=True)
+    hooks.execute_scripts_for_hook.side_effect = None
+    merge_sync.execute_hook(repo, hooks, LifecycleHook.POST_REBASE, downstream)
+
+
+def test_cleanup_error_does_not_mask_original_hook_failure(tmp_go_app_repo, monkeypatch, caplog):
+    _, repo = tmp_go_app_repo
+    hooks = MagicMock()
+    hooks.execute_scripts_for_hook.side_effect = LifecycleHookScriptException("original hook failure")
+    monkeypatch.setattr(merge_sync, "restore", MagicMock(side_effect=RuntimeError("cleanup failure")))
+    with pytest.raises(LifecycleHookScriptException, match="original hook failure"):
+        merge_sync.execute_hook(repo, hooks, LifecycleHook.PRE_REBASE, repo.head.commit.hexsha)
+    assert "Failed to restore disposable merge workspace" in caplog.text
+    assert "cleanup failure" in caplog.text

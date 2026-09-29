@@ -1248,7 +1248,7 @@ def run(
     try:
         downstream = gitwd.commit(f"dest/{dest.branch}").hexsha
         upstream = gitwd.commit(f"source/{source.branch}").hexsha
-        if sync_mode == "replay" and merge_sync.has_merge_sync(gitwd, downstream):
+        if sync_mode == "replay" and merge_sync.has_merge_sync(gitwd, downstream, upstream):
             raise RepoException(
                 "Downstream contains merge-mode syncs. Keep --sync-mode merge; "
                 "switching back to replay requires a manually prepared replay baseline."
