@@ -22,7 +22,7 @@ import os
 import sys
 import tempfile
 
-from rebasebot import bot, lifecycle_hooks
+from rebasebot import bot, lifecycle_hooks, merge_sync
 from rebasebot.github import GithubAppProvider, GitHubBranch, parse_github_branch
 
 
@@ -54,6 +54,12 @@ def _parse_cli_arguments():
     _form_text = "in the form <user or organization>/<repo>:<branch>, e.g. kubernetes/cloud-provider-openstack:master"
 
     parser = argparse.ArgumentParser(description="Rebase on changes from an upstream repo")
+    parser.add_argument(
+        "--sync-mode",
+        choices=["replay", "merge"],
+        default="replay",
+        help="Synchronization strategy: replay carries (default) or preserve ancestry with a normal merge.",
+    )
     source_group = parser.add_mutually_exclusive_group(required=True)
 
     source_group.add_argument(
@@ -190,7 +196,7 @@ def _parse_cli_arguments():
         const="none",
         nargs="?",
         choices=["none", "soft", "strict"],
-        help="Option that shows how to handle UPSTREAM tags in commit messages. (default: %(default)s)",
+        help="Option that shows how to handle UPSTREAM tags in commit messages. (default: none)",
     )
     parser.add_argument(
         "--conflict-policy",
@@ -202,7 +208,7 @@ def _parse_cli_arguments():
         "'auto': no detection. "
         "'warn': log warnings. "
         "'strict': fail. "
-        "(default: %(default)s)",
+        "(default: auto)",
     )
     parser.add_argument(
         "--bot-emails",
@@ -280,7 +286,15 @@ def _parse_cli_arguments():
         "titles like 'UPSTREAM-SYNC: Merge ...'.",
     )
 
-    return parser.parse_args()
+    parser.set_defaults(tag_policy=None, conflict_policy=None)
+    args = parser.parse_args()
+    if args.sync_mode == "merge":
+        incompatible = [option for option in merge_sync.REPLAY_OPTIONS if getattr(args, option[2:].replace("-", "_"))]
+        if incompatible:
+            parser.error(f"--sync-mode merge is incompatible with {', '.join(incompatible)}")
+    args.tag_policy = args.tag_policy or "none"
+    args.conflict_policy = args.conflict_policy or "auto"
+    return args
 
 
 def _get_github_app_wrapper(
@@ -373,6 +387,7 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
                 hooks=hooks,
                 always_run_hooks=args.always_run_hooks,
                 title_prefix=args.title_prefix,
+                sync_mode="merge" if args.sync_mode == "merge" else "replay",
             )
         finally:
             os.chdir(original_cwd)

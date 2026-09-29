@@ -34,7 +34,7 @@ from github3.pulls import ShortPullRequest
 from github3.repos.commit import ShortCommit
 from github3.repos.repo import Repository
 
-from rebasebot import lifecycle_hooks
+from rebasebot import lifecycle_hooks, merge_sync
 from rebasebot.github import GithubAppProvider, GitHubBranch
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
 from rebasebot.pr_body import build_pr_body
@@ -1150,6 +1150,7 @@ def run(
     always_run_hooks: bool = False,
     title_prefix: str = "",
     prow_job: ProwJobContext | None = None,
+    sync_mode: str = "replay",
 ) -> bool:
     """Run Rebase Bot."""
     if prow_job is None:
@@ -1165,6 +1166,19 @@ def run(
 
     if hooks is None:
         hooks = lifecycle_hooks.LifecycleHooks(tmp_script_dir=None, args=None)
+
+    if sync_mode not in ("replay", "merge"):
+        logging.error("Unknown sync mode: %s", sync_mode)
+        return False
+    if sync_mode == "merge" and (
+        tag_policy != "none"
+        or conflict_policy != "auto"
+        or bot_emails
+        or exclude_commits
+        or hooks.hooks.get(lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
+    ):
+        logging.error("Merge mode does not support replay policies, commit filtering, or PRE_CARRY_COMMIT hooks.")
+        return False
 
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)
@@ -1232,7 +1246,20 @@ def run(
         return False
 
     try:
-        needs_rebase = _needs_rebase(gitwd, source, dest)
+        downstream = gitwd.commit(f"dest/{dest.branch}").hexsha
+        upstream = gitwd.commit(f"source/{source.branch}").hexsha
+        if sync_mode == "replay" and merge_sync.has_merge_sync(gitwd, downstream):
+            raise RepoException(
+                "Downstream contains merge-mode syncs. Keep --sync-mode merge; "
+                "switching back to replay requires a manually prepared replay baseline."
+            )
+        needs_rebase = (
+            not gitwd.is_ancestor(upstream, downstream) if sync_mode == "merge" else _needs_rebase(gitwd, source, dest)
+        )
+        if sync_mode == "merge" and not needs_rebase and not always_run_hooks:
+            gitwd.git.checkout("-B", "rebase", downstream)
+            logging.info("Downstream already contains pinned upstream; no merge, push, or PR required.")
+            return True
         if needs_rebase:
             upstream_commit_count = int(gitwd.git.rev_list("--count", f"dest/{dest.branch}..source/{source.branch}"))
         else:
@@ -1241,7 +1268,9 @@ def run(
         art_pr: ArtPrInfo | None = None
         content_loss_warnings: list[ContentLossWarning] = []
 
-        if needs_rebase:
+        if sync_mode == "merge":
+            merge_sync.prepare(gitwd, hooks, downstream, upstream, source, dest, needs_rebase)
+        elif needs_rebase:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             _prepare_rebase_branch(gitwd, source, dest)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
@@ -1279,7 +1308,8 @@ def run(
             content_loss_warnings=content_loss_warnings,
         )
 
-    except (RepoException, LifecycleHookScriptException) as ex:
+    except (RepoException, LifecycleHookScriptException, merge_sync.MergeSyncError) as ex:
+        logging.error("%s", ex)
         logging.error(
             f"Manual intervention is needed to rebase {source.url}:{source.branch} "
             f"into {dest.ns}/{dest.name}:{dest.branch}"
@@ -1298,11 +1328,19 @@ def run(
         )
         return False
 
+    if sync_mode == "merge" and gitwd.head.commit.hexsha == downstream:
+        logging.info("Merge hooks made no commits; no push or PR required.")
+        return True
+
     if dry_run:
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
-    push_required = _is_push_required(gitwd, rebase)
+    push_required = (
+        merge_sync.push_required(gitwd, rebase, downstream, upstream)
+        if sync_mode == "merge"
+        else _is_push_required(gitwd, rebase)
+    )
     pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
     pr_url = pull_req.html_url if pull_req is not None else ""
     pr_required = False
@@ -1311,7 +1349,12 @@ def run(
     if push_required:
         logging.info("Existing rebase branch needs to be updated.")
         try:
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
+            if sync_mode == "merge":
+                merge_sync.execute_hook(
+                    gitwd, hooks, lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH, downstream, upstream
+                )
+            else:
+                hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
             _push_rebase_branch(gitwd, rebase)
         except LifecycleHookScriptException as ex:
             logging.error(
@@ -1349,8 +1392,12 @@ def run(
 
     try:
         if not pr_available:
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
-            pr_required = _is_pr_required(gitwd, rebase, dest)
+            if sync_mode == "merge":
+                merge_sync.execute_hook(gitwd, hooks, lifecycle_hooks.LifecycleHook.PRE_CREATE_PR, downstream, upstream)
+                pr_required = not gitwd.is_ancestor(gitwd.head.commit, downstream)
+            else:
+                hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
+                pr_required = _is_pr_required(gitwd, rebase, dest)
             if pr_required:
                 pr_url = _create_pr(
                     gh_app=gh_app,

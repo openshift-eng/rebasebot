@@ -24,6 +24,53 @@ To successfully create a PR we need an intermediate repository where we push our
 ...
 ```
 
+## Opt-in merge synchronization
+
+The default `--sync-mode replay` keeps the existing carry-replay workflow. For
+fast-sync repositories that want to retain downstream commit SHAs, use:
+
+```sh
+rebasebot --sync-mode merge \
+  --source https://github.com/example/upstream:main \
+  --dest example/downstream:main \
+  --rebase example/sync-fork:sync-main \
+  --github-user-token /path/to/token
+```
+
+Merge mode starts the local `rebase` branch at the fetched downstream tip and
+merges the upstream commit pinned before lifecycle hooks run, using `--no-ff`.
+The merge records the upstream URL, ref and full SHA in its message; its parents
+preserve downstream carries and upstream history. It does not replay, squash,
+filter carries, resolve conflicts automatically, or cherry-pick open ART PRs.
+Conflicts (including unrelated histories) fail without pushing or opening a PR;
+the bot restores its disposable working repository to the downstream tip.
+Resolve and merge upstream into downstream manually, then rerun the bot.
+
+`--tag-policy`, `--conflict-policy`, `--bot-emails`, `--exclude-commits`, and
+`--pre-carry-commit-hook` are rejected in merge mode, even with neutral values.
+`PRE_REBASE` runs on downstream before the merge; `POST_REBASE` and
+`PRE_PUSH_REBASE_BRANCH` run on the result. These hooks must commit their changes,
+preserve both histories and remain on `rebase`. `PRE_CREATE_PR` must not change
+commits because it runs after publication. `--update-go-modules` remains supported
+through its post-rebase hook. The existing hook names and environment variables
+are unchanged. With `--always-run-hooks`, pre/post hooks also run when upstream
+is already contained; otherwise that ancestry check makes the run a no-op.
+
+Push and PR decisions retain new ancestry even if trees are identical. A repeated
+run does not repush an equivalent pending merge that contains both pinned tips.
+Accept sync PRs using a merge commit or fast-forward, **not squash or rebase**:
+those methods lose the upstream ancestry needed for subsequent no-op detection.
+GitHub or repository policy may prevent accepting a tree-identical PR; in that
+case integrate its merge commit manually without squashing.
+
+Switching from replay to merge preserves the current downstream tip, including
+existing replay history. Close any pending replay PR and preferably choose a new
+`--rebase` branch when switching modes (the bot force-updates that branch).
+Once downstream contains a merge-mode sync, the bot refuses replay mode: switching
+back requires a deliberately prepared replay baseline maintained manually.
+Do not alternate modes on the same downstream history. Merge-mode commits carry
+an identifying message marker; preserve their messages for this safety check.
+
 ## Auth parameters
 
 There are two auth modes that the bot supports: `user` and `application`. Therefore different parameters can be provided for the bot.
