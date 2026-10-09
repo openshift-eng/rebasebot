@@ -540,7 +540,7 @@ class TestRunSlackErrorMessages:
         http_error.response = mock_response
         mocked_create_pr.side_effect = http_error
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -585,9 +585,9 @@ class TestUpdatePrTitle:
         gitwd = MagicMock()
         gitwd.git.rev_parse.return_value = "abcdefg"
         pull_req = MagicMock()
-        pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
+        pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         pull_req.update.return_value = True
-        source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
+        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
         dest = MagicMock(branch="main")
 
         try:
@@ -595,18 +595,16 @@ class TestUpdatePrTitle:
         except Exception as ex:
             raise AssertionError("Unexpected exception") from ex
 
-        pull_req.update.assert_called_once_with(
-            title=f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
-        )
+        pull_req.update.assert_called_once_with(title=f"Merge {source.web_url} (abcdefg) into {dest.branch}")
 
     def test_jira_link(self):
         gitwd = MagicMock()
         gitwd.git.rev_parse.return_value = "abcdefg"
         pull_req = MagicMock()
         pull_req.title = "OCPCLOUD-2051: Merge "
-        "https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
+        "https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         pull_req.update.return_value = True
-        source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
+        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
         dest = MagicMock(branch="main")
 
         try:
@@ -615,7 +613,7 @@ class TestUpdatePrTitle:
             raise AssertionError("Unexpected exception") from ex
 
         pull_req.update.assert_called_once_with(
-            title=f"OCPCLOUD-2051: Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+            title=f"OCPCLOUD-2051: Merge {source.web_url} (abcdefg) into {dest.branch}"
         )
 
     def test_upstream_sync_prefix(self):
@@ -623,10 +621,10 @@ class TestUpdatePrTitle:
         gitwd.git.rev_parse.return_value = "abcdefg"
         pull_req = MagicMock()
         pull_req.title = (
-            "UPSTREAM-SYNC: Merge https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
+            "UPSTREAM-SYNC: Merge https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         )
         pull_req.update.return_value = True
-        source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
+        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
         dest = MagicMock(branch="main")
 
         try:
@@ -635,7 +633,7 @@ class TestUpdatePrTitle:
             raise AssertionError(f"Unexpected exception: {ex}") from ex
 
         pull_req.update.assert_called_once_with(
-            title=f"UPSTREAM-SYNC: Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+            title=f"UPSTREAM-SYNC: Merge {source.web_url} (abcdefg) into {dest.branch}"
         )
 
     def test_unknown_format_keep_unchanged(self):
@@ -644,7 +642,7 @@ class TestUpdatePrTitle:
         pull_req = MagicMock()
         pull_req.title = "OCPCLOUD-2051: Manual rebase to lastest upstream version"
         pull_req.update.return_value = True
-        source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
+        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
         dest = MagicMock(branch="main")
 
         try:
@@ -658,17 +656,15 @@ class TestUpdatePrTitle:
         gitwd = MagicMock()
         gitwd.git.rev_parse.return_value = "abcdefg"
         pull_req = MagicMock()
-        pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws:master (b80e8ef) into master"
+        pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         pull_req.update.return_value = False
-        source = MagicMock(branch="my-feature", url="https://github.com/my/repo")
+        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
         dest = MagicMock(branch="main")
 
         with pytest.raises(PullRequestUpdateException, match="Error updating title for pull request"):
             _update_pr_title(gitwd, pull_req, source, dest)
 
-        pull_req.update.assert_called_once_with(
-            title=f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
-        )
+        pull_req.update.assert_called_once_with(title=f"Merge {source.web_url} (abcdefg) into {dest.branch}")
 
 
 class TestUpdatePrBody:

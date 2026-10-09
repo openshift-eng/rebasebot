@@ -15,12 +15,73 @@
 
 from __future__ import annotations
 
+import re
+import shlex
+
 from rebasebot.github import GitHubBranch
 from rebasebot.prow import ProwJobContext
 from rebasebot.rebase_summary import ContentLossWarning, RebaseSummary
 
 PR_BODY_LOST_LINE_LIMIT = 20
 DROPPED_COMMITS_DISPLAY_LIMIT = 20
+
+
+def _branch_link(branch: GitHubBranch) -> str:
+    label = re.sub(r"([\\`*_\[\]<>])", r"\\\1", branch.label)
+    return f"[{label}]({branch.web_url})"
+
+
+def build_merge_pr_body(
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+    prow_job: ProwJobContext,
+    *,
+    conflicted_pr_number: int | None = None,
+) -> str:
+    """Instructions for a PR whose branch tracks the upstream tip exactly."""
+    repo = shlex.quote(f"{dest.ns}/{dest.name}")
+    body = f"This PR syncs upstream changes from {_branch_link(source)} into {_branch_link(dest)}."
+    if conflicted_pr_number is not None:
+        dest_ssh = shlex.quote(f"git@github.com:{dest.ns}/{dest.name}.git")
+        rebase_ssh = shlex.quote(f"git@github.com:{rebase.ns}/{rebase.name}.git")
+        pause_updates = f"gh pr edit {conflicted_pr_number} --repo {repo} --add-label rebase/manual &&\n"
+        checkout_pr = f"gh pr checkout {conflicted_pr_number} --repo {repo} --detach &&\n"
+        merge_dest = (
+            f"git fetch --no-tags -- {dest_ssh} {shlex.quote(f'refs/heads/{dest.branch}')} &&\n"
+            "git merge --no-ff --no-edit --no-squash --no-commit FETCH_HEAD\n"
+        )
+        body += (
+            "\n\n## Resolve conflicts\n\n"
+            "Conflict detected. Resolve manually. Keep `rebase/manual` until this PR is merged.\n\n"
+            f"Go to your local clone of `{dest.ns}/{dest.name}`, then run:\n\n"
+            "**Reuse your checkout.** Start with a clean working tree.\n\n"
+            "```sh\n"
+            f"{pause_updates}"
+            'test -z "$(git status --porcelain --untracked-files=all)" &&\n'
+            f"{checkout_pr}"
+            f"{merge_dest}"
+            "```\n\n"
+            "<details>\n<summary>Use a temporary worktree instead</summary>\n\n"
+            "```sh\n"
+            f"{pause_updates}"
+            f'workdir=$(mktemp -d "${{TMPDIR:-/tmp}}/rebasebot-pr-{conflicted_pr_number}.XXXXXX") &&\n'
+            'git worktree add --detach "$workdir" HEAD &&\n'
+            'cd "$workdir" &&\n'
+            f"{checkout_pr}"
+            f"{merge_dest}"
+            "```\n\n</details>\n\n"
+            "Resolve the conflicts, then stage the resolved files and any other intended changes. "
+            "Review the staged diff, then run:\n\n"
+            "```sh\n"
+            "git diff --cached --check &&\n"
+            "git commit --no-edit &&\n"
+            f"git push --no-follow-tags -- {rebase_ssh} {shlex.quote(f'HEAD:refs/heads/{rebase.branch}')}\n"
+            "```"
+        )
+    if prow_job.log_url is not None:
+        body += f"\n\n[View job log]({prow_job.log_url})"
+    return body
 
 
 def build_pr_body(
@@ -40,8 +101,8 @@ def build_pr_body(
         commit_line = f"{summary.upstream_commit_count} new upstream commits"
 
     summary_lines = [
-        f"- **Source**: `{source.url}:{source.branch}`",
-        f"- **Destination**: `{dest.url}:{dest.branch}`",
+        f"- **Source**: {_branch_link(source)}",
+        f"- **Destination**: {_branch_link(dest)}",
         f"- **{commit_line}**",
     ]
     sections.append("## Summary\n" + "\n".join(summary_lines))
