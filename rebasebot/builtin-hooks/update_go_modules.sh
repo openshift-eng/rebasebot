@@ -28,7 +28,7 @@ reset_go_mod_files() {
             if [[ ! -f "$full_path" ]]; then
                 continue
             fi
-            if ! git checkout "source/$REBASEBOT_SOURCE" -- "$full_path"; then
+            if ! git checkout "refs/remotes/source/$REBASEBOT_SOURCE" -- "$full_path"; then
                 echo "go module at $module_base_path is downstream only, skip its resetting"
                 break
             fi
@@ -43,7 +43,7 @@ process_go_workspace_updates() {
         if [[ ! -f "$filename" ]]; then
             continue
         fi
-        if ! git checkout "source/$REBASEBOT_SOURCE" -- "$filename"; then
+        if ! git checkout "refs/remotes/source/$REBASEBOT_SOURCE" -- "$filename"; then
             echo "go.work is downstream only, which is not supported" >&2
             exit 1
         fi

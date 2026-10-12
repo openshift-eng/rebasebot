@@ -101,7 +101,7 @@ def notify_slack_error(notifier: SlackNotifier, description: str, ex: Exception)
 
 def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> bool:
     try:
-        branches_with_commit = gitwd.git.branch("-r", "--contains", f"source/{source.branch}")
+        branches_with_commit = gitwd.git.branch("-r", "--contains", f"refs/remotes/source/{source.branch}")
         dest_branch = f"dest/{dest.branch}"
         logging.info("Branches with commit:\n%s", branches_with_commit)
         for branch in branches_with_commit.splitlines():
@@ -129,7 +129,7 @@ def _is_pr_merged(pr_number: int, source_repo: Repository, gitwd: git.Repo, sour
         return False
 
     merge_commit = gitwd.commit(merge_commit_sha)
-    source_head = gitwd.commit(f"source/{source_branch}")
+    source_head = gitwd.commit(f"refs/remotes/source/{source_branch}")
 
     # Check if the source branch contains the merge commit
     if gitwd.is_ancestor(merge_commit, source_head):
@@ -230,7 +230,7 @@ def _find_source_parent_commit(parents: list, gitwd: git.Repo) -> Commit:
 
 def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> str:
     # Merge base is the last shared commit of source branch and destination branch
-    merge_base = gitwd.git.merge_base(f"source/{source.branch}", f"dest/{dest.branch}")
+    merge_base = gitwd.git.merge_base(f"refs/remotes/source/{source.branch}", f"dest/{dest.branch}")
     logging.info(f"Merge base of source/{source.branch} and dest/{dest.branch}: %s", merge_base)
 
     # ancestry_path_merges are merge commits on ancestry path from merge base to destination branch
@@ -427,7 +427,7 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
     If only_files is provided, only those files are checked (used to
     restrict verification to files that had actual merge conflicts).
     """
-    source_ref = f"source/{source_branch}"
+    source_ref = f"refs/remotes/source/{source_branch}"
 
     if only_files is not None:
         files_to_check = only_files
@@ -646,7 +646,7 @@ def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBr
         pass
 
     # Create a merge tmp branch that matches the source branch head.
-    gitwd.git.checkout("-b", MERGE_TMP_BRANCH, f"source/{source.branch}")
+    gitwd.git.checkout("-b", MERGE_TMP_BRANCH, f"refs/remotes/source/{source.branch}")
 
     # Make sure we are at the tip of our branch.
     gitwd.git.checkout(f"dest/{dest.branch}")
@@ -892,15 +892,6 @@ def _create_pr(
     return gh_app._instance_or_null(ShortPullRequest, gh_pr.json())  # pylint: disable=W0212
 
 
-def is_ref_a_tag(gitwd: git.Repo, ref: str) -> bool:
-    """Returns True if a git ref is a tag. False otherwise."""
-    try:
-        gitwd.git.show_ref("--tags", ref)
-        return True
-    except git.GitCommandError:
-        return False
-
-
 def _init_working_dir(
     *,
     source: GitHubBranch,
@@ -978,24 +969,6 @@ def _prepare_replay_workdir(gitwd: git.Repo, source: GitHubBranch, rebase: GitHu
     logging.info("Fetching all branches from source")
     gitwd.remotes.source.fetch(refspec="refs/heads/*:refs/heads/*", update_head_ok=True, filter="blob:none")
 
-    if is_ref_a_tag(gitwd, source.branch):
-        logging.info(f"{source.branch} is a tag, but we must work with branches, creating a branch")
-        gitwd.git.branch("-f", f"source/{source.branch}", source.branch)
-        logging.info(f"source/{source.branch} branch created")
-
-    source_ref = f"source/{source.branch}"
-
-    # Check if source_ref exists; if not, create it.
-    # This handles the case where source.branch is a commit SHA rather than a branch name.
-    try:
-        gitwd.git.rev_parse(source_ref)
-    except git.GitCommandError:
-        logging.info(f"{source_ref} does not exist, creating branch from {source.branch}")
-        gitwd.git.branch("-f", source_ref, source.branch)
-        logging.info(f"{source_ref} branch created")
-
-    logging.info("Checking out %s", source_ref)
-
     logging.info("Checking for existing rebase branch %s in %s", rebase.branch, rebase.url)
 
     rebase_ref = gitwd.git.ls_remote("rebase", rebase.branch, heads=True)
@@ -1005,7 +978,7 @@ def _prepare_replay_workdir(gitwd: git.Repo, source: GitHubBranch, rebase: GitHu
 
     # Reset the existing rebase branch to match the source branch
     # or create a new rebase branch based on the source branch.
-    head_commit = gitwd.git.rev_parse(source_ref)
+    head_commit = gitwd.commit(f"refs/remotes/source/{source.branch}").hexsha
     if "rebase" in gitwd.heads:
         gitwd.heads.rebase.set_commit(head_commit)
     else:
@@ -1054,7 +1027,7 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
     Keeping everything before "Merge" and updating everything after.
     This prevents jira link or tags from being removed.
     """
-    source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
+    source_head_commit = gitwd.git.rev_parse(f"refs/remotes/source/{source.branch}^{{commit}}", short=7)
 
     if pull_req.title.count("Merge") == 1:
         tags = pull_req.title.split("Merge")[0]
@@ -1349,7 +1322,9 @@ def run(
     try:
         needs_rebase = _needs_rebase(gitwd, source, dest)
         if needs_rebase:
-            upstream_commit_count = int(gitwd.git.rev_list("--count", f"dest/{dest.branch}..source/{source.branch}"))
+            upstream_commit_count = int(
+                gitwd.git.rev_list("--count", f"dest/{dest.branch}..refs/remotes/source/{source.branch}")
+            )
         else:
             upstream_commit_count = 0
         dropped_commits: list[DroppedCommit] = []
@@ -1463,7 +1438,7 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
             pr_required = _is_pr_required(gitwd, rebase, dest)
             if pr_required:
-                source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
+                source_head_commit = gitwd.git.rev_parse(f"refs/remotes/source/{source.branch}^{{commit}}", short=7)
                 title = f"Merge {source.web_url} ({source_head_commit}) into {dest.branch}"
                 if title_prefix:
                     title = f"{title_prefix}: {title}"
