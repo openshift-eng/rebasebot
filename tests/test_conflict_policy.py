@@ -21,9 +21,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 from rebasebot import cli
-from rebasebot.bot import _init_working_dir, _prepare_rebase_branch, _safe_cherry_pick
-from rebasebot.pr_body import build_pr_body
-from rebasebot.prow import ProwJobContext
+from rebasebot.bot import _init_working_dir, _prepare_rebase_branch, _prepare_replay_workdir, _safe_cherry_pick
 
 from .conftest import CommitBuilder
 
@@ -114,7 +112,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -164,7 +162,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -208,7 +206,7 @@ class TestConflictPolicy:
         source, rebase, dest = init_test_repositories
         mocked_is_pr_available.return_value = None, False
         mocked_push_rebase_branch.return_value = True
-        mocked_create_pr.return_value = "https://github.com/downstream/repo/pull/1"
+        mocked_create_pr.return_value.html_url = "https://github.com/downstream/repo/pull/1"
 
         CommitBuilder(source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
         CommitBuilder(dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
@@ -217,7 +215,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -237,11 +235,7 @@ class TestConflictPolicy:
 
         assert result is True
         mocked_create_pr.assert_called_once()
-        summary = mocked_create_pr.call_args.kwargs["summary"]
-        assert len(summary.content_loss_warnings) == 1
-        assert summary.content_loss_warnings[0].file == "test.go"
-        assert any("ebsKmsKeyId" in line for line in summary.content_loss_warnings[0].lost_lines)
-        pr_body = build_pr_body(summary, source, dest, ProwJobContext.from_env())
+        pr_body = mocked_create_pr.call_args.kwargs["body"]
         assert "## ⚠️ Possible upstream content loss" in pr_body
         assert "<details>" in pr_body
         assert "<summary>" in pr_body
@@ -277,7 +271,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -326,7 +320,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: downstream only file"
         )
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -369,6 +363,7 @@ class TestSafeCherryPickReturnValue:
             git_email="test@rebasebot.ocp",
             workdir=tmpdir,
         )
+        _prepare_replay_workdir(gitwd, source, rebase)
         gitwd.remotes.source.fetch(source.branch)
         gitwd.remotes.dest.fetch(dest.branch)
         _prepare_rebase_branch(gitwd, source, dest)
@@ -408,6 +403,7 @@ class TestSafeCherryPickReturnValue:
             git_email="test@rebasebot.ocp",
             workdir=tmpdir,
         )
+        _prepare_replay_workdir(gitwd, source, rebase)
         gitwd.remotes.source.fetch(source.branch)
         gitwd.remotes.dest.fetch(dest.branch)
         _prepare_rebase_branch(gitwd, source, dest)
@@ -450,6 +446,7 @@ def _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir):
         git_email="test@rebasebot.ocp",
         workdir=tmpdir,
     )
+    _prepare_replay_workdir(gitwd, source, rebase)
     gitwd.remotes.source.fetch(source.branch)
     gitwd.remotes.dest.fetch(dest.branch)
     _prepare_rebase_branch(gitwd, source, dest)

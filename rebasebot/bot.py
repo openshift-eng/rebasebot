@@ -37,7 +37,7 @@ from github3.repos.repo import Repository
 from rebasebot import lifecycle_hooks
 from rebasebot.github import GithubAppProvider, GitHubBranch
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
-from rebasebot.pr_body import build_pr_body
+from rebasebot.pr_body import build_merge_pr_body, build_pr_body
 from rebasebot.prow import ProwJobContext
 from rebasebot.rebase_summary import ArtPrInfo, ContentLossWarning, DroppedCommit, RebaseSummary
 from rebasebot.slack import SlackNotifier
@@ -859,19 +859,10 @@ def _create_pr(
     *,
     gh_app: github3.GitHub,
     dest: GitHubBranch,
-    source: GitHubBranch,
     rebase: GitHubBranch,
-    gitwd: git.Repo,
-    summary: RebaseSummary,
-    prow_job: ProwJobContext,
-    title_prefix: str = "",
-) -> str:
-    source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
-
-    title = f"Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
-    if title_prefix:
-        title = f"{title_prefix}: {title}"
-
+    title: str,
+    body: str,
+) -> ShortPullRequest:
     logging.info("Creating a pull request")
 
     # FIXME(rmanak): This hack is because github3 doesn't support setting
@@ -886,7 +877,7 @@ def _create_pr(
         f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
         data={
             "title": title,
-            "body": build_pr_body(summary, source, dest, prow_job),
+            "body": body,
             "head": rebase.branch,
             "head_repo": f"{rebase.ns}/{rebase.name}",
             "base": dest.branch,
@@ -898,7 +889,7 @@ def _create_pr(
     logging.debug(gh_pr.json())
     gh_pr.raise_for_status()
 
-    return gh_pr.json()["html_url"]
+    return gh_app._instance_or_null(ShortPullRequest, gh_pr.json())  # pylint: disable=W0212
 
 
 def is_ref_a_tag(gitwd: git.Repo, ref: str) -> bool:
@@ -975,8 +966,12 @@ def _init_working_dir(
     gitwd.remotes.dest.fetch(dest.branch)
 
     logging.info("Fetching %s from source", source.branch)
-    gitwd.remotes.source.fetch(source.branch)
+    gitwd.git.fetch("source", f"+{source.branch}:refs/remotes/source/{source.branch}")
 
+    return gitwd
+
+
+def _prepare_replay_workdir(gitwd: git.Repo, source: GitHubBranch, rebase: GitHubBranch) -> None:
     logging.info("Fetching all tags from source")
     gitwd.remotes.source.fetch(refspec="refs/tags/*:refs/tags/*", filter="blob:none")
 
@@ -988,8 +983,6 @@ def _init_working_dir(
         gitwd.git.branch("-f", f"source/{source.branch}", source.branch)
         logging.info(f"source/{source.branch} branch created")
 
-    # For a cherry-pick, we must start with the source branch and pick
-    # the carry commits on top.
     source_ref = f"source/{source.branch}"
 
     # Check if source_ref exists; if not, create it.
@@ -1021,8 +1014,6 @@ def _init_working_dir(
     gitwd.head.reset(index=True, working_tree=True)
     # Clean any untracked files when reusing rebase directory
     gitwd.git.clean("-fd")
-
-    return gitwd
 
 
 def _manual_rebase_pr_in_repo(repo: Repository) -> ShortPullRequest | None:
@@ -1067,7 +1058,7 @@ def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHub
 
     if pull_req.title.count("Merge") == 1:
         tags = pull_req.title.split("Merge")[0]
-        computed_title = f"{tags}Merge {source.url}:{source.branch} ({source_head_commit}) into {dest.branch}"
+        computed_title = f"{tags}Merge {source.web_url} ({source_head_commit}) into {dest.branch}"
 
         if computed_title == pull_req.title:
             # No update required
@@ -1129,6 +1120,84 @@ def _report_result(  # pylint: disable=R0917
         notify_slack(message, "✅")
 
 
+def _sync_upstream(
+    *,
+    gitwd: git.Repo,
+    source: GitHubBranch,
+    dest: GitHubBranch,
+    rebase: GitHubBranch,
+    dest_repo: Repository,
+    gh_app: github3.GitHub,
+    notifier: SlackNotifier,
+    prow_job: ProwJobContext,
+    dry_run: bool,
+    ignore_manual_label: bool,
+    title_prefix: str,
+) -> bool:
+    """Publish the upstream tip and let the PR handle the merge and its conflicts."""
+    upstream = gitwd.commit(f"refs/remotes/source/{source.branch}").hexsha
+    downstream = gitwd.commit(f"dest/{dest.branch}").hexsha
+    logging.info("Upstream: %s; downstream: %s", upstream, downstream)
+    if not gitwd.merge_base(upstream, downstream):
+        raise RepoException("Upstream and downstream have no common ancestor.")
+
+    # Refresh the PR after fetching, before touching its branch.
+    pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
+    if not ignore_manual_label and pull_req and any(label["name"] == "rebase/manual" for label in pull_req.labels):
+        logging.info("Manual override detected on %s; skipping sync.", pull_req.html_url)
+        return True
+
+    synchronized = gitwd.is_ancestor(upstream, downstream)
+    if synchronized and not pr_available:
+        logging.info("Downstream already contains upstream.")
+        return True
+    if dry_run:
+        logging.info("Dry run: would sync %s to %s. No push or PR update.", upstream, rebase.label)
+        return True
+
+    status, _, stderr = gitwd.git.merge_tree(
+        "--write-tree", downstream, upstream, with_extended_output=True, with_exceptions=False
+    )
+    if status not in (0, 1):
+        raise RepoException(f"Cannot check merge conflicts: {stderr}")
+    has_conflicts = status == 1
+
+    remote_ref = f"refs/heads/{rebase.branch}"
+    remote = gitwd.git.ls_remote("--heads", "rebase", remote_ref)
+    remote_sha = remote.split()[0] if remote else ""
+    if remote_sha != upstream:
+        gitwd.git.push(f"--force-with-lease={remote_ref}:{remote_sha}", "rebase", f"{upstream}:{remote_ref}")
+        logging.info("Sync branch updated to %s.", upstream)
+    else:
+        logging.info("Sync branch already matches upstream; no push required.")
+
+    if not pr_available:
+        title = f"Sync upstream {source.branch} into {dest.branch}"
+        if title_prefix:
+            title = f"{title_prefix}: {title}"
+        pull_req = _create_pr(
+            gh_app=gh_app,
+            dest=dest,
+            rebase=rebase,
+            title=title,
+            body=build_merge_pr_body(source, dest, rebase, prow_job),
+        )
+
+    body = build_merge_pr_body(
+        source, dest, rebase, prow_job, conflicted_pr_number=pull_req.number if has_conflicts else None
+    )
+    if pull_req.body != body and not pull_req.update(body=body):
+        raise PullRequestUpdateException(f"Error updating body for pull request: {pull_req.html_url}")
+
+    if synchronized:
+        logging.info("Downstream already contains upstream; pending sync branch now matches upstream.")
+        return True
+    pr_url = pull_req.html_url
+    logging.info("Upstream sync PR: %s", pr_url)
+    notifier.notify(f"Upstream sync for `{dest.label}`: <{pr_url}|view PR>", "✅")
+    return True
+
+
 def run(
     *,
     source: GitHubBranch,
@@ -1150,6 +1219,7 @@ def run(
     always_run_hooks: bool = False,
     title_prefix: str = "",
     prow_job: ProwJobContext | None = None,
+    sync_mode: str = "replay",
 ) -> bool:
     """Run Rebase Bot."""
     if prow_job is None:
@@ -1157,7 +1227,7 @@ def run(
 
     notifier = SlackNotifier(slack_webhook, prow_job)
     manual_intervention_description = (
-        f"Manual intervention is needed to rebase {source.url}:{source.branch} into {dest.ns}/{dest.name}:{dest.branch}"
+        f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
     )
 
     gh_app = github_app_provider.github_app
@@ -1165,6 +1235,24 @@ def run(
 
     if hooks is None:
         hooks = lifecycle_hooks.LifecycleHooks(tmp_script_dir=None, args=None)
+
+    if sync_mode not in ("replay", "merge"):
+        logging.error("Unknown sync mode: %s", sync_mode)
+        return False
+    if sync_mode == "merge" and (
+        tag_policy != "none"
+        or conflict_policy != "auto"
+        or bot_emails
+        or exclude_commits
+        or any(hooks.hooks.values())
+        or update_go_modules
+        or always_run_hooks
+    ):
+        logging.error("Merge mode publishes upstream exactly and does not support replay policies or lifecycle hooks.")
+        return False
+    if sync_mode == "merge" and (dest.ns, dest.name, dest.branch) == (rebase.ns, rebase.name, rebase.branch):
+        logging.error("Merge mode requires a sync branch separate from the downstream branch.")
+        return False
 
     try:
         dest_repo = gh_app.repository(dest.ns, dest.name)
@@ -1175,7 +1263,12 @@ def run(
         logging.info("source repository is %s", source_repo.clone_url)
 
         if not ignore_manual_label:
-            pull_req = _manual_rebase_pr_in_repo(dest_repo)
+            if sync_mode == "merge":
+                pull_req, _ = _is_pr_available(dest_repo, dest, rebase)
+                if pull_req and not any(label["name"] == "rebase/manual" for label in pull_req.labels):
+                    pull_req = None
+            else:
+                pull_req = _manual_rebase_pr_in_repo(dest_repo)
             if pull_req is not None:
                 logging.info(
                     f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
@@ -1206,6 +1299,8 @@ def run(
             git_email=git_email,
             workdir=working_dir,
         )
+        if sync_mode == "replay":
+            _prepare_replay_workdir(gitwd, source, rebase)
     except Exception as ex:
         logging.exception(
             "error initializing the git directory with remotes: ",
@@ -1223,6 +1318,26 @@ def run(
             ex,
         )
         return False
+
+    if sync_mode == "merge":
+        try:
+            return _sync_upstream(
+                gitwd=gitwd,
+                source=source,
+                dest=dest,
+                rebase=rebase,
+                dest_repo=dest_repo,
+                gh_app=gh_app,
+                notifier=notifier,
+                prow_job=prow_job,
+                dry_run=dry_run,
+                ignore_manual_label=ignore_manual_label,
+                title_prefix=title_prefix,
+            )
+        except Exception as ex:
+            logging.exception("Failed to sync upstream into %s", dest.label)
+            notify_slack_error(notifier, f"Failed to sync upstream into `{dest.label}`", ex)
+            return False
 
     try:
         hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
@@ -1281,19 +1396,16 @@ def run(
 
     except (RepoException, LifecycleHookScriptException) as ex:
         logging.error(
-            f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}"
+            f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
         )
         notify_slack_error(notifier, manual_intervention_description, ex)
         return False
     except Exception as ex:
-        logging.exception(
-            f"exception when trying to rebase {source.url}:{source.branch} into {dest.ns}/{dest.name}:{dest.branch}"
-        )
+        logging.exception(f"exception when trying to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}")
 
         notify_slack_error(
             notifier,
-            f"Failed to rebase `{source.url}:{source.branch}` into `{dest.label}`",
+            f"Failed to rebase `{source.web_url}` into `{dest.label}`",
             ex,
         )
         return False
@@ -1315,8 +1427,7 @@ def run(
             _push_rebase_branch(gitwd, rebase)
         except LifecycleHookScriptException as ex:
             logging.error(
-                f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-                f"into {dest.ns}/{dest.name}:{dest.branch}"
+                f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
             )
             notify_slack_error(notifier, manual_intervention_description, ex)
             return False
@@ -1352,23 +1463,24 @@ def run(
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
             pr_required = _is_pr_required(gitwd, rebase, dest)
             if pr_required:
-                pr_url = _create_pr(
+                source_head_commit = gitwd.git.rev_parse(f"source/{source.branch}", short=7)
+                title = f"Merge {source.web_url} ({source_head_commit}) into {dest.branch}"
+                if title_prefix:
+                    title = f"{title_prefix}: {title}"
+                pull_req = _create_pr(
                     gh_app=gh_app,
                     dest=dest,
-                    source=source,
                     rebase=rebase,
-                    gitwd=gitwd,
-                    summary=rebase_summary,
-                    prow_job=prow_job,
-                    title_prefix=title_prefix,
+                    title=title,
+                    body=build_pr_body(rebase_summary, source, dest, prow_job),
                 )
+                pr_url = pull_req.html_url
             else:
                 logging.info("No PR required - no changes between rebase and dest.")
                 pr_url = None
     except LifecycleHookScriptException as ex:
         logging.error(
-            f"Manual intervention is needed to rebase {source.url}:{source.branch} "
-            f"into {dest.ns}/{dest.name}:{dest.branch}"
+            f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
         )
         notify_slack_error(notifier, manual_intervention_description, ex)
         return False

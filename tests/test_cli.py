@@ -67,6 +67,40 @@ def tempfile():
 
 
 class TestCliArgParser:
+    def test_sync_mode_defaults_to_replay(self, get_valid_cli_args):
+        with patch("sys.argv", ["rebasebot", *get_valid_cli_args()]):
+            assert _parse_cli_arguments().sync_mode == "replay"
+
+    @pytest.mark.parametrize(
+        "option,value",
+        [
+            ("tag-policy", "none"),
+            ("conflict-policy", "auto"),
+            ("bot-emails", "bot@example.com"),
+            ("exclude-commits", "abc123"),
+            ("pre-carry-commit-hook", "hook.sh"),
+            ("pre-rebase-hook", "hook.sh"),
+            ("post-rebase-hook", "hook.sh"),
+            ("pre-push-rebase-branch-hook", "hook.sh"),
+            ("pre-create-pr-hook", "hook.sh"),
+            ("update-go-modules", None),
+            ("always-run-hooks", None),
+            ("tag-pol", "strict"),
+        ],
+    )
+    def test_merge_rejects_hooks_and_replay_options(self, get_valid_cli_args, valid_args_dict, capsys, option, value):
+        valid_args_dict.pop("update-go-modules")
+        with patch("sys.argv", ["rebasebot", *get_valid_cli_args({"sync-mode": "merge", option: value})]):
+            with pytest.raises(SystemExit) as exc:
+                _parse_cli_arguments()
+        assert exc.value.code == 2
+        assert "--sync-mode merge is incompatible" in capsys.readouterr().err
+
+    def test_merge_accepts_minimal_configuration(self, valid_args_dict):
+        valid_args_dict.pop("update-go-modules")
+        with patch("sys.argv", ["rebasebot", *args_dict_to_list(valid_args_dict), "--sync-mode", "merge"]):
+            assert _parse_cli_arguments().sync_mode == "merge"
+
     @pytest.mark.parametrize(
         "github_ref,expected",
         (

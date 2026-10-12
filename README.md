@@ -24,6 +24,16 @@ To successfully create a PR we need an intermediate repository where we push our
 ...
 ```
 
+## Merge synchronization
+
+Use `--sync-mode merge` for downstream forks that want normal Git merge history
+without replaying their carries. The bot publishes the upstream tip to the sync
+branch and creates or updates a PR, including when it has conflicts.
+
+Choose the default `replay` mode when you need carry filtering, bot-commit
+squashing, lifecycle hooks, Go module updates or ART cherry-picks. Merge mode
+does not support these features or resolve conflicts automatically.
+
 ## Auth parameters
 
 There are two auth modes that the bot supports: `user` and `application`. Therefore different parameters can be provided for the bot.
@@ -165,7 +175,7 @@ A pull request with a title like `My special pull request created by the bot`
 will not be modified by the bot on further runs.
 
 However, a pull request title like
-`JIRABUG-XXXX: Merge https://github.com/kubernetes/autoscaler:master (d3ec0c4) into master`
+`JIRABUG-XXXX: Merge https://github.com/kubernetes/autoscaler/tree/master (d3ec0c4) into master`
 will be updated by the bot on subsequent runs to reflect the new commit hash,
 but the `JIRABUG-XXXX:`  portion will not be modified.
 

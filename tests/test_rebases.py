@@ -12,6 +12,7 @@ from rebasebot.bot import (
     _init_working_dir,
     _needs_rebase,
     _prepare_rebase_branch,
+    _prepare_replay_workdir,
 )
 from rebasebot.github import GitHubBranch, parse_github_branch
 from rebasebot.prow import ProwJobContext
@@ -45,6 +46,7 @@ class TestBotInternalHelpers:
             git_email="foo@example.com",
             workdir=tmpdir,
         )
+        _prepare_replay_workdir(working_repo, source, rebase)
         return WorkingRepoContext(source, rebase, dest, working_repo, tmpdir)
 
     def test_workdir_init(self, working_repo_context):
@@ -94,7 +96,7 @@ class TestRebases:
         source, rebase, dest = init_test_repositories
         CommitBuilder(source).add_file("baz.txt", "fiz").commit("other upstream commit")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -145,7 +147,7 @@ class TestRebases:
             cb.add_file("generated-test3", "content")
             cb.commit("commit #1 from anotherbot", committer_email="anotherbot@example.com")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -204,7 +206,7 @@ class TestRebases:
             cb.add_file("generated-test-ops", "content")
             cb.commit("commit #1 from ops nightly", committer_email="ops+nightly@example.com")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -263,7 +265,7 @@ class TestRebases:
             cb.update_file("generated-test", "content from second bot")
             cb.commit("commit #2 from secondbot", committer_email="secondbot@example.com")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -326,7 +328,7 @@ class TestRebases:
             cb.add_file("generated-test3", "content")
             cb.commit("commit #1 from anotherbot", committer_email="anotherbot@example.com")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -393,7 +395,7 @@ class TestRebases:
         repo.git.checkout(dest.branch)
         repo.git.merge("--no-ff", "-m", "Merge branch 'feature'", repo.heads.feature)
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -450,7 +452,7 @@ class TestRebases:
         with CommitBuilder(dest) as cb:
             cb.commit("Empty commit")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -521,7 +523,7 @@ class TestRebases:
 
         fake_github_provider.github_app.repository = fake_repository_func
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -556,7 +558,7 @@ class TestRebases:
             cb.add_file("carry-file2", "content")
             drop_commit = cb.commit("UPSTREAM: <carry>: dropped by exclude_commits")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -613,7 +615,7 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
             cb.add_file("carry-file1", "content")
             cb.commit("UPSTREAM: <carry>: carry commit #1")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -675,7 +677,7 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
             )
             cb.commit("UPSTREAM: <carry>: add test hook script")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.dest = dest
         args.rebase = rebase
@@ -729,7 +731,7 @@ exit 5""",
             )
             cb.commit("UPSTREAM: <carry>: add test hook script")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -786,7 +788,7 @@ echo main
         mock_parse_github_branch_hooks.side_effect = fake_parse_github_branch
         mock_parse_github_branch_cli.side_effect = fake_parse_github_branch
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = None
         args.source_repo = f"{source.ns}/{source.name}"
         url = "git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-source-ref-hook-script.sh"
@@ -825,7 +827,7 @@ touch post-rebase-hook.success"""
             cb.commit("UPSTREAM: <carry>: add test hook scripts")
 
         # Configure args with always_run_hooks=True and multiple hook types to test
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -877,7 +879,7 @@ touch post-rebase-hook.success"""
             cb.commit("UPSTREAM: <carry>: add test hook scripts")
 
         # Configure args with always_run_hooks=False (default behavior)
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -938,7 +940,7 @@ fi"""
             cb.add_file("verify-hook.sh", post_rebase_hook_script)
             cb.commit("UPSTREAM: <carry>: add verify hook script")
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -980,7 +982,7 @@ fi"""
 
     @staticmethod
     def _make_rebase_args(source, dest, rebase, tmpdir):
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -1045,8 +1047,8 @@ fi"""
         body = captured_pr_data["body"]
         assert body
         assert "automated rebase PR generated by RebaseBot" in body
-        assert f"{source.url}:{source.branch}" in body
-        assert f"{dest.url}:{dest.branch}" in body
+        assert f"{source.web_url}" in body
+        assert f"{dest.web_url}" in body
         assert "1 new upstream commit" in body
         assert prow_job.log_url in body
         assert "View job log" in body
@@ -1068,7 +1070,7 @@ fi"""
         mocked_push_rebase_branch.return_value = True
 
         pull_req = MagicMock()
-        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.title = f"Merge {source.web_url} (abcdefg) into {dest.branch}"
         pull_req.update.return_value = True
         pull_req.html_url = "https://github.com/dest/dest/pull/1"
         mocked_is_pr_available.return_value = pull_req, True
@@ -1089,8 +1091,8 @@ fi"""
         body = body_updates[0].kwargs["body"]
         assert body
         assert "automated rebase PR generated by RebaseBot" in body
-        assert f"{source.url}:{source.branch}" in body
-        assert f"{dest.url}:{dest.branch}" in body
+        assert f"{source.web_url}" in body
+        assert f"{dest.web_url}" in body
         assert "1 new upstream commit" in body
         assert prow_job.log_url in body
 
@@ -1114,7 +1116,7 @@ fi"""
         mocked_push_rebase_branch.return_value = True
 
         pull_req = MagicMock()
-        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.title = f"Merge {source.web_url} (abcdefg) into {dest.branch}"
         pull_req.update.return_value = True
         pull_req.html_url = "https://github.com/dest/dest/pull/1"
         mocked_is_pr_available.return_value = pull_req, True
@@ -1159,7 +1161,7 @@ fi"""
         mocked_push_rebase_branch.return_value = True
 
         pull_req = MagicMock()
-        pull_req.title = f"Merge {source.url}:{source.branch} (abcdefg) into {dest.branch}"
+        pull_req.title = f"Merge {source.web_url} (abcdefg) into {dest.branch}"
         pull_req.update.return_value = True
         pull_req.html_url = "https://github.com/dest/dest/pull/1"
         mocked_is_pr_available.return_value = pull_req, True

@@ -107,7 +107,7 @@ class TestRehearsalSlackSuppression:
 
         mocked_is_pr_available.return_value = None, False
         mocked_push_rebase_branch.return_value = True
-        mocked_create_pr.return_value = "https://github.com/dest/dest/pull/99"
+        mocked_create_pr.return_value.html_url = "https://github.com/dest/dest/pull/99"
 
         rehearsal = ProwJobContext(
             job_name="rehearse-1234-periodic-openshift-release-rebasebot",
@@ -115,7 +115,7 @@ class TestRehearsalSlackSuppression:
             build_id="12345",
         )
 
-        args = MagicMock()
+        args = MagicMock(sync_mode="replay")
         args.source = source
         args.source_repo = None
         args.dest = dest

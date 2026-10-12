@@ -18,7 +18,7 @@ import logging
 import re
 from dataclasses import dataclass
 from functools import cached_property
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import github3
 
@@ -45,6 +45,11 @@ class GitHubBranch:
     def label(self) -> str:
         """A short human-readable identifier, e.g. 'openshift/api:main'."""
         return f"{self.ns}/{self.name}:{self.branch}"
+
+    @property
+    def web_url(self) -> str:
+        """The GitHub page for this branch or source ref."""
+        return f"https://github.com/{self.ns}/{self.name}/tree/{quote(self.branch, safe='')}"
 
 
 def parse_github_branch(repository_string) -> GitHubBranch:

@@ -23,7 +23,13 @@ import pytest
 from git import Repo
 from github3.pulls import ShortPullRequest
 
-from rebasebot.bot import _cherrypick_art_pull_request, _do_rebase, _init_working_dir, _prepare_rebase_branch
+from rebasebot.bot import (
+    _cherrypick_art_pull_request,
+    _do_rebase,
+    _init_working_dir,
+    _prepare_rebase_branch,
+    _prepare_replay_workdir,
+)
 from rebasebot.github import GitHubBranch
 from rebasebot.rebase_summary import ArtPrInfo
 
@@ -56,6 +62,7 @@ def working_repo_context(init_test_repositories, fake_github_provider, tmpdir) -
         git_email="foo@example.com",
         workdir=tmpdir,
     )
+    _prepare_replay_workdir(working_repo, source, rebase)
     return WorkingRepoContext(source, rebase, dest, working_repo)
 
 
