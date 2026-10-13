@@ -2,85 +2,35 @@
 
 This file provides guidance to agents when working with code in this repository.
 
+Read [GLOSSARY.md](./GLOSSARY.md) before discussing domain concepts or naming them in code or documentation. Use its canonical terms and definitions.
+
 ## Project Overview
 
-Rebase Bot is a Python-based automation tool that synchronizes downstream GitHub repositories with their upstream sources using `git rebase`. It creates GitHub pull requests with the rebased changes. The tool is designed for maintaining downstream forks (especially for OpenShift/Kubernetes ecosystem projects) that need to stay synchronized with their upstream counterparts.
+Rebase Bot is a Python-based automation tool that synchronizes downstream GitHub repositories with their upstream sources through pull requests. It supports rebase mode and merge mode and is designed for maintaining downstream forks, especially in the OpenShift/Kubernetes ecosystem.
+
+In rebase mode, the bot starts from selected upstream content and reapplies selected carries while preserving earlier downstream history. In merge mode, it publishes the selected upstream tip for integration through a merge. Both modes create or update a synchronization PR from the publication branch into the destination branch.
+
+The CLI selects rebase mode with `--sync-mode replay`, the default, and merge mode with `--sync-mode merge`.
 
 ## Core Concepts
 
-The bot operates with three git repositories:
+The bot uses three repository roles, which may share a repository:
 
-- **source**: Upstream repository to rebase onto (can be any git repository)
-- **dest**: Downstream GitHub repository where the PR will be created
-- **rebase**: Intermediate GitHub repository where changes are pushed before PR creation
+- **Source**: The repository and selected source reference supplying upstream history.
+- **Destination**: The GitHub repository and destination branch receiving synchronization changes through a pull request.
+- **Publication repository**: The GitHub repository hosting the publication branch proposed for integration into the destination.
 
-The rebase branch is created by rebasing `dest/branch` onto `source/branch`, then pushed to `rebase/branch`, and finally a PR is created from `rebase` to `dest`.
-
-## Architecture
-
-### Core Modules
-
-**`rebasebot/bot.py`** - Main orchestration logic
-
-- Contains the `run()` function that drives the entire rebase workflow
-- Handles git operations: cloning, rebasing, conflict detection, PR creation/updates
-- Implements the "UPSTREAM tag policy" for filtering commits based on commit message tags
-- Includes ART (Automated Release Tooling) PR detection and cherry-picking
-- Manages the `rebase/manual` label to pause automatic operations
-
-**`rebasebot/cli.py`** - Command-line interface and argument parsing
-
-- Entry point via `main()` function
-- Parses complex arguments including GitHub branch specifications (`org/repo:branch`)
-- Handles two authentication modes: user token and GitHub App credentials
-- Coordinates lifecycle hook setup and execution
-- Implements dynamic source reference selection via `--source-ref-hook`
-
-**`rebasebot/github.py`** - GitHub API interactions
-
-- `GithubAppProvider`: Manages GitHub authentication (user token or app credentials)
-- `GitHubBranch`: Dataclass for repository/branch specifications
-- Handles GitHub App installation tokens for both PR creation (app) and pushing (cloner)
-
-**`rebasebot/lifecycle_hooks.py`** - Extensibility mechanism
-
-- Defines five lifecycle hook points:
-  - `PRE_REBASE`: After workspace setup, before rebase
-  - `PRE_CARRY_COMMIT`: Before carrying each commit during rebase
-  - `POST_REBASE`: After rebase completion
-  - `PRE_PUSH_REBASE_BRANCH`: Before pushing to remote
-  - `PRE_CREATE_PR`: Before creating pull request
-- Scripts can be sourced from: local filesystem, git repository (local or remote), or builtin hooks
-- Builtin hooks are in `rebasebot/builtin-hooks/` and referenced via `_BUILTIN_/` prefix
-- Hook scripts receive environment variables: `REBASEBOT_SOURCE`, `REBASEBOT_DEST`, `REBASEBOT_REBASE`, `REBASEBOT_WORKING_DIR`, `REBASEBOT_GIT_USERNAME`, `REBASEBOT_GIT_EMAIL`
+The CLI uses `--source`, `--dest`, and `--rebase` for these roles. Git remotes retain the names `source`, `dest`, and `rebase`.
 
 ## Development Commands
 
-### Setup
-
 ```bash
-# Install dependencies
 make deps
-
-# Create virtual environment
-make venv
-source env/bin/activate
-
-# Install rebasebot locally
-make install
-```
-
-### Testing
-
-```bash
 make unittests
-```
-
-### Linting
-
-```bash
 make lint
 ```
+
+When you want to run the current checkout from your user Python environment, use `make install` to install it, then invoke the installed `rebasebot` command. This target runs `python -m pip install --user .`; run it outside the repository virtual environment.
 
 ## Important Technical Details
 
@@ -88,11 +38,12 @@ make lint
 
 **User Token Mode**: Single `--github-user-token` parameter pointing to a file with GitHub personal access token
 
-**App Mode**: Requires two GitHub Apps:
+**App Mode**: Uses two credential roles, which can share one GitHub App:
 
-- **app**: For PR operations in dest repository (Contents: Read, Metadata: Read-only, Pull requests: Read & Write)
-- **cloner**: For pushing to rebase repository (Contents: Read & Write, Metadata: Read-only, Workflows: Read & Write)
-- Requires `--github-app-id`, `--github-app-key`, `--github-cloner-id`, `--github-cloner-key`
+- **app**: PR operations in the destination repository. Requires Contents: Read, Metadata: Read-only, and Pull requests: Read & Write.
+- **cloner**: Pushing to the publication repository. Requires Contents: Read & Write and Metadata: Read-only, plus Workflows: Write when publishing changes to GitHub Actions workflow files.
+
+Supply both credential pairs: `--github-app-id` / `--github-app-key` and `--github-cloner-id` / `--github-cloner-key`. To use one app, pass the same app ID and key for both roles and grant it access to both repositories with the combined permissions. When the publication repository is the destination repository, its publication branch must permit the app's pushes.
 
 ### Hook Script Sources
 
@@ -100,41 +51,3 @@ make lint
 - **Repository-stored**: `git:gitRef:repo/path/to/script` (gitRef can be branch, tag, or commit hash)
 - **Remote repository**: `git:https://github.com/org/repo/branch:path/to/script`
 - **Builtin**: `_BUILTIN_/script.sh` (from `rebasebot/builtin-hooks/`)
-
-### Always Run Hooks
-
-By default, hooks only run when a rebase is needed. The `--always-run-hooks` flag forces hook execution even when no rebase is required, useful for dependency updates or code generation that should happen regardless of upstream changes.
-
-## Common Workflows
-
-### Adding a New Lifecycle Hook
-
-1. Create the hook script in `rebasebot/builtin-hooks/` if it's generic enough to be builtin
-2. Make it executable (`chmod +x`)
-3. Access environment variables like `REBASEBOT_WORKING_DIR` for repository access
-4. Exit with code 0 for success, non-zero for failure (which aborts the rebase)
-5. Use stdout/stderr for logging (stderr is captured on failure)
-
-### Modifying Core Rebase Logic
-
-The main rebase workflow in `bot.py` follows this sequence:
-
-1. `_needs_rebase()`: Check if rebase is necessary
-2. Clone/fetch all three repositories
-3. Execute `PRE_REBASE` hooks
-4. Perform git rebase with `PRE_CARRY_COMMIT` hooks per commit
-5. Execute `POST_REBASE` hooks
-6. Execute `PRE_PUSH_REBASE_BRANCH` hooks
-7. Push to rebase repository
-8. Execute `PRE_CREATE_PR` hooks
-9. Create or update PR in dest repository
-
-### Understanding Commit Filtering
-
-The bot filters commits based on:
-
-- `--exclude-commits`: Explicit SHA prefix exclusion list
-- `--tag-policy`: UPSTREAM tag handling (none/soft/strict)
-- `--bot-emails`: Bot email detection for commit squashing
-- ART PR detection for automatic cherry-picking
-
