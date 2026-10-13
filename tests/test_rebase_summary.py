@@ -27,10 +27,10 @@ from rebasebot.bot import (
     _cherrypick_art_pull_request,
     _do_rebase,
     _init_working_dir,
-    _prepare_rebase_branch,
-    _prepare_replay_workdir,
+    _prepare_publication_branch,
+    _prepare_rebase_workdir,
 )
-from rebasebot.github import GitHubBranch
+from rebasebot.github import GitHubReference
 from rebasebot.rebase_summary import ArtPrInfo
 
 from .conftest import CommitBuilder
@@ -41,9 +41,9 @@ _GO_MODULES_CARRY_COMMIT_MESSAGE = "UPSTREAM: <carry>: Updating and vendoring go
 
 @dataclass
 class WorkingRepoContext:
-    source: GitHubBranch
-    rebase: GitHubBranch
-    dest: GitHubBranch
+    source: GitHubReference
+    publication: GitHubReference
+    destination: GitHubReference
     working_repo: Repo
 
     def fetch_remotes(self) -> None:
@@ -52,34 +52,34 @@ class WorkingRepoContext:
 
 @pytest.fixture
 def working_repo_context(init_test_repositories, fake_github_provider, tmpdir) -> WorkingRepoContext:
-    source, rebase, dest = init_test_repositories
+    source, publication, destination = init_test_repositories
     working_repo = _init_working_dir(
         source=source,
-        dest=dest,
-        rebase=rebase,
+        destination=destination,
+        publication=publication,
         github_app_provider=fake_github_provider,
         git_username="foo",
         git_email="foo@example.com",
         workdir=tmpdir,
     )
-    _prepare_replay_workdir(working_repo, source, rebase)
-    return WorkingRepoContext(source, rebase, dest, working_repo)
+    _prepare_rebase_workdir(working_repo, source, publication)
+    return WorkingRepoContext(source, publication, destination, working_repo)
 
 
 class TestDoRebaseDroppedCommits:
     def test_excluded_commit(self, working_repo_context, fake_github_provider):
         ctx = working_repo_context
         CommitBuilder(ctx.source).add_file("upstream.txt", "x").commit("upstream change")
-        excluded = CommitBuilder(ctx.dest).add_file("drop.txt", "x").commit("UPSTREAM: <carry>: excluded")
-        CommitBuilder(ctx.dest).add_file("keep.txt", "x").commit("UPSTREAM: <carry>: keep")
+        excluded = CommitBuilder(ctx.destination).add_file("drop.txt", "x").commit("UPSTREAM: <carry>: excluded")
+        CommitBuilder(ctx.destination).add_file("keep.txt", "x").commit("UPSTREAM: <carry>: keep")
         ctx.fetch_remotes()
-        _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
+        _prepare_publication_branch(ctx.working_repo, ctx.source, ctx.destination)
 
         dropped, _ = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
-            dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            destination=ctx.destination,
+            source_repo=fake_github_provider.github_destination_app.repository.return_value,
             tag_policy="soft",
             bot_emails=[],
             exclude_commits=[excluded.hexsha],
@@ -94,16 +94,16 @@ class TestDoRebaseDroppedCommits:
     def test_tag_policy_drop(self, working_repo_context, fake_github_provider):
         ctx = working_repo_context
         CommitBuilder(ctx.source).add_file("upstream.txt", "x").commit("upstream change")
-        CommitBuilder(ctx.dest).add_file("drop.txt", "x").commit("untagged commit")
-        CommitBuilder(ctx.dest).add_file("keep.txt", "x").commit("UPSTREAM: <carry>: keep")
+        CommitBuilder(ctx.destination).add_file("drop.txt", "x").commit("untagged commit")
+        CommitBuilder(ctx.destination).add_file("keep.txt", "x").commit("UPSTREAM: <carry>: keep")
         ctx.fetch_remotes()
-        _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
+        _prepare_publication_branch(ctx.working_repo, ctx.source, ctx.destination)
 
         dropped, _ = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
-            dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            destination=ctx.destination,
+            source_repo=fake_github_provider.github_destination_app.repository.return_value,
             tag_policy="strict",
             bot_emails=[],
             exclude_commits=[],
@@ -117,16 +117,16 @@ class TestDoRebaseDroppedCommits:
     def test_go_modules_drop(self, working_repo_context, fake_github_provider):
         ctx = working_repo_context
         CommitBuilder(ctx.source).add_file("upstream.txt", "x").commit("upstream change")
-        CommitBuilder(ctx.dest).add_file("vendor.txt", "x").commit(_GO_MODULES_CARRY_COMMIT_MESSAGE)
-        CommitBuilder(ctx.dest).add_file("keep.txt", "x").commit("UPSTREAM: <carry>: keep")
+        CommitBuilder(ctx.destination).add_file("vendor.txt", "x").commit(_GO_MODULES_CARRY_COMMIT_MESSAGE)
+        CommitBuilder(ctx.destination).add_file("keep.txt", "x").commit("UPSTREAM: <carry>: keep")
         ctx.fetch_remotes()
-        _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
+        _prepare_publication_branch(ctx.working_repo, ctx.source, ctx.destination)
 
         dropped, _ = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
-            dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            destination=ctx.destination,
+            source_repo=fake_github_provider.github_destination_app.repository.return_value,
             tag_policy="soft",
             bot_emails=[],
             exclude_commits=[],
@@ -143,20 +143,20 @@ class TestDoRebaseContentLossWarnings:
         ctx = working_repo_context
         CommitBuilder(ctx.source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
         sync_base_carry = (
-            CommitBuilder(ctx.dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+            CommitBuilder(ctx.destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
         )
         CommitBuilder(ctx.source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
-        CommitBuilder(ctx.dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+        CommitBuilder(ctx.destination).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
             "UPSTREAM: <carry>: add snapshot timeout"
         )
         ctx.fetch_remotes()
-        _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
+        _prepare_publication_branch(ctx.working_repo, ctx.source, ctx.destination)
 
         dropped, content_loss_warnings = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
-            dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            destination=ctx.destination,
+            source_repo=fake_github_provider.github_destination_app.repository.return_value,
             tag_policy="soft",
             conflict_policy="warn",
             bot_emails=[],
@@ -182,19 +182,19 @@ class TestDoRebaseContentLossWarnings:
     def test_auto_policy_leaves_content_loss_warnings_empty(self, working_repo_context, fake_github_provider):
         ctx = working_repo_context
         CommitBuilder(ctx.source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
-        CommitBuilder(ctx.dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(ctx.destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
         CommitBuilder(ctx.source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
-        CommitBuilder(ctx.dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+        CommitBuilder(ctx.destination).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
             "UPSTREAM: <carry>: add snapshot timeout"
         )
         ctx.fetch_remotes()
-        _prepare_rebase_branch(ctx.working_repo, ctx.source, ctx.dest)
+        _prepare_publication_branch(ctx.working_repo, ctx.source, ctx.destination)
 
         _, content_loss_warnings = _do_rebase(
             gitwd=ctx.working_repo,
             source=ctx.source,
-            dest=ctx.dest,
-            source_repo=fake_github_provider.github_app.repository.return_value,
+            destination=ctx.destination,
+            source_repo=fake_github_provider.github_destination_app.repository.return_value,
             tag_policy="soft",
             conflict_policy="auto",
             bot_emails=[],
@@ -220,14 +220,14 @@ class TestCherrypickArtPullRequest:
         art_pr.head = MagicMock(repository=repository, ref="art-update")
         art_pr.commits.return_value = []
 
-        dest_repo = MagicMock()
-        dest_repo.pull_requests.return_value = [art_pr]
+        destination_repo = MagicMock()
+        destination_repo.pull_requests.return_value = [art_pr]
 
         if "fork" not in [remote.name for remote in ctx.working_repo.remotes]:
-            ctx.working_repo.create_remote("fork", ctx.dest.url)
+            ctx.working_repo.create_remote("fork", ctx.destination.url)
 
         with patch("git.remote.Remote.fetch"):
-            result, content_loss = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
+            result, content_loss = _cherrypick_art_pull_request(ctx.working_repo, destination_repo, ctx.destination)
 
         assert result == ArtPrInfo(
             number=42,
@@ -242,10 +242,10 @@ class TestCherrypickArtPullRequest:
         other_pr.title = "Unrelated change"
         other_pr.user = MagicMock(login="openshift-bot")
 
-        dest_repo = MagicMock()
-        dest_repo.pull_requests.return_value = [other_pr]
+        destination_repo = MagicMock()
+        destination_repo.pull_requests.return_value = [other_pr]
 
-        result, content_loss = _cherrypick_art_pull_request(ctx.working_repo, dest_repo, ctx.dest)
+        result, content_loss = _cherrypick_art_pull_request(ctx.working_repo, destination_repo, ctx.destination)
 
         assert result is None
         assert content_loss == []
