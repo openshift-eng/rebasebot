@@ -23,18 +23,49 @@ import sys
 import tempfile
 
 from rebasebot import bot, lifecycle_hooks
-from rebasebot.github import GithubAppProvider, GitHubBranch, parse_github_branch
+from rebasebot.github import GithubAppProvider, GitHubReference, parse_github_reference
+
+DEPRECATED_OPTIONS = {
+    "--github-app-id": "--github-destination-app-id",
+    "--github-app-key": "--github-destination-app-key",
+    "--dest": "--destination",
+    "--rebase": "--publication",
+    "--ignore-manual-label": "--manual-override",
+    "--pre-push-rebase-branch-hook": "--pre-publication-hook",
+    "--github-cloner-id": "--github-publication-app-id",
+    "--github-cloner-key": "--github-publication-app-key",
+}
 
 
-class GitHubBranchAction(argparse.Action):
+class SynchronizationArgumentParser(argparse.ArgumentParser):
+    """Normalize deprecated flags before parsing, keeping help and errors canonical."""
+
+    def parse_known_args(self, args=None, namespace=None):
+        arguments = list(sys.argv[1:] if args is None else args)
+        deprecated = set()
+        for index, argument in enumerate(arguments):
+            if argument == "--":
+                break
+            option, separator, value = argument.partition("=")
+            if option in DEPRECATED_OPTIONS:
+                replacement = DEPRECATED_OPTIONS[option]
+                arguments[index] = replacement + separator + value
+                deprecated.add(option)
+        result = super().parse_known_args(arguments, namespace)
+        for option in sorted(deprecated):
+            print(f"warning: {option} is deprecated; use {DEPRECATED_OPTIONS[option]}", file=sys.stderr)
+        return result
+
+
+class GitHubReferenceAction(argparse.Action):
     """
-    GitHubBranchAction handles parsing github branch argument and converting to GithubBranch object.
-    The format is <user or organization>/<repo>:<branch>
+    Parse a repository and Git reference into a GitHubReference object.
+    The format is <user or organization>/<repo>:<reference>.
     """
 
     def __call__(self, parser, namespace, values, option_string=None):
         try:
-            setattr(namespace, self.dest, parse_github_branch(values))
+            setattr(namespace, self.dest, parse_github_reference(values))
         except ValueError as e:
             parser.error(str(e))
 
@@ -53,12 +84,14 @@ def _default_working_dir() -> str:
 def _parse_cli_arguments():
     _form_text = "in the form <user or organization>/<repo>:<branch>, e.g. kubernetes/cloud-provider-openstack:master"
 
-    parser = argparse.ArgumentParser(description="Rebase on changes from an upstream repo")
+    parser = SynchronizationArgumentParser(description="Synchronize a downstream repository with its upstream source")
     parser.add_argument(
         "--sync-mode",
-        choices=["replay", "merge"],
-        default="replay",
-        help="Replay downstream carries (default), or merge upstream into downstream for a PR.",
+        choices=["rebase", "merge"],
+        default="rebase",
+        help="Rebase mode reapplies selected downstream carries (default). "
+        "Merge mode merges upstream into the destination on the publication branch, "
+        "or publishes the upstream tip if conflicts occur.",
     )
     source_group = parser.add_mutually_exclusive_group(required=True)
 
@@ -66,25 +99,24 @@ def _parse_cli_arguments():
         "--source",
         "-s",
         type=str,
-        action=GitHubBranchAction,
+        action=GitHubReferenceAction,
         help=(
-            "The source/upstream git repo to rebase changes onto in the form "
-            "<git url>:<branch>. Note that unlike dest and rebase this does "
-            "not need to be a GitHub url, hence its syntax is different."
+            "The source repository and selected branch or tag in the form "
+            "<GitHub URL or organization/repository>:<reference>."
         ),
     )
 
     source_group.add_argument(
         "--source-repo",
         type=str,
-        help="The source repository specification when using dynamic branch hook script",
+        help="The source repository to use with a source reference hook.",
     )
 
     parser.add_argument(
         "--source-ref-hook",
         type=str,
         help=(
-            "The script to run to determine the source reference to rebase from."
+            "The source reference hook selecting a branch or tag before workspace preparation. "
             "file path or git:https://github.com/namespace/repository/branch:path/to/script.sh"
         ),
     )
@@ -95,23 +127,20 @@ def _parse_cli_arguments():
         if namespace.source_ref_hook and not namespace.source_repo:
             parser.error("--source-repo must also be specified when --source-ref-hook is used.")
 
-    # set function to check for errors
-    parser.set_defaults(func=check_source_repo_args)
-
     parser.add_argument(
-        "--dest",
+        "--destination",
         "-d",
         type=str,
         required=True,
-        action=GitHubBranchAction,
+        action=GitHubReferenceAction,
         help=f"The destination/downstream GitHub repo to merge changes into {_form_text}",
     )
     parser.add_argument(
-        "--rebase",
+        "--publication",
         type=str,
         required=True,
-        action=GitHubBranchAction,
-        help=f"The base GitHub repo that will be used to create a pull request {_form_text}",
+        action=GitHubReferenceAction,
+        help=f"The publication repository and branch proposed for the destination {_form_text}",
     )
     parser.add_argument(
         "--git-username",
@@ -145,30 +174,30 @@ def _parse_cli_arguments():
         help="The path to a github user access token.",
     )
     parser.add_argument(
-        "--github-app-id",
+        "--github-destination-app-id",
         type=int,
         required=False,
-        help="The app ID of the GitHub app to use.",
+        help="The GitHub App ID for PR operations in the destination repository.",
         default=137509,
     )
     parser.add_argument(
-        "--github-app-key",
+        "--github-destination-app-key",
         type=str,
         required=False,
-        help="The path to a github app private key.",
+        help="The path to the destination GitHub App private key.",
     )
     parser.add_argument(
-        "--github-cloner-id",
+        "--github-publication-app-id",
         type=int,
         required=False,
-        help="The app ID of the GitHub cloner app to use.",
+        help="The GitHub App ID for writing to the publication repository.",
         default=137497,
     )
     parser.add_argument(
-        "--github-cloner-key",
+        "--github-publication-app-key",
         type=str,
         required=False,
-        help="The path to a github app private key.",
+        help="The path to the publication GitHub App private key.",
     )
     parser.add_argument(
         "--slack-webhook",
@@ -196,7 +225,7 @@ def _parse_cli_arguments():
         const="none",
         nargs="?",
         choices=["none", "soft", "strict"],
-        help="Option that shows how to handle UPSTREAM tags in commit messages. (default: none)",
+        help="Tag policy for selecting carries in rebase mode. (default: none)",
     )
     parser.add_argument(
         "--conflict-policy",
@@ -204,7 +233,7 @@ def _parse_cli_arguments():
         const="auto",
         nargs="?",
         choices=["auto", "warn", "strict"],
-        help="Detect upstream content silently dropped by -Xtheirs. "
+        help="Conflict policy for potential upstream content loss when reapplying carries in rebase mode. "
         "'auto': no detection. "
         "'warn': log warnings. "
         "'strict': fail. "
@@ -227,11 +256,11 @@ def _parse_cli_arguments():
         help="List of commit sha hashes that will be excluded from rebase.",
     )
     parser.add_argument(
-        "--ignore-manual-label",
+        "--manual-override",
         action="store_true",
         default=False,
         required=False,
-        help="When enabled, the bot will not check for presence of rebase/manual label on pull requests",
+        help="Proceed despite an automation pause requested by the rebase/manual label for this run.",
     )
     parser.add_argument(
         "--pre-rebase-hook",
@@ -245,7 +274,7 @@ def _parse_cli_arguments():
         type=str,
         required=False,
         nargs="+",
-        help="The location of the pre-carry-commit lifecycle hook script.",
+        help="The lifecycle hook script to run once before reapplying selected carries in rebase mode.",
     )
     parser.add_argument(
         "--post-rebase-hook",
@@ -255,11 +284,11 @@ def _parse_cli_arguments():
         help="The location of the post-rebase lifecycle hook script.",
     )
     parser.add_argument(
-        "--pre-push-rebase-branch-hook",
+        "--pre-publication-hook",
         type=str,
         required=False,
         nargs="+",
-        help="The location of the pre-push-rebase-branch lifecycle hook script.",
+        help="The lifecycle hook script to run before pushing the publication branch in rebase mode.",
     )
     parser.add_argument(
         "--pre-create-pr-hook",
@@ -274,7 +303,7 @@ def _parse_cli_arguments():
         default=False,
         help="When enabled, the bot will run configured lifecycle hooks (including built-in ones like from "
         "--update-go-modules) even if no rebase is needed. "
-        "Note: hooks that depend on a push or PR creation step (e.g. PRE_PUSH_REBASE_BRANCH, PRE_CREATE_PR) "
+        "Note: hooks that depend on a push or PR creation step (e.g. PRE_PUBLICATION, PRE_CREATE_PR) "
         "will still only run if those actions occur.",
     )
     parser.add_argument(
@@ -288,6 +317,7 @@ def _parse_cli_arguments():
 
     parser.set_defaults(tag_policy=None, conflict_policy=None)
     args = parser.parse_args()
+    check_source_repo_args(args)
     if args.sync_mode == "merge":
         incompatible = [
             option
@@ -299,7 +329,7 @@ def _parse_cli_arguments():
                 "--pre-rebase-hook",
                 "--pre-carry-commit-hook",
                 "--post-rebase-hook",
-                "--pre-push-rebase-branch-hook",
+                "--pre-publication-hook",
                 "--pre-create-pr-hook",
                 "--update-go-modules",
                 "--always-run-hooks",
@@ -315,12 +345,12 @@ def _parse_cli_arguments():
 
 def _get_github_app_wrapper(
     *,
-    gh_app_id: int | None,
-    gh_app_key_path: str | None,
-    dest_branch: GitHubBranch | None,
-    gh_cloner_id: int | None,
-    gh_cloner_key_path: str | None,
-    rebase_branch: GitHubBranch | None,
+    gh_destination_app_id: int | None,
+    gh_destination_app_key_path: str | None,
+    destination_branch: GitHubReference | None,
+    gh_publication_app_id: int | None,
+    gh_publication_app_key_path: str | None,
+    publication_branch: GitHubReference | None,
     gh_user_token_path: str | None,
 ) -> GithubAppProvider:
     if gh_user_token_path:
@@ -331,21 +361,24 @@ def _get_github_app_wrapper(
             user_token=gh_user_token,
         )
 
-    if all((gh_app_id, gh_app_key_path, gh_cloner_id, gh_cloner_key_path)):
-        with open(gh_app_key_path, encoding="utf-8") as app_key_file:
-            app_key = app_key_file.read().strip().encode()
-        with open(gh_cloner_key_path, encoding="utf-8") as cloner_key_file:
-            cloner_key = cloner_key_file.read().strip().encode()
+    if all((gh_destination_app_id, gh_destination_app_key_path, gh_publication_app_id, gh_publication_app_key_path)):
+        with open(gh_destination_app_key_path, encoding="utf-8") as app_key_file:
+            destination_app_key = app_key_file.read().strip().encode()
+        with open(gh_publication_app_key_path, encoding="utf-8") as publication_key_file:
+            publication_app_key = publication_key_file.read().strip().encode()
         return GithubAppProvider(
-            app_id=gh_app_id,
-            app_key=app_key,
-            dest_branch=dest_branch,
-            cloner_id=gh_cloner_id,
-            cloner_key=cloner_key,
-            rebase_branch=rebase_branch,
+            destination_app_id=gh_destination_app_id,
+            destination_app_key=destination_app_key,
+            destination_branch=destination_branch,
+            publication_app_id=gh_publication_app_id,
+            publication_app_key=publication_app_key,
+            publication_branch=publication_branch,
         )
 
-    print("'github-user-token' or 'github-app-key' along with 'github-cloner-key' should be provided", file=sys.stderr)
+    print(
+        "Provide --github-user-token or both --github-destination-app-key and --github-publication-app-key.",
+        file=sys.stderr,
+    )
     sys.exit(2)
 
 
@@ -363,14 +396,14 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
         try:
             try:
                 if args.source_repo is not None:
-                    lifecycle_hooks.run_source_repo_hook(
+                    lifecycle_hooks.run_source_reference_hook(
                         args=args,
                         github_app_wrapper=github_app_wrapper,
                         temp_script_dir=temp_script_dir,
                     )
             except Exception as e:
                 logging.error(
-                    f"Error running source repo hook: {e}",
+                    f"Error running source reference hook: {e}",
                     exc_info=True,
                 )  # Log the full stack trace
                 sys.exit(1)
@@ -386,8 +419,8 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
 
             return bot.run(
                 source=args.source,
-                dest=args.dest,
-                rebase=args.rebase,
+                destination=args.destination,
+                publication=args.publication,
                 working_dir=working_dir,
                 git_username=args.git_username,
                 git_email=args.git_email,
@@ -399,7 +432,7 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
                 exclude_commits=args.exclude_commits,
                 update_go_modules=args.update_go_modules,
                 dry_run=args.dry_run,
-                ignore_manual_label=args.ignore_manual_label,
+                manual_override=args.manual_override,
                 hooks=hooks,
                 always_run_hooks=args.always_run_hooks,
                 title_prefix=args.title_prefix,
@@ -424,12 +457,12 @@ def main():
             slack_webhook = app_key_file.read().strip()
 
     github_app_wrapper = _get_github_app_wrapper(
-        gh_app_id=args.github_app_id,
-        gh_app_key_path=args.github_app_key,
-        dest_branch=args.dest,
-        gh_cloner_id=args.github_cloner_id,
-        gh_cloner_key_path=args.github_cloner_key,
-        rebase_branch=args.rebase,
+        gh_destination_app_id=args.github_destination_app_id,
+        gh_destination_app_key_path=args.github_destination_app_key,
+        destination_branch=args.destination,
+        gh_publication_app_id=args.github_publication_app_id,
+        gh_publication_app_key_path=args.github_publication_app_key,
+        publication_branch=args.publication,
         gh_user_token_path=args.github_user_token,
     )
 

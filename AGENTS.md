@@ -10,7 +10,7 @@ Rebase Bot is a Python-based automation tool that synchronizes downstream GitHub
 
 In rebase mode, the bot starts from selected upstream content and reapplies selected carries while preserving earlier downstream history. In merge mode, it publishes the selected upstream tip for integration through a merge. Both modes create or update a synchronization PR from the publication branch into the destination branch.
 
-The CLI selects rebase mode with `--sync-mode replay`, the default, and merge mode with `--sync-mode merge`.
+The CLI selects rebase mode with `--sync-mode rebase`, the default, and merge mode with `--sync-mode merge`.
 
 ## Core Concepts
 
@@ -20,7 +20,7 @@ The bot uses three repository roles, which may share a repository:
 - **Destination**: The GitHub repository and destination branch receiving synchronization changes through a pull request.
 - **Publication repository**: The GitHub repository hosting the publication branch proposed for integration into the destination.
 
-The CLI uses `--source`, `--dest`, and `--rebase` for these roles. Git remotes retain the names `source`, `dest`, and `rebase`.
+The CLI uses `--source`, `--destination`, and `--publication` for these roles. The workspace Git remotes are `source`, `dest`, and `rebase`, respectively. These names are part of the lifecycle hook interface.
 
 ## Development Commands
 
@@ -40,10 +40,10 @@ When you want to run the current checkout from your user Python environment, use
 
 **App Mode**: Uses two credential roles, which can share one GitHub App:
 
-- **app**: PR operations in the destination repository. Requires Contents: Read, Metadata: Read-only, and Pull requests: Read & Write.
-- **cloner**: Pushing to the publication repository. Requires Contents: Read & Write and Metadata: Read-only, plus Workflows: Write when publishing changes to GitHub Actions workflow files.
+- **destination App**: PR operations in the destination repository. Requires Contents: Read, Metadata: Read-only, and Pull requests: Read & Write.
+- **publication App**: Pushing to the publication repository. Requires Contents: Read & Write and Metadata: Read-only, plus Workflows: Write when publishing changes to GitHub Actions workflow files.
 
-Supply both credential pairs: `--github-app-id` / `--github-app-key` and `--github-cloner-id` / `--github-cloner-key`. To use one app, pass the same app ID and key for both roles and grant it access to both repositories with the combined permissions. When the publication repository is the destination repository, its publication branch must permit the app's pushes.
+Supply both credential pairs: `--github-destination-app-id` / `--github-destination-app-key` and `--github-publication-app-id` / `--github-publication-app-key`. To use one app, pass the same app ID and key for both roles and grant it access to both repositories with the combined permissions. When the publication repository is the destination repository, its publication branch must permit the app's pushes.
 
 ### Hook Script Sources
 

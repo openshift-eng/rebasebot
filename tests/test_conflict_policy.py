@@ -21,7 +21,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 from rebasebot import cli
-from rebasebot.bot import _init_working_dir, _prepare_rebase_branch, _prepare_replay_workdir, _safe_cherry_pick
+from rebasebot.bot import _init_working_dir, _prepare_publication_branch, _prepare_rebase_workdir, _safe_cherry_pick
 
 from .conftest import CommitBuilder
 
@@ -80,43 +80,43 @@ class TestConflictPolicy:
     """Tests that --conflict-policy correctly detects upstream content loss."""
 
     @patch("rebasebot.bot._create_pr")
-    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._push_publication_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
     def test_auto_policy_silent_on_conflict(
         self,
         mocked_post,
         mocked_is_pr_available,
-        mocked_push_rebase_branch,
+        mocked_push_publication_branch,
         mocked_create_pr,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
     ):
         """With auto policy, -Xtheirs conflicts resolve silently."""
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         mocked_is_pr_available.return_value = None, False
-        mocked_push_rebase_branch.return_value = True
+        mocked_push_publication_branch.return_value = True
 
         # Replace test.go with structured code in source (initial state)
         CommitBuilder(source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
 
-        # Sync dest to have the same base
-        CommitBuilder(dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        # Sync destination to have the same base
+        CommitBuilder(destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
 
         # Upstream adds new fields
         CommitBuilder(source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
 
         # Downstream carry patch reformats and adds timeout
-        CommitBuilder(dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+        CommitBuilder(destination).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="rebase")
         args.source = source
         args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
+        args.destination = destination
+        args.publication = publication
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
@@ -125,7 +125,7 @@ class TestConflictPolicy:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
-        args.ignore_manual_label = False
+        args.manual_override = False
         args.dry_run = True
 
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
@@ -133,14 +133,14 @@ class TestConflictPolicy:
         assert result is True
 
     @patch("rebasebot.bot._create_pr")
-    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._push_publication_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
     def test_warn_policy_logs_warning_on_content_loss(
         self,
         mocked_post,
         mocked_is_pr_available,
-        mocked_push_rebase_branch,
+        mocked_push_publication_branch,
         mocked_create_pr,
         init_test_repositories,
         fake_github_provider,
@@ -148,25 +148,25 @@ class TestConflictPolicy:
         caplog,
     ):
         """With warn policy, warnings are logged but rebase succeeds."""
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         mocked_is_pr_available.return_value = None, False
-        mocked_push_rebase_branch.return_value = True
+        mocked_push_publication_branch.return_value = True
 
         CommitBuilder(source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
 
-        CommitBuilder(dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
 
         CommitBuilder(source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
 
-        CommitBuilder(dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+        CommitBuilder(destination).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="rebase")
         args.source = source
         args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
+        args.destination = destination
+        args.publication = publication
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
@@ -175,7 +175,7 @@ class TestConflictPolicy:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
-        args.ignore_manual_label = False
+        args.manual_override = False
         args.dry_run = True
 
         with caplog.at_level(logging.WARNING):
@@ -189,37 +189,37 @@ class TestConflictPolicy:
         mocked_create_pr.assert_not_called()
 
     @patch("rebasebot.bot._create_pr")
-    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._push_publication_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
     def test_warn_policy_includes_content_loss_in_pr_body(
         self,
         mocked_post,
         mocked_is_pr_available,
-        mocked_push_rebase_branch,
+        mocked_push_publication_branch,
         mocked_create_pr,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
     ):
         """With warn policy, content loss warnings appear in the PR body."""
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         mocked_is_pr_available.return_value = None, False
-        mocked_push_rebase_branch.return_value = True
+        mocked_push_publication_branch.return_value = True
         mocked_create_pr.return_value.html_url = "https://github.com/downstream/repo/pull/1"
 
         CommitBuilder(source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
-        CommitBuilder(dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
         CommitBuilder(source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
-        CommitBuilder(dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+        CommitBuilder(destination).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="rebase")
         args.source = source
         args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
+        args.destination = destination
+        args.publication = publication
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
@@ -228,7 +228,7 @@ class TestConflictPolicy:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
-        args.ignore_manual_label = False
+        args.manual_override = False
         args.dry_run = False
 
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
@@ -243,39 +243,39 @@ class TestConflictPolicy:
         assert "ebsKmsKeyId" in pr_body
 
     @patch("rebasebot.bot._create_pr")
-    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._push_publication_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
     def test_strict_policy_fails_on_content_loss(
         self,
         mocked_post,
         mocked_is_pr_available,
-        mocked_push_rebase_branch,
+        mocked_push_publication_branch,
         mocked_create_pr,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
     ):
         """With strict policy, upstream content loss causes failure."""
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         mocked_is_pr_available.return_value = None, False
-        mocked_push_rebase_branch.return_value = True
+        mocked_push_publication_branch.return_value = True
 
         CommitBuilder(source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
 
-        CommitBuilder(dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
 
         CommitBuilder(source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
 
-        CommitBuilder(dest).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
+        CommitBuilder(destination).update_file("test.go", _DOWNSTREAM_CARRY_CODE).commit(
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="rebase")
         args.source = source
         args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
+        args.destination = destination
+        args.publication = publication
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
@@ -284,7 +284,7 @@ class TestConflictPolicy:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
-        args.ignore_manual_label = False
+        args.manual_override = False
         args.dry_run = True
 
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
@@ -292,23 +292,23 @@ class TestConflictPolicy:
         assert result is False
 
     @patch("rebasebot.bot._create_pr")
-    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._push_publication_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
     def test_strict_policy_succeeds_when_no_conflict(
         self,
         mocked_post,
         mocked_is_pr_available,
-        mocked_push_rebase_branch,
+        mocked_push_publication_branch,
         mocked_create_pr,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
     ):
         """With strict policy, clean cherry-picks succeed (no false positives)."""
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         mocked_is_pr_available.return_value = None, False
-        mocked_push_rebase_branch.return_value = True
+        mocked_push_publication_branch.return_value = True
 
         # Source adds an unrelated new file
         CommitBuilder(source).add_file("new_upstream_file.go", "package main\nfunc upstream() {}\n").commit(
@@ -316,15 +316,15 @@ class TestConflictPolicy:
         )
 
         # Dest adds a different unrelated file (no conflict)
-        CommitBuilder(dest).add_file("downstream_only.go", "package main\nfunc downstream() {}\n").commit(
+        CommitBuilder(destination).add_file("downstream_only.go", "package main\nfunc downstream() {}\n").commit(
             "UPSTREAM: <carry>: downstream only file"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="rebase")
         args.source = source
         args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
+        args.destination = destination
+        args.publication = publication
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
@@ -333,7 +333,7 @@ class TestConflictPolicy:
         args.bot_emails = []
         args.exclude_commits = []
         args.update_go_modules = False
-        args.ignore_manual_label = False
+        args.manual_override = False
         args.dry_run = True
 
         result = cli.rebasebot_run(args, slack_webhook=None, github_app_wrapper=fake_github_provider)
@@ -343,35 +343,35 @@ class TestConflictPolicy:
 
 class TestSafeCherryPickReturnValue:
     def test_warn_policy_returns_structured_content_loss(self, init_test_repositories, fake_github_provider, tmpdir):
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
 
         CommitBuilder(source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
-        CommitBuilder(dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
         CommitBuilder(source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
         carry = (
-            CommitBuilder(dest)
+            CommitBuilder(destination)
             .update_file("test.go", _DOWNSTREAM_CARRY_CODE)
             .commit("UPSTREAM: <carry>: add snapshot timeout")
         )
 
         gitwd = _init_working_dir(
             source=source,
-            dest=dest,
-            rebase=rebase,
+            destination=destination,
+            publication=publication,
             github_app_provider=fake_github_provider,
             git_username="test_rebasebot",
             git_email="test@rebasebot.ocp",
             workdir=tmpdir,
         )
-        _prepare_replay_workdir(gitwd, source, rebase)
-        gitwd.remotes.source.fetch(source.branch)
-        gitwd.remotes.dest.fetch(dest.branch)
-        _prepare_rebase_branch(gitwd, source, dest)
+        _prepare_rebase_workdir(gitwd, source, publication)
+        gitwd.remotes.source.fetch(source.ref)
+        gitwd.remotes.dest.fetch(destination.ref)
+        _prepare_publication_branch(gitwd, source, destination)
 
         result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=carry.hexsha,
-            source_branch=source.branch,
+            source_ref=source.ref,
             conflict_policy="warn",
             commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: add snapshot timeout",
         )
@@ -383,35 +383,35 @@ class TestSafeCherryPickReturnValue:
         assert any("ebsKmsKeyId" in line for line in lost_lines)
 
     def test_auto_policy_returns_empty_content_loss(self, init_test_repositories, fake_github_provider, tmpdir):
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
 
         CommitBuilder(source).update_file("test.go", _ORIGINAL_CODE).commit("set up base code")
-        CommitBuilder(dest).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
+        CommitBuilder(destination).update_file("test.go", _ORIGINAL_CODE).commit("UPSTREAM: <carry>: sync base")
         CommitBuilder(source).update_file("test.go", _UPSTREAM_ADDED_CODE).commit("Add KMS key support")
         carry = (
-            CommitBuilder(dest)
+            CommitBuilder(destination)
             .update_file("test.go", _DOWNSTREAM_CARRY_CODE)
             .commit("UPSTREAM: <carry>: add snapshot timeout")
         )
 
         gitwd = _init_working_dir(
             source=source,
-            dest=dest,
-            rebase=rebase,
+            destination=destination,
+            publication=publication,
             github_app_provider=fake_github_provider,
             git_username="test_rebasebot",
             git_email="test@rebasebot.ocp",
             workdir=tmpdir,
         )
-        _prepare_replay_workdir(gitwd, source, rebase)
-        gitwd.remotes.source.fetch(source.branch)
-        gitwd.remotes.dest.fetch(dest.branch)
-        _prepare_rebase_branch(gitwd, source, dest)
+        _prepare_rebase_workdir(gitwd, source, publication)
+        gitwd.remotes.source.fetch(source.ref)
+        gitwd.remotes.dest.fetch(destination.ref)
+        _prepare_publication_branch(gitwd, source, destination)
 
         result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=carry.hexsha,
-            source_branch=source.branch,
+            source_ref=source.ref,
             conflict_policy="auto",
             commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: add snapshot timeout",
         )
@@ -436,31 +436,31 @@ def _vendor_content(index: int) -> str:
     return _VENDOR_BLOB + f"// vendor file {index}\n"
 
 
-def _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir):
+def _prepare_working_repo(source, publication, destination, fake_github_provider, tmpdir):
     gitwd = _init_working_dir(
         source=source,
-        dest=dest,
-        rebase=rebase,
+        destination=destination,
+        publication=publication,
         github_app_provider=fake_github_provider,
         git_username="test_rebasebot",
         git_email="test@rebasebot.ocp",
         workdir=tmpdir,
     )
-    _prepare_replay_workdir(gitwd, source, rebase)
-    gitwd.remotes.source.fetch(source.branch)
-    gitwd.remotes.dest.fetch(dest.branch)
-    _prepare_rebase_branch(gitwd, source, dest)
+    _prepare_rebase_workdir(gitwd, source, publication)
+    gitwd.remotes.source.fetch(source.ref)
+    gitwd.remotes.dest.fetch(destination.ref)
+    _prepare_publication_branch(gitwd, source, destination)
     return gitwd
 
 
-def _setup_vendor_files_on_source_and_dest(source, dest):
+def _setup_vendor_files_on_source_and_dest(source, destination):
     source_builder = CommitBuilder(source)
-    dest_builder = CommitBuilder(dest)
+    destination_builder = CommitBuilder(destination)
     for i in range(_VENDOR_FILE_COUNT):
         source_builder.add_file(_vendor_filename(i), _vendor_content(i))
-        dest_builder.add_file(_vendor_filename(i), _vendor_content(i))
+        destination_builder.add_file(_vendor_filename(i), _vendor_content(i))
     source_builder.commit("add vendor stand-ins")
-    dest_builder.commit("UPSTREAM: <carry>: add vendor stand-ins")
+    destination_builder.commit("UPSTREAM: <carry>: add vendor stand-ins")
 
 
 class TestFalseRenameDeleteResolution:
@@ -468,8 +468,8 @@ class TestFalseRenameDeleteResolution:
 
     def test_false_rename_delete_keeps_head_file(self, init_test_repositories, fake_github_provider, tmpdir):
         """HEAD file not listed in the picked commit survives a false rename/delete conflict."""
-        source, rebase, dest = init_test_repositories
-        _setup_vendor_files_on_source_and_dest(source, dest)
+        source, publication, destination = init_test_repositories
+        _setup_vendor_files_on_source_and_dest(source, destination)
 
         source_drop = CommitBuilder(source)
         for i in range(_VENDOR_FILE_COUNT):
@@ -478,19 +478,21 @@ class TestFalseRenameDeleteResolution:
             "upstream: drop vendor stand-ins, add e2e labels"
         )
 
-        dest_pick = CommitBuilder(dest)
+        destination_pick = CommitBuilder(destination)
         for i in range(_VENDOR_FILE_COUNT):
-            dest_pick.remove_file(_vendor_filename(i))
+            destination_pick.remove_file(_vendor_filename(i))
         # Extra path so the pick still has a real change after keeping the false rename.
-        carry = dest_pick.add_file("carry_marker.txt", "marker\n").commit("UPSTREAM: <carry>: remove vendor stand-ins")
+        carry = destination_pick.add_file("carry_marker.txt", "marker\n").commit(
+            "UPSTREAM: <carry>: remove vendor stand-ins"
+        )
 
-        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        gitwd = _prepare_working_repo(source, publication, destination, fake_github_provider, tmpdir)
         assert _E2E_LABELS_FILE in gitwd.git.ls_files().splitlines()
 
         result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=carry.hexsha,
-            source_branch=source.branch,
+            source_ref=source.ref,
             conflict_policy="auto",
             commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove vendor stand-ins",
         )
@@ -503,18 +505,18 @@ class TestFalseRenameDeleteResolution:
 
     def test_legitimate_delete_removes_path(self, init_test_repositories, fake_github_provider, tmpdir):
         """A path listed in the picked commit is still removed on modify/delete conflict."""
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
 
         CommitBuilder(source).update_file("test.go", "upstream modified content\n").commit("modify test.go")
-        carry = CommitBuilder(dest).remove_file("test.go").commit("UPSTREAM: <carry>: remove test.go")
+        carry = CommitBuilder(destination).remove_file("test.go").commit("UPSTREAM: <carry>: remove test.go")
 
-        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        gitwd = _prepare_working_repo(source, publication, destination, fake_github_provider, tmpdir)
         assert "test.go" in gitwd.git.ls_files().splitlines()
 
         result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=carry.hexsha,
-            source_branch=source.branch,
+            source_ref=source.ref,
             conflict_policy="auto",
             commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove test.go",
         )
@@ -524,26 +526,28 @@ class TestFalseRenameDeleteResolution:
 
     def test_legitimate_delete_removes_non_ascii_path(self, init_test_repositories, fake_github_provider, tmpdir):
         """Quoted non-ASCII paths in the picked commit still delete (path unescape must match)."""
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         non_ascii_name = "café.txt"
 
         CommitBuilder(source).add_file(non_ascii_name, "upstream café\n").commit("add non-ascii file")
-        CommitBuilder(dest).add_file(non_ascii_name, "downstream café\n").commit(
+        CommitBuilder(destination).add_file(non_ascii_name, "downstream café\n").commit(
             "UPSTREAM: <carry>: add non-ascii file"
         )
         CommitBuilder(source).update_file(non_ascii_name, "upstream modified café\n").commit(
             "modify non-ascii file upstream"
         )
-        carry = CommitBuilder(dest).remove_file(non_ascii_name).commit("UPSTREAM: <carry>: remove non-ascii file")
+        carry = (
+            CommitBuilder(destination).remove_file(non_ascii_name).commit("UPSTREAM: <carry>: remove non-ascii file")
+        )
 
-        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        gitwd = _prepare_working_repo(source, publication, destination, fake_github_provider, tmpdir)
         non_ascii_path = os.path.join(gitwd.working_dir, non_ascii_name)
         assert os.path.exists(non_ascii_path)
 
         result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=carry.hexsha,
-            source_branch=source.branch,
+            source_ref=source.ref,
             conflict_policy="auto",
             commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove non-ascii file",
         )
@@ -553,8 +557,8 @@ class TestFalseRenameDeleteResolution:
 
     def test_empty_after_resolution_skips_pick(self, init_test_repositories, fake_github_provider, tmpdir):
         """Keeping false renames with no remaining changes skips instead of failing or empty-committing."""
-        source, rebase, dest = init_test_repositories
-        _setup_vendor_files_on_source_and_dest(source, dest)
+        source, publication, destination = init_test_repositories
+        _setup_vendor_files_on_source_and_dest(source, destination)
 
         source_drop = CommitBuilder(source)
         for i in range(_VENDOR_FILE_COUNT):
@@ -563,18 +567,18 @@ class TestFalseRenameDeleteResolution:
             "upstream: drop vendor stand-ins, add e2e labels"
         )
 
-        dest_pick = CommitBuilder(dest)
+        destination_pick = CommitBuilder(destination)
         for i in range(_VENDOR_FILE_COUNT):
-            dest_pick.remove_file(_vendor_filename(i))
-        carry = dest_pick.commit("UPSTREAM: <carry>: remove vendor stand-ins")
+            destination_pick.remove_file(_vendor_filename(i))
+        carry = destination_pick.commit("UPSTREAM: <carry>: remove vendor stand-ins")
 
-        gitwd = _prepare_working_repo(source, rebase, dest, fake_github_provider, tmpdir)
+        gitwd = _prepare_working_repo(source, publication, destination, fake_github_provider, tmpdir)
         head_before = gitwd.head.commit.hexsha
 
         result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=carry.hexsha,
-            source_branch=source.branch,
+            source_ref=source.ref,
             conflict_policy="auto",
             commit_description=f"{carry.hexsha} - UPSTREAM: <carry>: remove vendor stand-ins",
         )

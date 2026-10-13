@@ -25,7 +25,7 @@ import pytest
 from git import GitCommandError, Repo
 from git.objects import Commit
 
-from rebasebot.github import GithubAppProvider, GitHubBranch
+from rebasebot.github import GithubAppProvider, GitHubReference
 
 T = TypeVar("T")
 
@@ -96,11 +96,11 @@ class CommitBuilder:
     This prevents uncommited changes being added to the next commit.
     """
 
-    def __init__(self: CommitBuilder, branch: GitHubBranch) -> None:
+    def __init__(self: CommitBuilder, branch: GitHubReference) -> None:
         """Initializes a new CommitBuilder on the given branch"""
         if not os.path.exists(branch.url):
             raise NotADirectoryError("temp repo does not exists")
-        self.branch = branch
+        self.repository_reference = branch
         self.commited = False
         self.action_plan: deque[CommitBuilderAction] = deque()
 
@@ -155,11 +155,11 @@ class CommitBuilder:
         :param commit_msg: Commit message
         :param committer_email: optional email of the committer, defaults to {branch.name}_author@{branch.ns}.org
         """
-        self.repo = Repo(self.branch.url)
+        self.repo = Repo(self.repository_reference.url)
         try:
-            self.repo.git.checkout(self.branch.branch)
+            self.repo.git.checkout(self.repository_reference.ref)
         except GitCommandError:
-            self.repo.git.checkout("-b", self.branch.branch)
+            self.repo.git.checkout("-b", self.repository_reference.ref)
 
         for action in self.action_plan:
             action.func(*action.args)
@@ -167,10 +167,12 @@ class CommitBuilder:
         with self.repo.config_writer() as config:
             if committer_email is not None:
                 config.set_value("user", "email", committer_email)
-                config.set_value("user", "name", f"{self.branch.name}_{committer_email}")
+                config.set_value("user", "name", f"{self.repository_reference.name}_{committer_email}")
             else:
-                config.set_value("user", "email", f"{self.branch.name}_author@{self.branch.ns}.org")
-                config.set_value("user", "name", f"{self.branch.name}_author")
+                config.set_value(
+                    "user", "email", f"{self.repository_reference.name}_author@{self.repository_reference.ns}.org"
+                )
+                config.set_value("user", "name", f"{self.repository_reference.name}_author")
         self.commited = True
         self.repo.git.commit("--allow-empty", "-m", commit_msg)
         return self.repo.head.commit
@@ -183,7 +185,7 @@ class CommitBuilder:
 
 
 @pytest.fixture
-def init_test_repositories() -> YieldFixture[tuple[GitHubBranch, GitHubBranch, GitHubBranch]]:
+def init_test_repositories() -> YieldFixture[tuple[GitHubReference, GitHubReference, GitHubReference]]:
     """
     Creates three repositories in own temp directories
 
@@ -193,25 +195,27 @@ def init_test_repositories() -> YieldFixture[tuple[GitHubBranch, GitHubBranch, G
 
     source = TemporaryDirectory(prefix="rebasebot_tests_source_repo_")
     Repo.init(source.name)
-    source_gh_branch = GitHubBranch(url=source.name, ns="source", name="source", branch="main")
+    source_gh_branch = GitHubReference(url=source.name, ns="source", name="source", ref="main")
     CommitBuilder(source_gh_branch).add_file(_GO_CODE_FILENAME, _GO_CODE).commit("Upstream commit")
 
-    rebase = TemporaryDirectory(prefix="rebasebot_tests_rebase_repo_")
-    rebase_repo = Repo.init(rebase.name)
-    rebase_gh_branch = GitHubBranch(url=rebase.name, ns="rebase", name="rebase", branch=rebase_repo.head.ref.name)
+    publication = TemporaryDirectory(prefix="rebasebot_tests_rebase_repo_")
+    publication_repo = Repo.init(publication.name)
+    publication_gh_branch = GitHubReference(
+        url=publication.name, ns="publication", name="publication", ref=publication_repo.head.ref.name
+    )
 
-    dest = TemporaryDirectory(prefix="rebasebot_tests_dest_repo_")
-    shutil.copytree(source.name, dest.name, dirs_exist_ok=True)
-    dest_gh_branch = GitHubBranch(url=dest.name, ns="dest", name="dest", branch="main")
-    CommitBuilder(dest_gh_branch).add_file("another_file.go", _ANOTHER_GO_CODE).commit(
+    destination = TemporaryDirectory(prefix="rebasebot_tests_destination_repo_")
+    shutil.copytree(source.name, destination.name, dirs_exist_ok=True)
+    destination_gh_branch = GitHubReference(url=destination.name, ns="destination", name="destination", ref="main")
+    CommitBuilder(destination_gh_branch).add_file("another_file.go", _ANOTHER_GO_CODE).commit(
         "UPSTREAM: <carry>: our cool addition"
     )
 
-    yield source_gh_branch, rebase_gh_branch, dest_gh_branch
+    yield source_gh_branch, publication_gh_branch, destination_gh_branch
 
     source.cleanup()
-    rebase.cleanup()
-    dest.cleanup()
+    publication.cleanup()
+    destination.cleanup()
 
 
 @pytest.fixture
