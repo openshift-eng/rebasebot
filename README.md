@@ -27,8 +27,10 @@ To successfully create a PR we need an intermediate repository where we push our
 ## Merge synchronization
 
 Use `--sync-mode merge` for downstream forks that want normal Git merge history
-without replaying their carries. The bot publishes the upstream tip to the sync
-branch and creates or updates a PR, including when it has conflicts.
+without replaying their carries. The bot creates a merge commit on the sync
+branch so PR CI tests upstream changes together with downstream carries. If the
+merge has conflicts, the bot publishes the unmerged upstream tip and creates or
+updates the PR with manual conflict-resolution instructions.
 
 Choose the default `replay` mode when you need carry filtering, bot-commit
 squashing, lifecycle hooks, Go module updates or ART cherry-picks. Merge mode

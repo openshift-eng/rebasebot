@@ -72,14 +72,21 @@ def sync_pr(options, *, manual=False, has_conflicts=False, number=1):
 
 
 @pytest.mark.parametrize("conflicts", [False, True])
-def test_publishes_exact_upstream_and_reuses_pr_even_with_conflicts(merge_run, conflicts):
+def test_publishes_merged_tree_and_reuses_pr_even_with_conflicts(merge_run, conflicts):
     options, create_pr, dest_repo = merge_run
     source, dest, rebase = (options[name] for name in ("source", "dest", "rebase"))
     if conflicts:
         CommitBuilder(dest).update_file("test.go", "downstream").commit("downstream conflict")
     upstream = CommitBuilder(source).update_file("test.go", "upstream").commit("upstream update")
     assert bot.run(**options)
-    assert git.Repo(rebase.url).head.commit == upstream
+    published = git.Repo(rebase.url).head.commit
+    downstream = git.Repo(dest.url).head.commit
+    if conflicts:
+        assert published == upstream
+    else:
+        assert published.parents == (downstream, upstream)
+        assert published.tree / "another_file.go"
+        assert (published.tree / "test.go").data_stream.read() == b"upstream"
     repo = git.Repo(options["working_dir"])
     assert not repo.heads
     assert not Path(repo.git_dir, "MERGE_HEAD").exists()
@@ -98,7 +105,11 @@ def test_publishes_exact_upstream_and_reuses_pr_even_with_conflicts(merge_run, c
     untracked.write_text("local notes")
     newer = CommitBuilder(source).commit("next upstream update")
     assert bot.run(**options)
-    assert git.Repo(rebase.url).head.commit == newer
+    published = git.Repo(rebase.url).head.commit
+    if conflicts:
+        assert published == newer
+    else:
+        assert published.parents == (downstream, newer)
     assert repo.head.commit == upstream
     assert repo.active_branch.name == "local-work"
     assert local_file.read_text() == "local changes"
@@ -115,39 +126,32 @@ def test_merge_accepts_tag_and_commit_sources_without_a_checkout(merge_run, sour
     git.Repo(source.url).git.tag("-a", "upstream-version", "-m", "upstream release", upstream.hexsha)
     source.branch = "upstream-version" if source_ref == "tag" else upstream.hexsha
     assert bot.run(**options)
-    assert git.Repo(options["rebase"].url).head.commit == upstream
+    assert git.Repo(options["rebase"].url).head.commit.parents == (git.Repo(options["dest"].url).head.commit, upstream)
     assert not git.Repo(options["working_dir"]).heads
 
 
-def test_existing_pr_instructions_follow_conflicts_when_downstream_changes(merge_run, monkeypatch):
+def test_existing_pr_follows_conflicts_when_downstream_changes(merge_run):
     options, create_pr, dest_repo = merge_run
     upstream = CommitBuilder(options["source"]).update_file("test.go", "upstream").commit("upstream update")
     assert bot.run(**options)
     pr = sync_pr(options)
     dest_repo.pull_requests.return_value = [pr]
-    execute = git.Git.execute
-    pushes = []
-
-    def record(self, command, *args, **kwargs):
-        if command[1] == "push":
-            pushes.append(command)
-        return execute(self, command, *args, **kwargs)
-
-    monkeypatch.setattr(git.Git, "execute", record)
     downstream = CommitBuilder(options["dest"])
     downstream.update_file("test.go", "downstream").commit("downstream conflict")
     assert bot.run(**options)
+    assert git.Repo(options["rebase"].url).head.commit == upstream
     assert "## Resolve conflicts" in pr.body
     pr.update.assert_called_once()
     assert bot.run(**options)
     pr.update.assert_called_once()
 
-    downstream.update_file("test.go", "upstream").commit("downstream resolves conflict")
+    resolved = downstream.update_file("test.go", "upstream").commit("downstream resolves conflict")
     assert bot.run(**options)
     assert "## Resolve conflicts" not in pr.body
     assert pr.update.call_count == 2
-    assert git.Repo(options["rebase"].url).head.commit == upstream
-    assert not pushes
+    published = git.Repo(options["rebase"].url).head.commit
+    assert published.parents == (resolved, upstream)
+    assert published.tree / "another_file.go"
     create_pr.assert_called_once()
 
 
@@ -168,11 +172,14 @@ def test_conflict_probe_error_stops_before_publication(merge_run, monkeypatch, c
     create_pr.assert_not_called()
 
 
-def test_repeat_does_not_push(merge_run, monkeypatch, caplog):
+@pytest.mark.parametrize("conflicts", [False, True])
+def test_repeat_does_not_push(merge_run, monkeypatch, caplog, conflicts):
     options, create_pr, dest_repo = merge_run
-    CommitBuilder(options["source"]).commit("upstream advance")
+    CommitBuilder(options["source"]).update_file("test.go", "upstream").commit("upstream advance")
+    if conflicts:
+        CommitBuilder(options["dest"]).update_file("test.go", "downstream").commit("downstream conflict")
     assert bot.run(**options)
-    dest_repo.pull_requests.return_value = [sync_pr(options)]
+    dest_repo.pull_requests.return_value = [sync_pr(options, has_conflicts=conflicts)]
     execute = git.Git.execute
     commands = []
 
@@ -184,8 +191,40 @@ def test_repeat_does_not_push(merge_run, monkeypatch, caplog):
     caplog.set_level("INFO")
     assert bot.run(**options)
     assert not any(command[1] == "push" for command in commands)
+    assert not any(command[1] == "commit-tree" for command in commands)
     assert "no push required" in caplog.text
     create_pr.assert_called_once()
+
+
+def test_replaces_upstream_only_branch_with_merge_commit(merge_run):
+    options, create_pr, dest_repo = merge_run
+    upstream = CommitBuilder(options["source"]).add_file("upstream.txt", "upstream").commit("upstream update")
+    remote = git.Repo(options["rebase"].url)
+    remote.git.fetch(options["source"].url, options["source"].branch)
+    remote.git.checkout("-B", options["rebase"].branch, "FETCH_HEAD")
+    dest_repo.pull_requests.return_value = [sync_pr(options)]
+
+    assert bot.run(**options)
+
+    published = remote.head.commit
+    assert published.parents == (git.Repo(options["dest"].url).head.commit, upstream)
+    assert published.tree / "another_file.go"
+    assert published.tree / "upstream.txt"
+    create_pr.assert_not_called()
+
+
+def test_fast_forward_still_creates_merge_commit(merge_run):
+    options, _, _ = merge_run
+    downstream = git.Repo(options["dest"].url)
+    downstream.git.reset("--hard", git.Repo(options["source"].url).head.commit.hexsha)
+    original = downstream.head.commit
+    upstream = CommitBuilder(options["source"]).commit("upstream advance")
+
+    assert bot.run(**options)
+
+    published = git.Repo(options["rebase"].url).head.commit
+    assert published.parents == (original, upstream)
+    assert published.tree == upstream.tree
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -271,7 +310,11 @@ def test_upstream_rollback_refreshes_pending_pr(merge_run, dry_run):
     git.Repo(source.url).git.reset("--hard", original.hexsha)
     options["dry_run"] = dry_run
     assert bot.run(**options)
-    assert git.Repo(rebase.url).head.commit == (withdrawn if dry_run else original)
+    published = git.Repo(rebase.url).head.commit
+    if dry_run:
+        assert published.parents[1] == withdrawn
+    else:
+        assert published == git.Repo(options["dest"].url).head.commit
     create_pr.assert_called_once()
 
 

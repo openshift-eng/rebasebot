@@ -39,7 +39,7 @@ def build_merge_pr_body(
     *,
     conflicted_pr_number: int | None = None,
 ) -> str:
-    """Instructions for a PR whose branch tracks the upstream tip exactly."""
+    """Describe an upstream sync PR and optional manual conflict resolution."""
     repo = shlex.quote(f"{dest.ns}/{dest.name}")
     body = f"This PR syncs upstream changes from {_branch_link(source)} into {_branch_link(dest)}."
     if conflicted_pr_number is not None:

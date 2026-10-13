@@ -58,7 +58,7 @@ def _parse_cli_arguments():
         "--sync-mode",
         choices=["replay", "merge"],
         default="replay",
-        help="Replay downstream carries (default), or publish the upstream tip for a merge PR.",
+        help="Replay downstream carries (default), or merge upstream into downstream for a PR.",
     )
     source_group = parser.add_mutually_exclusive_group(required=True)
 
