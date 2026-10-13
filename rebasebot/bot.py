@@ -1331,8 +1331,8 @@ def run(
         )
         notify_slack_error(
             notifier,
-            f"Failed to initialize git working directory for `{destination.label}` "
-            f"(source `{source.url}`, rebase `{publication.url}`)",
+            f"Failed to initialize Git working directory for destination `{destination.label}` "
+            f"(source repository `{source.url}`, publication repository `{publication.url}`)",
             ex,
         )
         return False
