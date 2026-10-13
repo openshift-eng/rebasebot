@@ -12,7 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""This module manages user provided scripts that are executed during the rebase process."""
+"""This module manages user-provided lifecycle hooks and source reference hooks."""
 
 import logging
 import os
@@ -27,7 +27,7 @@ import git
 import git.repo
 from github3.repos.contents import Contents
 
-from rebasebot.github import GithubAppProvider, parse_github_branch
+from rebasebot.github import GithubAppProvider, parse_github_reference
 
 
 class LifecycleHookScriptException(Exception):
@@ -40,7 +40,7 @@ class LifecycleHook(Enum):
     PRE_REBASE = "preRebaseHook"
     PRE_CARRY_COMMIT = "preCarryCommitHook"
     POST_REBASE = "postRebaseHook"
-    PRE_PUSH_REBASE_BRANCH = "prePushRebaseBranchHook"
+    PRE_PUBLICATION = "prePublicationHook"
     PRE_CREATE_PR = "preCreatePRHook"
 
 
@@ -140,7 +140,7 @@ class LifecycleHookScript:
         except Exception as e:
             raise ValueError(
                 f"Failed to retrieve script from github organization={organization}, "
-                f"name={name}, branch={branch}, path={git_repo_path_to_script},"
+                f"name={name}, ref={branch}, path={git_repo_path_to_script},"
             ) from e
 
     def _extract_script_details(self, script_location: str, temp_hook_dir: str) -> tuple[str, str, str]:
@@ -237,7 +237,7 @@ class LifecycleHookScript:
 
 
 def _fetch_file_from_github(github, organization, name, branch, git_repo_path_to_script) -> Contents:
-    return github.github_cloner_app.repository(owner=organization, repository=name).file_contents(
+    return github.github_publication_app.repository(owner=organization, repository=name).file_contents(
         git_repo_path_to_script, ref=branch
     )
 
@@ -252,24 +252,28 @@ def _retrieve_file_from_git(gitwd: git.Repo, git_path: str) -> str:
 
 def _setup_environment_variables(args):
     """Sets up environment variables with rebasebot parameters for lifecycle hook scripts."""
-    os.environ["REBASEBOT_SOURCE"] = args.source.branch
-    os.environ["REBASEBOT_DEST"] = args.dest.branch
-    os.environ["REBASEBOT_REBASE"] = args.rebase.branch
+    os.environ["REBASEBOT_SOURCE"] = args.source.ref
+    os.environ["REBASEBOT_SOURCE_REFERENCE"] = args.source.ref
+    os.environ["REBASEBOT_DESTINATION_BRANCH"] = args.destination.ref
+    os.environ["REBASEBOT_PUBLICATION_BRANCH"] = args.publication.ref
+    # Preserve the environment contract of existing hook scripts.
+    os.environ["REBASEBOT_DEST"] = args.destination.ref
+    os.environ["REBASEBOT_REBASE"] = args.publication.ref
     os.environ["REBASEBOT_WORKING_DIR"] = args.working_dir
     os.environ["REBASEBOT_GIT_USERNAME"] = args.git_username
     os.environ["REBASEBOT_GIT_EMAIL"] = args.git_email
 
 
-def run_source_repo_hook(args, github_app_wrapper, temp_script_dir):
+def run_source_reference_hook(args, github_app_wrapper, temp_script_dir):
     """
-    run_source_repo_hook fetches the specified repository hook script and runs it.
+    run_source_reference_hook fetches the specified repository hook script and runs it.
 
-    Source repository script contract:
+    Source reference hook contract:
         Input environment variables:
             REBASEBOT_SOURCE_REPO: organization/repository_name
 
         Output:
-            Source branch name as the only printed out line
+            Source branch or tag name on the first stdout line
     """
     os.environ["REBASEBOT_SOURCE_REPO"] = args.source_repo
     source_hook = LifecycleHookScript(args.source_ref_hook)
@@ -281,14 +285,14 @@ def run_source_repo_hook(args, github_app_wrapper, temp_script_dir):
         raise RuntimeError(f"Hook script failed with return code {result.return_code}. Error: {error_message}")
 
     if result.stdout:
-        # Expecting the first line of stdout to be the branch name
-        branch_name = result.stdout[0].strip()
-        if not re.match("^[a-zA-Z0-9/._-]{1,100}$", branch_name):
-            raise ValueError(f'"{branch_name}" is not valid branch name')
+        # Expecting the first line of stdout to be the source reference
+        reference_name = result.stdout[0].strip()
+        if not re.match("^[a-zA-Z0-9/._-]{1,100}$", reference_name):
+            raise ValueError(f'"{reference_name}" is not a valid source reference')
     else:
-        raise ValueError("No branch name returned in stdout")
+        raise ValueError("No source reference returned in stdout")
 
-    args.source = parse_github_branch(f"{args.source_repo}:{branch_name}")
+    args.source = parse_github_reference(f"{args.source_repo}:{reference_name}")
 
 
 class LifecycleHooks:
@@ -312,9 +316,9 @@ class LifecycleHooks:
                 self.attach_script_to_hook(LifecycleHook.POST_REBASE, LifecycleHookScript(script_file_path))
         if args.update_go_modules is True:
             self.attach_script_to_hook(LifecycleHook.POST_REBASE, LifecycleHookScript("_BUILTIN_/update_go_modules.sh"))
-        if args.pre_push_rebase_branch_hook is not None:
-            for script_file_path in args.pre_push_rebase_branch_hook:
-                self.attach_script_to_hook(LifecycleHook.PRE_PUSH_REBASE_BRANCH, LifecycleHookScript(script_file_path))
+        if args.pre_publication_hook is not None:
+            for script_file_path in args.pre_publication_hook:
+                self.attach_script_to_hook(LifecycleHook.PRE_PUBLICATION, LifecycleHookScript(script_file_path))
         if args.pre_create_pr_hook is not None:
             for script_file_path in args.pre_create_pr_hook:
                 self.attach_script_to_hook(LifecycleHook.PRE_CREATE_PR, LifecycleHookScript(script_file_path))

@@ -35,7 +35,7 @@ from github3.repos.commit import ShortCommit
 from github3.repos.repo import Repository
 
 from rebasebot import lifecycle_hooks
-from rebasebot.github import GithubAppProvider, GitHubBranch
+from rebasebot.github import GithubAppProvider, GitHubReference
 from rebasebot.lifecycle_hooks import LifecycleHookScriptException
 from rebasebot.pr_body import build_merge_pr_body, build_pr_body
 from rebasebot.prow import ProwJobContext
@@ -57,6 +57,9 @@ logging.basicConfig(format="%(levelname)s - %(message)s", stream=sys.stdout, lev
 
 
 MERGE_TMP_BRANCH = "merge-tmp"
+# Retain the local branch name for existing lifecycle hook scripts.
+PUBLICATION_WORK_BRANCH = "rebase"
+AUTOMATION_PAUSE_LABEL = "rebase/manual"
 _COMMIT_LOG_FORMAT = "--pretty=format:%H || %s || %aE"
 _MERGE_COMMIT_PARENT_COUNT = 2
 _LOST_LINE_LOG_LIMIT = 10
@@ -99,25 +102,25 @@ def notify_slack_error(notifier: SlackNotifier, description: str, ex: Exception)
     notifier.notify(message, emoji)
 
 
-def _needs_rebase(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> bool:
+def _needs_rebase(gitwd: git.Repo, source: GitHubReference, destination: GitHubReference) -> bool:
     try:
-        branches_with_commit = gitwd.git.branch("-r", "--contains", f"refs/remotes/source/{source.branch}")
-        dest_branch = f"dest/{dest.branch}"
+        branches_with_commit = gitwd.git.branch("-r", "--contains", f"refs/remotes/source/{source.ref}")
+        destination_branch = f"dest/{destination.ref}"
         logging.info("Branches with commit:\n%s", branches_with_commit)
         for branch in branches_with_commit.splitlines():
             # Must strip the branch name as git branch adds an indent
-            if branch.lstrip() == dest_branch:
+            if branch.lstrip() == destination_branch:
                 logging.info("Dest branch already contains the latest changes.")
                 return False
     except git.GitCommandError as ex:
-        # if the source head hasn't been found in the dest repo git returns an error.
+        # if the source head hasn't been found in the destination repo git returns an error.
         # In this case we need to ignore it and continue.
         logging.error(ex)
     return True
 
 
-def _is_pr_merged(pr_number: int, source_repo: Repository, gitwd: git.Repo, source_branch: str) -> bool:
-    logging.info("Checking that PR %s has been merged and is included in %s", pr_number, source_branch)
+def _is_pr_included_upstream(pr_number: int, source_repo: Repository, gitwd: git.Repo, source_ref: str) -> bool:
+    logging.info("Checking that PR %s has been merged and is included in %s", pr_number, source_ref)
     gh_pr = source_repo.pull_request(pr_number)
 
     if not gh_pr.is_merged():
@@ -129,25 +132,25 @@ def _is_pr_merged(pr_number: int, source_repo: Repository, gitwd: git.Repo, sour
         return False
 
     merge_commit = gitwd.commit(merge_commit_sha)
-    source_head = gitwd.commit(f"refs/remotes/source/{source_branch}")
+    source_head = gitwd.commit(f"refs/remotes/source/{source_ref}")
 
     # Check if the source branch contains the merge commit
     if gitwd.is_ancestor(merge_commit, source_head):
-        logging.info("PR %s merge commit %s is included in %s", pr_number, merge_commit_sha[:7], source_branch)
+        logging.info("PR %s merge commit %s is included in %s", pr_number, merge_commit_sha[:7], source_ref)
         return True
 
-    logging.info("PR %s merge commit %s is NOT included in %s", pr_number, merge_commit_sha[:7], source_branch)
+    logging.info("PR %s merge commit %s is NOT included in %s", pr_number, merge_commit_sha[:7], source_ref)
     return False
 
 
-def _add_to_rebase(
-    commit_message: str, source_repo: Repository, tag_policy: str, gitwd: git.Repo, source_branch: str
+def _should_carry_commit(
+    commit_message: str, source_repo: Repository, tag_policy: str, gitwd: git.Repo, source_ref: str
 ) -> bool:
     valid_tag_policy = ["soft", "strict", "none"]
     if tag_policy not in valid_tag_policy:
         raise builtins.Exception(f"Unknown tag policy: {tag_policy}")
 
-    # We always add commits to rebase PR in case of "none" tag policy
+    # We always add commits to synchronization PR in case of "none" tag policy
     if tag_policy == "none":
         return True
 
@@ -161,7 +164,7 @@ def _add_to_rebase(
             return True
 
         if commit_tag.isnumeric():
-            return not _is_pr_merged(int(commit_tag), source_repo, gitwd, source_branch)
+            return not _is_pr_included_upstream(int(commit_tag), source_repo, gitwd, source_ref)
 
         raise builtins.Exception(f"Unknown commit message tag: {commit_tag}")
 
@@ -228,18 +231,18 @@ def _find_source_parent_commit(parents: list, gitwd: git.Repo) -> Commit:
     return None
 
 
-def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> str:
+def _identify_downstream_commits(gitwd: git.Repo, source: GitHubReference, destination: GitHubReference) -> str:
     # Merge base is the last shared commit of source branch and destination branch
-    merge_base = gitwd.git.merge_base(f"refs/remotes/source/{source.branch}", f"dest/{dest.branch}")
-    logging.info(f"Merge base of source/{source.branch} and dest/{dest.branch}: %s", merge_base)
+    merge_base = gitwd.git.merge_base(f"refs/remotes/source/{source.ref}", f"dest/{destination.ref}")
+    logging.info(f"Merge base of source/{source.ref} and dest/{destination.ref}: %s", merge_base)
 
     # ancestry_path_merges are merge commits on ancestry path from merge base to destination branch
     ancestry_path_merges = gitwd.git.log(
-        _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{dest.branch}"
+        _COMMIT_LOG_FORMAT, "--ancestry-path", "-r", "--merges", f"{merge_base}..dest/{destination.ref}"
     ).splitlines()
 
     val = "\n".join(ancestry_path_merges)
-    logging.info(f"""Merges on ancestry-path from merge_base=({merge_base}) to dest/{dest.branch} branch:\n{val}""")
+    logging.info(f"""Merges from {merge_base} to dest/{destination.ref}:\n{val}""")
 
     last_rebase_merge_commit = _find_last_rebase_merge_commit(gitwd, ancestry_path_merges)
     cutoff_commits = []
@@ -258,14 +261,19 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
         cutoff_commits.append(f"^{merge_base}")
     else:
         for parent in last_rebase_merge_commit.parents:
-            # These are the commits that were head of dest and head of source during the previous rebase.
+            # These are the commits that were head of destination and head of source during the previous rebase.
             cutoff_commits.append(f"^{parent.hexsha}")
 
     logging.info("Cutoff commits: %s", cutoff_commits)
 
     # Fetch all downstream (non-merge) commits with full formatting.
     all_downstream_lines = gitwd.git.log(
-        "--reverse", "--topo-order", _COMMIT_LOG_FORMAT, "--no-merges", *cutoff_commits, f"dest/{dest.branch}"
+        "--reverse",
+        "--topo-order",
+        _COMMIT_LOG_FORMAT,
+        "--no-merges",
+        *cutoff_commits,
+        f"dest/{destination.ref}",
     ).splitlines()
     downstream_shas = {line.split(" || ", 1)[0].strip() for line in all_downstream_lines if line.strip()}
 
@@ -276,42 +284,42 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
     ordered_commits = []
     seen = set()
 
-    # Phase 1: Extract commits from the previous rebase PR first.
-    # The rebase PR carries establish the baseline and must be cherry-picked
+    # Phase 1: Extract commits from the previous synchronization PR first.
+    # The synchronization PR carries establish the baseline and must be cherry-picked
     # before any other downstream commits. PRs merged between when the
-    # rebasebot ran and when the rebase PR was merged sit on the dest
-    # branch first-parent path BEFORE the rebase PR merge. With
+    # rebasebot ran and when the synchronization PR was merged sit on the destination
+    # branch first-parent path BEFORE the synchronization PR merge. With
     # --topo-order alone, those first-parent commits can be placed before
     # the carries, breaking
     # dependencies (e.g. a PR that modifies a file created by a carry).
     if last_rebase_merge_commit is not None:
-        # Find the merge on dest that introduced the rebase branch.
+        # Find the merge on destination that introduced the publication branch.
         # This is the PR merge (--no-ff) whose non-first parent is an
-        # ancestor-or-equal to the rebase branch containing the synthetic
+        # ancestor-or-equal to the publication branch containing the synthetic
         # rebase merge commit.
         first_parent_merges = gitwd.git.rev_list(
-            "--reverse", "--first-parent", "--merges", *cutoff_commits, f"dest/{dest.branch}"
+            "--reverse", "--first-parent", "--merges", *cutoff_commits, f"dest/{destination.ref}"
         ).splitlines()
 
-        rebase_pr_merge = None
+        synchronization_pr_merge = None
         for merge_sha in first_parent_merges:
             commit = gitwd.commit(merge_sha)
-            # Pick the merge where rebase first enters dest history:
-            # - parent[0] is dest *before* this merge
+            # Pick the merge where rebase first enters destination history:
+            # - parent[0] is destination *before* this merge
             # - parent[1] is the incoming PR branch
             # So the rebase commit must be reachable from parent[1], but not
             # yet reachable from parent[0].
             if gitwd.is_ancestor(last_rebase_merge_commit, commit.parents[1]) and not gitwd.is_ancestor(
                 last_rebase_merge_commit, commit.parents[0]
             ):
-                rebase_pr_merge = commit
+                synchronization_pr_merge = commit
                 break
 
-        if rebase_pr_merge is not None:
-            logging.info("Found rebase PR merge on dest: %s", rebase_pr_merge.hexsha)
-            # Collect non-merge commits introduced by the previous rebase PR merge:
+        if synchronization_pr_merge is not None:
+            logging.info("Found synchronization PR merge on destination: %s", synchronization_pr_merge.hexsha)
+            # Collect non-merge commits introduced by the previous synchronization PR merge:
             # include everything reachable from merge commit, then subtract
-            # what was already on dest before that merge (parent[0]) and what
+            # what was already on destination before that merge (parent[0]) and what
             # was already present at previous rebase cutoffs.
             rebase_commits = gitwd.git.log(
                 "--reverse",
@@ -319,8 +327,8 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
                 _COMMIT_LOG_FORMAT,
                 "--no-merges",
                 *cutoff_commits,
-                f"^{rebase_pr_merge.parents[0].hexsha}",
-                rebase_pr_merge.hexsha,
+                f"^{synchronization_pr_merge.parents[0].hexsha}",
+                synchronization_pr_merge.hexsha,
             ).splitlines()
             # Keep only commits that are part of downstream set and not yet
             # emitted, so phase 1 establishes the carry baseline first.
@@ -338,12 +346,14 @@ def _identify_downstream_commits(gitwd: git.Repo, source: GitHubBranch, dest: Gi
             if phase1_extras:
                 extras_text = "\n".join(phase1_extras)
                 raise RepoException(
-                    "Phase 1 sanity check failed: commits from the rebase PR range are not downstream commits:\n"
+                    "Phase 1 sanity check failed: synchronization PR commits are not downstream commits:\n"
                     f"{extras_text}"
                 )
-            logging.info("Phase 1 - rebase PR carries (%d commits):\n%s", len(phase1_lines), "\n".join(phase1_lines))
+            logging.info(
+                "Phase 1 - synchronization PR carries (%d commits):\n%s", len(phase1_lines), "\n".join(phase1_lines)
+            )
         else:
-            logging.info("Could not find rebase PR merge on dest, skipping phase 1")
+            logging.info("Could not find synchronization PR merge on destination, skipping phase 1")
 
     # Phase 2: All remaining downstream commits in topo-order.
     phase2_lines = []
@@ -415,7 +425,7 @@ def _picked_commit_paths(gitwd: git.Repo, sha: str) -> set[str]:
     return {_unescape_git_path(line) for line in output.splitlines() if line}
 
 
-def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files: set | None = None) -> list:
+def _check_upstream_content_loss(gitwd: git.Repo, source_ref: str, only_files: set | None = None) -> list:
     """
     After a cherry-pick with -Xtheirs, check whether any upstream content
     was silently dropped from files modified by the cherry-picked commit.
@@ -427,7 +437,7 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
     If only_files is provided, only those files are checked (used to
     restrict verification to files that had actual merge conflicts).
     """
-    source_ref = f"refs/remotes/source/{source_branch}"
+    source_ref = f"refs/remotes/source/{source_ref}"
 
     if only_files is not None:
         files_to_check = only_files
@@ -454,7 +464,7 @@ def _check_upstream_content_loss(gitwd: git.Repo, source_branch: str, only_files
 
 
 def _safe_cherry_pick(
-    gitwd: git.Repo, sha: str, source_branch: str, conflict_policy: str, commit_description: str
+    gitwd: git.Repo, sha: str, source_ref: str, conflict_policy: str, commit_description: str
 ) -> CherryPickResult:
     """
     Cherry-pick a commit with conflict detection based on conflict_policy.
@@ -488,7 +498,7 @@ def _safe_cherry_pick(
         return CherryPickResult(created_commit=created_commit, content_loss=[])
 
     # Only verify files that had actual merge conflicts
-    lost_content = _check_upstream_content_loss(gitwd, source_branch, conflicted_files)
+    lost_content = _check_upstream_content_loss(gitwd, source_ref, conflicted_files)
     if not lost_content:
         return CherryPickResult(created_commit=created_commit, content_loss=[])
 
@@ -516,8 +526,8 @@ def _safe_cherry_pick(
 def _do_rebase(
     *,
     gitwd: git.Repo,
-    source: GitHubBranch,
-    dest: GitHubBranch,
+    source: GitHubReference,
+    destination: GitHubReference,
     source_repo: Repository,
     tag_policy: str,
     conflict_policy: str = "auto",
@@ -534,7 +544,7 @@ def _do_rebase(
     if allow_bot_squash:
         logging.info("Bot squashing is enabled.")
 
-    downstream_commits = _identify_downstream_commits(gitwd, source, dest)
+    downstream_commits = _identify_downstream_commits(gitwd, source, destination)
 
     commits_to_squash = defaultdict(list)
 
@@ -568,7 +578,7 @@ def _do_rebase(
                 )
                 continue
 
-        if not _add_to_rebase(commit_message, source_repo, tag_policy, gitwd, source.branch):
+        if not _should_carry_commit(commit_message, source_repo, tag_policy, gitwd, source.ref):
             logging.info("Dropping commit: %s - %s", sha, commit_message)
             dropped_commits.append(
                 DroppedCommit(
@@ -590,7 +600,7 @@ def _do_rebase(
         pick_result = _safe_cherry_pick(
             gitwd=gitwd,
             sha=sha,
-            source_branch=source.branch,
+            source_ref=source.ref,
             conflict_policy=conflict_policy,
             commit_description=f"{sha} - {commit_message}",
         )
@@ -607,7 +617,7 @@ def _do_rebase(
                 pick_result = _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit["sha"],
-                    source_branch=source.branch,
+                    source_ref=source.ref,
                     conflict_policy=conflict_policy,
                     commit_description=f"{commit['sha']} - {commit['commit_message']}",
                 )
@@ -635,8 +645,8 @@ def _do_rebase(
     return dropped_commits, content_loss_warnings
 
 
-def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBranch) -> None:
-    logging.info("Preparing rebase branch")
+def _prepare_publication_branch(gitwd: git.Repo, source: GitHubReference, destination: GitHubReference) -> None:
+    logging.info("Preparing publication branch")
 
     # Remove an old merge-tmp branch if it exists
     try:
@@ -646,10 +656,10 @@ def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBr
         pass
 
     # Create a merge tmp branch that matches the source branch head.
-    gitwd.git.checkout("-b", MERGE_TMP_BRANCH, f"refs/remotes/source/{source.branch}")
+    gitwd.git.checkout("-b", MERGE_TMP_BRANCH, f"refs/remotes/source/{source.ref}")
 
     # Make sure we are at the tip of our branch.
-    gitwd.git.checkout(f"dest/{dest.branch}")
+    gitwd.git.checkout(f"dest/{destination.ref}")
 
     # Perform the merge operation.
     commit = gitwd.git.commit_tree(
@@ -659,18 +669,18 @@ def _prepare_rebase_branch(gitwd: git.Repo, source: GitHubBranch, dest: GitHubBr
         "-p",
         MERGE_TMP_BRANCH,
         "-m",
-        f"merge upstream/{source.branch} into {dest.branch}",
+        f"merge upstream/{source.ref} into {destination.ref}",
     )
-    logging.info(f"Merging upstream/{source.branch} into {dest.branch}")
+    logging.info(f"Merging upstream/{source.ref} into {destination.ref}")
 
-    # Remove an old rebase branch if it exists
+    # Remove an old publication branch if it exists
     try:
-        gitwd.git.branch("-d", "rebase", force=True)
+        gitwd.git.branch("-d", PUBLICATION_WORK_BRANCH, force=True)
     except git.GitCommandError:
         # If the branch doesn't exist, git returns an error.
         pass
 
-    gitwd.git.checkout("-b", "rebase", commit)
+    gitwd.git.checkout("-b", PUBLICATION_WORK_BRANCH, commit)
 
 
 def _resolve_conflict(gitwd: git.Repo, sha: str) -> bool:
@@ -767,7 +777,7 @@ def _resolve_rebase_conflicts(gitwd: git.Repo, sha: str) -> bool:
 
 
 def _cherrypick_art_pull_request(
-    gitwd: git.Repo, dest_repo: Repository, dest: GitHubBranch, conflict_policy: str = "auto"
+    gitwd: git.Repo, destination_repo: Repository, destination: GitHubReference, conflict_policy: str = "auto"
 ) -> tuple[ArtPrInfo | None, list[ContentLossWarning]]:
     """
     Looks at the destination repository and if there is an open ART pull request
@@ -775,7 +785,7 @@ def _cherrypick_art_pull_request(
     """
     logging.info("Checking for ART pull request")
     content_loss_warnings: list[ContentLossWarning] = []
-    for pull_request in dest_repo.pull_requests(state="open", base=f"{dest.branch}"):
+    for pull_request in destination_repo.pull_requests(state="open", base=f"{destination.ref}"):
         assert isinstance(pull_request, ShortPullRequest)  # type hint
         if "consistent with ART" in pull_request.title and pull_request.user.login == "openshift-bot":
             logging.info(f"Found open ART image update pull requst: {pull_request.title}")
@@ -794,7 +804,7 @@ def _cherrypick_art_pull_request(
                 pick_result = _safe_cherry_pick(
                     gitwd=gitwd,
                     sha=commit.sha,
-                    source_branch=dest.branch,
+                    source_ref=destination.ref,
                     conflict_policy=conflict_policy,
                     commit_description=f"ART PR commit {commit.sha}",
                 )
@@ -812,42 +822,44 @@ def _cherrypick_art_pull_request(
     return None, content_loss_warnings
 
 
-def _is_push_required(gitwd: git.Repo, rebase: GitHubBranch) -> bool:
-    # Check if there is nothing to update in the open rebase PR.
-    if rebase.branch in gitwd.remotes.rebase.refs:
-        diff_index = gitwd.git.diff(f"rebase/{rebase.branch}")
+def _is_push_required(gitwd: git.Repo, publication: GitHubReference) -> bool:
+    # Check if there is nothing to update in the open synchronization PR.
+    if publication.ref in gitwd.remotes.rebase.refs:
+        diff_index = gitwd.git.diff(f"rebase/{publication.ref}")
         if len(diff_index) == 0:
-            logging.info("Existing rebase branch already contains source.")
+            logging.info("Existing publication branch already contains source.")
             return False
-        logging.info("Existing rebase branch contains changes.")
+        logging.info("Existing publication branch contains changes.")
 
     return True
 
 
-def _is_pr_required(gitwd: git.Repo, rebase: GitHubBranch, dest: GitHubBranch) -> bool:
+def _is_pr_required(gitwd: git.Repo, publication: GitHubReference, destination: GitHubReference) -> bool:
     """
-    Check if there are diffs between rebase and dest that would require a PR.
-    Content-based: looks at the diff between remote dest and remote rebase branches.
+    Check if there are diffs between publication and destination that would require a PR.
+    Content-based: looks at the diff between remote destination and remote publication branches.
     """
-    if dest.branch in gitwd.remotes.dest.refs and rebase.branch in gitwd.remotes.rebase.refs:
-        diff_index = gitwd.git.diff(f"dest/{dest.branch}...rebase/{rebase.branch}")
+    if destination.ref in gitwd.remotes.dest.refs and publication.ref in gitwd.remotes.rebase.refs:
+        diff_index = gitwd.git.diff(f"dest/{destination.ref}...rebase/{publication.ref}")
         if len(diff_index) == 0:
-            logging.info("Rebase branch does not introduce changes compared to dest.")
+            logging.info("Publication branch does not introduce changes compared to destination.")
             return False
-        logging.info("Rebase branch introduces changes compared to dest.")
+        logging.info("Publication branch introduces changes compared to destination.")
 
     return True
 
 
-def _is_pr_available(dest_repo: Repository, dest: GitHubBranch, rebase: GitHubBranch) -> tuple[ShortPullRequest, bool]:
+def _is_pr_available(
+    destination_repo: Repository, destination: GitHubReference, publication: GitHubReference
+) -> tuple[ShortPullRequest, bool]:
     logging.info("Checking for existing pull request")
 
-    pull_requests = dest_repo.pull_requests(base=dest.branch, state="open")
+    pull_requests = destination_repo.pull_requests(base=destination.ref, state="open")
     # Github does not support filtering cross-repository pull requests if both repositories
     # are owned by the same organization. We must filter client side.
     for pr in pull_requests:
         pr_repo = pr.as_dict()["head"]["repo"]["full_name"]
-        if pr_repo == f"{rebase.ns}/{rebase.name}" and pr.head.ref == rebase.branch:
+        if pr_repo == f"{publication.ns}/{publication.name}" and pr.head.ref == publication.ref:
             logging.info('Found existing pull request: "%s" %s', pr.title, pr.html_url)
             return pr, True
 
@@ -858,8 +870,8 @@ def _is_pr_available(dest_repo: Repository, dest: GitHubBranch, rebase: GitHubBr
 def _create_pr(
     *,
     gh_app: github3.GitHub,
-    dest: GitHubBranch,
-    rebase: GitHubBranch,
+    destination: GitHubReference,
+    publication: GitHubReference,
     title: str,
     body: str,
 ) -> ShortPullRequest:
@@ -874,13 +886,13 @@ def _create_pr(
     # https://github.com/sigmavirus24/github3.py/issues/1190
 
     gh_pr: requests.Response = gh_app._post(  # pylint: disable=W0212
-        f"https://api.github.com/repos/{dest.ns}/{dest.name}/pulls",
+        f"https://api.github.com/repos/{destination.ns}/{destination.name}/pulls",
         data={
             "title": title,
             "body": body,
-            "head": rebase.branch,
-            "head_repo": f"{rebase.ns}/{rebase.name}",
-            "base": dest.branch,
+            "head": publication.ref,
+            "head_repo": f"{publication.ns}/{publication.name}",
+            "base": destination.ref,
             "maintainer_can_modify": False,
         },
         json=True,
@@ -894,9 +906,9 @@ def _create_pr(
 
 def _init_working_dir(
     *,
-    source: GitHubBranch,
-    dest: GitHubBranch,
-    rebase: GitHubBranch,
+    source: GitHubReference,
+    destination: GitHubReference,
+    publication: GitHubReference,
     github_app_provider: GithubAppProvider,
     git_username: str,
     git_email: str,
@@ -921,8 +933,9 @@ def _init_working_dir(
 
     for remote, url in [
         ("source", source.url),
-        ("dest", dest.url),
-        ("rebase", rebase.url),
+        # Git remote names are part of the lifecycle hook interface.
+        ("dest", destination.url),
+        ("rebase", publication.url),
     ]:
         if remote in gitwd.remotes:
             gitwd.remotes[remote].set_url(url)
@@ -933,8 +946,8 @@ def _init_working_dir(
         config.set_value("credential", "useHttpPath", "true")
 
         for repo, credentials in [
-            (dest.url, github_app_provider.get_app_token()),
-            (rebase.url, github_app_provider.get_cloner_token()),
+            (destination.url, github_app_provider.get_destination_token()),
+            (publication.url, github_app_provider.get_publication_token()),
         ]:
             config.set_value(
                 f'credential "{repo}"',
@@ -953,85 +966,87 @@ def _init_working_dir(
                 config.set_value("user", "name", git_username)
             config.set_value("merge", "renameLimit", 999999)
 
-    logging.info("Fetching %s from dest", dest.branch)
-    gitwd.remotes.dest.fetch(dest.branch)
+    logging.info("Fetching %s from destination", destination.ref)
+    gitwd.remotes.dest.fetch(destination.ref)
 
-    logging.info("Fetching %s from source", source.branch)
-    gitwd.git.fetch("source", f"+{source.branch}:refs/remotes/source/{source.branch}")
+    logging.info("Fetching %s from source", source.ref)
+    gitwd.git.fetch("source", f"+{source.ref}:refs/remotes/source/{source.ref}")
 
     return gitwd
 
 
-def _prepare_replay_workdir(gitwd: git.Repo, source: GitHubBranch, rebase: GitHubBranch) -> None:
+def _prepare_rebase_workdir(gitwd: git.Repo, source: GitHubReference, publication: GitHubReference) -> None:
     logging.info("Fetching all tags from source")
     gitwd.remotes.source.fetch(refspec="refs/tags/*:refs/tags/*", filter="blob:none")
 
     logging.info("Fetching all branches from source")
     gitwd.remotes.source.fetch(refspec="refs/heads/*:refs/heads/*", update_head_ok=True, filter="blob:none")
 
-    logging.info("Checking for existing rebase branch %s in %s", rebase.branch, rebase.url)
+    logging.info("Checking for existing publication branch %s in %s", publication.ref, publication.url)
 
-    rebase_ref = gitwd.git.ls_remote("rebase", rebase.branch, heads=True)
-    if len(rebase_ref) > 0:
-        logging.info("Fetching existing rebase branch")
-        gitwd.remotes.rebase.fetch(rebase.branch)
+    publication_ref = gitwd.git.ls_remote("rebase", publication.ref, heads=True)
+    if len(publication_ref) > 0:
+        logging.info("Fetching existing publication branch")
+        gitwd.remotes.rebase.fetch(publication.ref)
 
-    # Reset the existing rebase branch to match the source branch
-    # or create a new rebase branch based on the source branch.
-    head_commit = gitwd.commit(f"refs/remotes/source/{source.branch}").hexsha
-    if "rebase" in gitwd.heads:
-        gitwd.heads.rebase.set_commit(head_commit)
+    # Reset the existing publication branch to match the source branch
+    # or create a new publication branch based on the source branch.
+    head_commit = gitwd.commit(f"refs/remotes/source/{source.ref}").hexsha
+    if PUBLICATION_WORK_BRANCH in gitwd.heads:
+        gitwd.heads[PUBLICATION_WORK_BRANCH].set_commit(head_commit)
     else:
-        gitwd.create_head("rebase", head_commit)
-    gitwd.git.checkout("rebase", force=True)
+        gitwd.create_head(PUBLICATION_WORK_BRANCH, head_commit)
+    gitwd.git.checkout(PUBLICATION_WORK_BRANCH, force=True)
     gitwd.head.reset(index=True, working_tree=True)
     # Clean any untracked files when reusing rebase directory
     gitwd.git.clean("-fd")
 
 
-def _manual_rebase_pr_in_repo(repo: Repository) -> ShortPullRequest | None:
+def _paused_pr_in_repo(repo: Repository) -> ShortPullRequest | None:
     """Checks for the presence of a rebase/manual label on the pull request."""
     prs = repo.pull_requests()
     for pull_req in prs:
         for label in pull_req.labels:
-            if label["name"] == "rebase/manual":
+            if label["name"] == AUTOMATION_PAUSE_LABEL:
                 return pull_req
     return None
 
 
-def _push_rebase_branch(gitwd: git.Repo, rebase: GitHubBranch) -> None:
-    """Force pushes current rebase branch to remote rebase branch."""
-    result = gitwd.remotes.rebase.push(refspec=f"HEAD:{rebase.branch}", force=True)
+def _push_publication_branch(gitwd: git.Repo, publication: GitHubReference) -> None:
+    """Force pushes current publication branch to remote publication branch."""
+    result = gitwd.remotes.rebase.push(refspec=f"HEAD:refs/heads/{publication.ref}", force=True)
 
     if result[0].flags & git.PushInfo.ERROR != 0:
-        raise builtins.Exception(f"Error pushing to {rebase}: {result[0].summary}")
+        raise builtins.Exception(f"Error pushing to {publication}: {result[0].summary}")
 
 
 def _update_pr_body(
     pull_req: ShortPullRequest,
     summary: RebaseSummary,
-    source: GitHubBranch,
-    dest: GitHubBranch,
+    source: GitHubReference,
+    destination: GitHubReference,
     prow_job: ProwJobContext,
 ) -> None:
     """Regenerate and overwrite the pull request body on every push."""
-    body = build_pr_body(summary, source, dest, prow_job)
+    body = build_pr_body(summary, source, destination, prow_job)
     logging.info("Updating pull request body")
     if not pull_req.update(body=body):
         raise PullRequestUpdateException(f"Error updating body for pull request: {pull_req.html_url}")
 
 
-def _update_pr_title(gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHubBranch, dest: GitHubBranch) -> None:
-    """Updates the pull request title to match the current state of the rebase branch
+def _update_pr_title(
+    gitwd: git.Repo, pull_req: ShortPullRequest, source: GitHubReference, destination: GitHubReference
+) -> None:
+    """Updates the pull request title to match the current state of the publication branch
     Only updates the title if the title contains the word Merge.
     Keeping everything before "Merge" and updating everything after.
     This prevents jira link or tags from being removed.
     """
-    source_head_commit = gitwd.git.rev_parse(f"refs/remotes/source/{source.branch}^{{commit}}", short=7)
+    source_head_commit = gitwd.git.rev_parse(f"refs/remotes/source/{source.ref}^{{commit}}", short=7)
 
     if pull_req.title.count("Merge") == 1:
         tags = pull_req.title.split("Merge")[0]
-        computed_title = f"{tags}Merge {source.web_url} ({source_head_commit}) into {dest.branch}"
+        computed_title = f"{tags}Merge {source.web_url} ({source_head_commit}) into {destination.ref}"
 
         if computed_title == pull_req.title:
             # No update required
@@ -1051,41 +1066,41 @@ def _report_result(  # pylint: disable=R0917
     pr_required: bool,
     pr_available: bool,
     pr_url: str,
-    dest: GitHubBranch,
+    destination: GitHubReference,
     *,
     notify_slack: Callable[[str, str], None],
 ) -> None:
     """Reports the result of sucessful rebasebot run to slack and log."""
-    label = dest.label
+    label = destination.label
     message = None
     if needs_rebase:
         if not pr_available:
             if pr_required:
-                # Case 1: either source or dest repos were updated and there is no PR yet.
+                # Case 1: either source or destination repos were updated and there is no PR yet.
                 # We create a new PR then.
-                message = f"Created a new rebase PR for `{label}`: <{pr_url}|view PR>"
+                message = f"Created a new synchronization PR for `{label}`: <{pr_url}|view PR>"
             else:
-                # Rebase was performed but rebase branch has same content as dest.
+                # Rebase was performed but publication branch has same content as destination.
                 # No PR is required.
                 message = f"`{label}` already contains the latest changes"
         else:
             # Case 2: repos were updated recently, but we already have an open PR.
             # We updated the exiting PR.
-            message = f"Updated the rebase PR for `{label}`: <{pr_url}|view PR>"
+            message = f"Updated the synchronization PR for `{label}`: <{pr_url}|view PR>"
     elif pr_url:
         if pr_required and not pr_available:
             # Case 3: No rebase needed, but hooks made changes requiring a new PR.
-            message = f"Created a new rebase PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
+            message = f"Created a new synchronization PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
         elif pr_required and pr_available:
             # Case 4: No rebase needed, but hooks made changes to an existing PR.
-            message = f"Updated the rebase PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
+            message = f"Updated the synchronization PR for `{label}` (hooks enabled): <{pr_url}|view PR>"
         elif pr_available:
             # Case 5: we created a PR, but no changes were done to the repos after that.
             # Just inform that the PR is in a good shape.
             message = f"`{label}` already contains the latest changes: <{pr_url}|view PR>"
     else:
-        # Case 6: source and dest repos are the same (git diff is empty), and there is no PR.
-        # Just inform that there is nothing to update in the dest repository.
+        # Case 6: source and destination repos are the same (git diff is empty), and there is no PR.
+        # Just inform that there is nothing to update in the destination repository.
         message = f"`{label}` already contains the latest changes"
 
     if message is not None:
@@ -1093,31 +1108,31 @@ def _report_result(  # pylint: disable=R0917
         notify_slack(message, "✅")
 
 
-def _sync_upstream(
+def _run_merge_mode(
     *,
     gitwd: git.Repo,
-    source: GitHubBranch,
-    dest: GitHubBranch,
-    rebase: GitHubBranch,
-    dest_repo: Repository,
+    source: GitHubReference,
+    destination: GitHubReference,
+    publication: GitHubReference,
+    destination_repo: Repository,
     gh_app: github3.GitHub,
     notifier: SlackNotifier,
     prow_job: ProwJobContext,
     dry_run: bool,
-    ignore_manual_label: bool,
+    manual_override: bool,
     title_prefix: str,
 ) -> bool:
     """Publish a clean merge, or the upstream tip when conflicts require manual resolution."""
-    upstream = gitwd.commit(f"refs/remotes/source/{source.branch}").hexsha
-    downstream = gitwd.commit(f"dest/{dest.branch}").hexsha
+    upstream = gitwd.commit(f"refs/remotes/source/{source.ref}").hexsha
+    downstream = gitwd.commit(f"dest/{destination.ref}").hexsha
     logging.info("Upstream: %s; downstream: %s", upstream, downstream)
     if not gitwd.merge_base(upstream, downstream):
         raise RepoException("Upstream and downstream have no common ancestor.")
 
     # Refresh the PR after fetching, before touching its branch.
-    pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
-    if not ignore_manual_label and pull_req and any(label["name"] == "rebase/manual" for label in pull_req.labels):
-        logging.info("Manual override detected on %s; skipping sync.", pull_req.html_url)
+    pull_req, pr_available = _is_pr_available(destination_repo, destination, publication)
+    if not manual_override and pull_req and any(label["name"] == AUTOMATION_PAUSE_LABEL for label in pull_req.labels):
+        logging.info("Automation pause detected on %s; skipping synchronization.", pull_req.html_url)
         return True
 
     synchronized = gitwd.is_ancestor(upstream, downstream)
@@ -1125,7 +1140,7 @@ def _sync_upstream(
         logging.info("Downstream already contains upstream.")
         return True
     if dry_run:
-        logging.info("Dry run: would sync upstream changes to %s. No push or PR update.", rebase.label)
+        logging.info("Dry run: would sync upstream changes to %s. No push or PR update.", publication.label)
         return True
 
     status, merged_tree, stderr = gitwd.git.merge_tree(
@@ -1136,7 +1151,7 @@ def _sync_upstream(
     has_conflicts = status == 1
     tree = merged_tree.splitlines()[0]
 
-    remote_ref = f"refs/heads/{rebase.branch}"
+    remote_ref = f"refs/heads/{publication.ref}"
     remote = gitwd.git.ls_remote("--heads", "rebase", remote_ref)
     remote_sha = remote.split()[0] if remote else ""
     published = downstream
@@ -1162,46 +1177,46 @@ def _sync_upstream(
                 "-p",
                 upstream,
                 "-m",
-                f"Merge upstream/{source.branch} into {dest.branch}",
+                f"Merge upstream/{source.ref} into {destination.ref}",
             )
     if remote_sha != published:
         gitwd.git.push(f"--force-with-lease={remote_ref}:{remote_sha}", "rebase", f"{published}:{remote_ref}")
-        logging.info("Sync branch updated to %s.", published)
+        logging.info("Publication branch updated to %s.", published)
     else:
-        logging.info("Sync branch already contains upstream changes; no push required.")
+        logging.info("Publication branch already contains upstream changes; no push required.")
 
     if not pr_available:
-        title = f"Sync upstream {source.branch} into {dest.branch}"
+        title = f"Sync upstream {source.ref} into {destination.ref}"
         if title_prefix:
             title = f"{title_prefix}: {title}"
         pull_req = _create_pr(
             gh_app=gh_app,
-            dest=dest,
-            rebase=rebase,
+            destination=destination,
+            publication=publication,
             title=title,
-            body=build_merge_pr_body(source, dest, rebase, prow_job),
+            body=build_merge_pr_body(source, destination, publication, prow_job),
         )
 
     body = build_merge_pr_body(
-        source, dest, rebase, prow_job, conflicted_pr_number=pull_req.number if has_conflicts else None
+        source, destination, publication, prow_job, conflicted_pr_number=pull_req.number if has_conflicts else None
     )
     if pull_req.body != body and not pull_req.update(body=body):
         raise PullRequestUpdateException(f"Error updating body for pull request: {pull_req.html_url}")
 
     if synchronized:
-        logging.info("Downstream already contains upstream; pending sync branch now matches downstream.")
+        logging.info("Downstream already contains upstream; pending publication branch now matches downstream.")
         return True
     pr_url = pull_req.html_url
-    logging.info("Upstream sync PR: %s", pr_url)
-    notifier.notify(f"Upstream sync for `{dest.label}`: <{pr_url}|view PR>", "✅")
+    logging.info("Synchronization PR: %s", pr_url)
+    notifier.notify(f"Synchronization PR for `{destination.label}`: <{pr_url}|view PR>", "✅")
     return True
 
 
 def run(
     *,
-    source: GitHubBranch,
-    dest: GitHubBranch,
-    rebase: GitHubBranch,
+    source: GitHubReference,
+    destination: GitHubReference,
+    publication: GitHubReference,
     working_dir: str,
     git_username: str,
     git_email: str,
@@ -1214,11 +1229,11 @@ def run(
     hooks: lifecycle_hooks.LifecycleHooks = None,
     update_go_modules: bool = False,
     dry_run: bool = False,
-    ignore_manual_label: bool = False,
+    manual_override: bool = False,
     always_run_hooks: bool = False,
     title_prefix: str = "",
     prow_job: ProwJobContext | None = None,
-    sync_mode: str = "replay",
+    sync_mode: str = "rebase",
 ) -> bool:
     """Run Rebase Bot."""
     if prow_job is None:
@@ -1226,16 +1241,16 @@ def run(
 
     notifier = SlackNotifier(slack_webhook, prow_job)
     manual_intervention_description = (
-        f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
+        f"Manual intervention is needed to synchronize {source.web_url} into {destination.label}"
     )
 
-    gh_app = github_app_provider.github_app
-    gh_cloner_app = github_app_provider.github_cloner_app
+    gh_app = github_app_provider.github_destination_app
+    gh_publication_app = github_app_provider.github_publication_app
 
     if hooks is None:
         hooks = lifecycle_hooks.LifecycleHooks(tmp_script_dir=None, args=None)
 
-    if sync_mode not in ("replay", "merge"):
+    if sync_mode not in ("rebase", "merge"):
         logging.error("Unknown sync mode: %s", sync_mode)
         return False
     if sync_mode == "merge" and (
@@ -1247,40 +1262,44 @@ def run(
         or update_go_modules
         or always_run_hooks
     ):
-        logging.error("Merge mode does not support replay policies or lifecycle hooks.")
+        logging.error("Merge mode does not support rebase policies or lifecycle hooks.")
         return False
-    if sync_mode == "merge" and (dest.ns, dest.name, dest.branch) == (rebase.ns, rebase.name, rebase.branch):
-        logging.error("Merge mode requires a sync branch separate from the downstream branch.")
+    if sync_mode == "merge" and (destination.ns, destination.name, destination.ref) == (
+        publication.ns,
+        publication.name,
+        publication.ref,
+    ):
+        logging.error("Merge mode requires a publication branch separate from the destination branch.")
         return False
 
     try:
-        dest_repo = gh_app.repository(dest.ns, dest.name)
-        logging.info("Destination repository is %s", dest_repo.clone_url)
-        rebase_repo = gh_cloner_app.repository(rebase.ns, rebase.name)
-        logging.info("rebase repository is %s", rebase_repo.clone_url)
+        destination_repo = gh_app.repository(destination.ns, destination.name)
+        logging.info("Destination repository is %s", destination_repo.clone_url)
+        publication_repo = gh_publication_app.repository(publication.ns, publication.name)
+        logging.info("Publication repository is %s", publication_repo.clone_url)
         source_repo = gh_app.repository(source.ns, source.name)
         logging.info("source repository is %s", source_repo.clone_url)
 
-        if not ignore_manual_label:
+        if not manual_override:
             if sync_mode == "merge":
-                pull_req, _ = _is_pr_available(dest_repo, dest, rebase)
-                if pull_req and not any(label["name"] == "rebase/manual" for label in pull_req.labels):
+                pull_req, _ = _is_pr_available(destination_repo, destination, publication)
+                if pull_req and not any(label["name"] == AUTOMATION_PAUSE_LABEL for label in pull_req.labels):
                     pull_req = None
             else:
-                pull_req = _manual_rebase_pr_in_repo(dest_repo)
+                pull_req = _paused_pr_in_repo(destination_repo)
             if pull_req is not None:
                 logging.info(
-                    f"Repo {dest_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
+                    f"Repo {destination_repo.clone_url} has PR {pull_req.html_url} with 'rebase/manual' label, aborting"
                 )
                 notifier.notify(
-                    f"`{dest.label}` has `rebase/manual` label set on <{pull_req.html_url}|PR> — skipping",
+                    f"`{destination.label}` has `rebase/manual` label set on <{pull_req.html_url}|PR> — skipping",
                     "🖐️",
                 )
                 return True
 
     except Exception as ex:
         logging.exception("error fetching repo information from GitHub")
-        notify_slack_error(notifier, f"Failed to fetch repo information from GitHub for `{dest.label}`", ex)
+        notify_slack_error(notifier, f"Failed to fetch repo information from GitHub for `{destination.label}`", ex)
         return False
 
     try:
@@ -1291,65 +1310,65 @@ def run(
     try:
         gitwd = _init_working_dir(
             source=source,
-            dest=dest,
-            rebase=rebase,
+            destination=destination,
+            publication=publication,
             github_app_provider=github_app_provider,
             git_username=git_username,
             git_email=git_email,
             workdir=working_dir,
         )
-        if sync_mode == "replay":
-            _prepare_replay_workdir(gitwd, source, rebase)
+        if sync_mode == "rebase":
+            _prepare_rebase_workdir(gitwd, source, publication)
     except Exception as ex:
         logging.exception(
             "error initializing the git directory with remotes: ",
             extra={
                 "working_dir": working_dir,
                 "source_repo": source.url,
-                "dest_repo": dest.url,
-                "rebase_repo": rebase.url,
+                "destination_repo": destination.url,
+                "publication_repo": publication.url,
             },
         )
         notify_slack_error(
             notifier,
-            f"Failed to initialize git working directory for `{dest.label}` "
-            f"(source `{source.url}`, rebase `{rebase.url}`)",
+            f"Failed to initialize Git working directory for destination `{destination.label}` "
+            f"(source repository `{source.url}`, publication repository `{publication.url}`)",
             ex,
         )
         return False
 
     if sync_mode == "merge":
         try:
-            return _sync_upstream(
+            return _run_merge_mode(
                 gitwd=gitwd,
                 source=source,
-                dest=dest,
-                rebase=rebase,
-                dest_repo=dest_repo,
+                destination=destination,
+                publication=publication,
+                destination_repo=destination_repo,
                 gh_app=gh_app,
                 notifier=notifier,
                 prow_job=prow_job,
                 dry_run=dry_run,
-                ignore_manual_label=ignore_manual_label,
+                manual_override=manual_override,
                 title_prefix=title_prefix,
             )
         except Exception as ex:
-            logging.exception("Failed to sync upstream into %s", dest.label)
-            notify_slack_error(notifier, f"Failed to sync upstream into `{dest.label}`", ex)
+            logging.exception("Failed to sync upstream into %s", destination.label)
+            notify_slack_error(notifier, f"Failed to sync upstream into `{destination.label}`", ex)
             return False
 
     try:
         hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
     except Exception as ex:
         logging.exception("error fetching lifecycle hook scripts")
-        notify_slack_error(notifier, f"Failed to fetch lifecycle hook scripts for `{dest.label}`", ex)
+        notify_slack_error(notifier, f"Failed to fetch lifecycle hook scripts for `{destination.label}`", ex)
         return False
 
     try:
-        needs_rebase = _needs_rebase(gitwd, source, dest)
+        needs_rebase = _needs_rebase(gitwd, source, destination)
         if needs_rebase:
             upstream_commit_count = int(
-                gitwd.git.rev_list("--count", f"dest/{dest.branch}..refs/remotes/source/{source.branch}")
+                gitwd.git.rev_list("--count", f"dest/{destination.ref}..refs/remotes/source/{source.ref}")
             )
         else:
             upstream_commit_count = 0
@@ -1359,12 +1378,12 @@ def run(
 
         if needs_rebase:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
-            _prepare_rebase_branch(gitwd, source, dest)
+            _prepare_publication_branch(gitwd, source, destination)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
             dropped_commits, content_loss_warnings = _do_rebase(
                 gitwd=gitwd,
                 source=source,
-                dest=dest,
+                destination=destination,
                 source_repo=source_repo,
                 tag_policy=tag_policy,
                 conflict_policy=conflict_policy,
@@ -1373,17 +1392,19 @@ def run(
                 update_go_modules=update_go_modules,
             )
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
-            art_pr, art_content_loss = _cherrypick_art_pull_request(gitwd, dest_repo, dest, conflict_policy)
+            art_pr, art_content_loss = _cherrypick_art_pull_request(
+                gitwd, destination_repo, destination, conflict_policy
+            )
             content_loss_warnings = content_loss_warnings + art_content_loss
         elif always_run_hooks:
             # When no rebase is needed but hooks should still run,
-            # reset the rebase branch to dest (which already contains source)
+            # reset the publication branch to destination (which already contains source)
             # so that hooks run on top of all downstream carry commits.
             # Without this, hooks would run on top of the source branch,
-            # producing a rebase branch that is missing all carry commits
+            # producing a publication branch that is missing all carry commits
             # and causing merge conflicts when creating a PR.
-            logging.info("No rebase needed, but --always-run-hooks is set. Running hooks on top of dest branch.")
-            gitwd.git.reset("--hard", f"dest/{dest.branch}")
+            logging.info("No rebase needed. --always-run-hooks runs hooks on the destination branch.")
+            gitwd.git.reset("--hard", f"dest/{destination.ref}")
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_REBASE)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CARRY_COMMIT)
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.POST_REBASE)
@@ -1396,17 +1417,15 @@ def run(
         )
 
     except (RepoException, LifecycleHookScriptException) as ex:
-        logging.error(
-            f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
-        )
+        logging.error(f"Manual intervention is needed to synchronize {source.web_url} into {destination.label}")
         notify_slack_error(notifier, manual_intervention_description, ex)
         return False
     except Exception as ex:
-        logging.exception(f"exception when trying to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}")
+        logging.exception(f"Exception when reapplying carries from {source.web_url} into {destination.label}")
 
         notify_slack_error(
             notifier,
-            f"Failed to rebase `{source.web_url}` into `{dest.label}`",
+            f"Failed to rebase `{source.web_url}` into `{destination.label}`",
             ex,
         )
         return False
@@ -1415,28 +1434,26 @@ def run(
         logging.info("Dry run mode is enabled. Do not create a PR.")
         return True
 
-    push_required = _is_push_required(gitwd, rebase)
-    pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
+    push_required = _is_push_required(gitwd, publication)
+    pull_req, pr_available = _is_pr_available(destination_repo, destination, publication)
     pr_url = pull_req.html_url if pull_req is not None else ""
     pr_required = False
 
-    # Push the rebase branch to the remote repository.
+    # Push the publication branch to the remote repository.
     if push_required:
-        logging.info("Existing rebase branch needs to be updated.")
+        logging.info("Existing publication branch needs to be updated.")
         try:
-            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
-            _push_rebase_branch(gitwd, rebase)
+            hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_PUBLICATION)
+            _push_publication_branch(gitwd, publication)
         except LifecycleHookScriptException as ex:
-            logging.error(
-                f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
-            )
+            logging.error(f"Manual intervention is needed to synchronize {source.web_url} into {destination.label}")
             notify_slack_error(notifier, manual_intervention_description, ex)
             return False
         except Exception as ex:
-            logging.exception(f"error pushing to {rebase.ns}/{rebase.name}:{rebase.branch}")
+            logging.exception(f"error pushing to {publication.ns}/{publication.name}:{publication.ref}")
             notify_slack_error(
                 notifier,
-                f"Failed to push rebase branch to `{rebase.label}` for `{dest.label}`",
+                f"Failed to push publication branch to `{publication.label}` for `{destination.label}`",
                 ex,
             )
             return False
@@ -1444,17 +1461,17 @@ def run(
     if pr_available:
         # the branch was rebased, but the open PR already exists, update its title and body.
         try:
-            _update_pr_title(gitwd, pull_req, source, dest)
+            _update_pr_title(gitwd, pull_req, source, destination)
             # Skip only on a fully idle run: rebase_summary is empty there and could
             # clobber a body describing an earlier real rebase. always_run_hooks never
             # populates rebase_summary either, so refreshing on that path is always safe.
             if needs_rebase or always_run_hooks:
-                _update_pr_body(pull_req, rebase_summary, source, dest, prow_job)
+                _update_pr_body(pull_req, rebase_summary, source, destination, prow_job)
         except Exception as ex:
-            logging.exception(f"error updating PR {dest.ns}/{dest.name} #{pull_req.id}")
+            logging.exception(f"error updating PR {destination.ns}/{destination.name} #{pull_req.id}")
             notify_slack_error(
                 notifier,
-                f"Failed to update PR #{pull_req.id} for `{dest.label}`",
+                f"Failed to update PR #{pull_req.id} for `{destination.label}`",
                 ex,
             )
             return False
@@ -1462,39 +1479,37 @@ def run(
     try:
         if not pr_available:
             hooks.execute_scripts_for_hook(hook=lifecycle_hooks.LifecycleHook.PRE_CREATE_PR)
-            pr_required = _is_pr_required(gitwd, rebase, dest)
+            pr_required = _is_pr_required(gitwd, publication, destination)
             if pr_required:
-                source_head_commit = gitwd.git.rev_parse(f"refs/remotes/source/{source.branch}^{{commit}}", short=7)
-                title = f"Merge {source.web_url} ({source_head_commit}) into {dest.branch}"
+                source_head_commit = gitwd.git.rev_parse(f"refs/remotes/source/{source.ref}^{{commit}}", short=7)
+                title = f"Merge {source.web_url} ({source_head_commit}) into {destination.ref}"
                 if title_prefix:
                     title = f"{title_prefix}: {title}"
                 pull_req = _create_pr(
                     gh_app=gh_app,
-                    dest=dest,
-                    rebase=rebase,
+                    destination=destination,
+                    publication=publication,
                     title=title,
-                    body=build_pr_body(rebase_summary, source, dest, prow_job),
+                    body=build_pr_body(rebase_summary, source, destination, prow_job),
                 )
                 pr_url = pull_req.html_url
             else:
-                logging.info("No PR required - no changes between rebase and dest.")
+                logging.info("No PR required - no changes between publication and destination.")
                 pr_url = None
     except LifecycleHookScriptException as ex:
-        logging.error(
-            f"Manual intervention is needed to rebase {source.web_url} into {dest.ns}/{dest.name}:{dest.branch}"
-        )
+        logging.error(f"Manual intervention is needed to synchronize {source.web_url} into {destination.label}")
         notify_slack_error(notifier, manual_intervention_description, ex)
         return False
     except requests.exceptions.HTTPError as ex:
         logging.error(f"Failed to create a pull request: {ex}\n Response: %s", ex.response.text)
-        notify_slack_error(notifier, f"Failed to create a pull request for `{dest.label}`", ex)
+        notify_slack_error(notifier, f"Failed to create a pull request for `{destination.label}`", ex)
 
         return False
     except Exception as ex:
-        logging.exception(f"error creating a rebase PR in {dest.ns}/{dest.name}")
-        notify_slack_error(notifier, f"Failed to create a rebase PR for `{dest.label}`", ex)
+        logging.exception(f"error creating a synchronization PR in {destination.ns}/{destination.name}")
+        notify_slack_error(notifier, f"Failed to create a synchronization PR for `{destination.label}`", ex)
 
         return False
 
-    _report_result(needs_rebase, pr_required, pr_available, pr_url, dest, notify_slack=notifier.notify)
+    _report_result(needs_rebase, pr_required, pr_available, pr_url, destination, notify_slack=notifier.notify)
     return True

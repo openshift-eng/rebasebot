@@ -86,28 +86,28 @@ class TestProwJobContext:
 
 class TestRehearsalSlackSuppression:
     @patch("rebasebot.bot._create_pr")
-    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._push_publication_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
     def test_rehearsal_run_skips_slack_but_creates_pr(
         self,
         mocked_post,
         mocked_is_pr_available,
-        mocked_push_rebase_branch,
+        mocked_push_publication_branch,
         mocked_create_pr,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
     ):
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         CommitBuilder(source).update_file("test.go", "new content").commit("update test.go")
-        CommitBuilder(dest).remove_file("test.go").commit("remove test.go")
-        with CommitBuilder(dest) as cb:
+        CommitBuilder(destination).remove_file("test.go").commit("remove test.go")
+        with CommitBuilder(destination) as cb:
             cb.commit("Empty commit")
 
         mocked_is_pr_available.return_value = None, False
-        mocked_push_rebase_branch.return_value = True
-        mocked_create_pr.return_value.html_url = "https://github.com/dest/dest/pull/99"
+        mocked_push_publication_branch.return_value = True
+        mocked_create_pr.return_value.html_url = "https://github.com/destination/destination/pull/99"
 
         rehearsal = ProwJobContext(
             job_name="rehearse-1234-periodic-openshift-release-rebasebot",
@@ -115,11 +115,11 @@ class TestRehearsalSlackSuppression:
             build_id="12345",
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="rebase")
         args.source = source
         args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
+        args.destination = destination
+        args.publication = publication
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
@@ -128,14 +128,14 @@ class TestRehearsalSlackSuppression:
         args.exclude_commits = []
         args.update_go_modules = False
         args.conflict_policy = "auto"
-        args.ignore_manual_label = False
+        args.manual_override = False
         args.dry_run = False
         args.always_run_hooks = False
         args.title_prefix = ""
         args.pre_rebase_hook = None
         args.pre_carry_commit_hook = None
         args.post_rebase_hook = None
-        args.pre_push_rebase_branch_hook = None
+        args.pre_publication_hook = None
         args.pre_create_pr_hook = None
 
         with patch("rebasebot.prow.ProwJobContext.from_env", return_value=rehearsal):

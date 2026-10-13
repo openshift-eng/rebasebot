@@ -21,15 +21,15 @@ from rebasebot import cli, lifecycle_hooks
 from rebasebot.bot import (
     PullRequestUpdateException,
     RepoException,
-    _add_to_rebase,
     _is_pr_available,
     _is_pr_required,
     _report_result,
+    _should_carry_commit,
     _update_pr_body,
     _update_pr_title,
     notify_slack_error,
 )
-from rebasebot.github import GitHubBranch
+from rebasebot.github import GitHubReference
 from rebasebot.pr_body import build_pr_body
 from rebasebot.prow import ProwJobContext
 from rebasebot.rebase_summary import RebaseSummary
@@ -42,8 +42,8 @@ class TestGoMod:
     def _args_stub(_, repo_dir, source) -> MagicMock:
         args = MagicMock()
         args.source = source
-        args.dest = GitHubBranch(repo_dir, "example", "foo", "dest")
-        args.rebase = GitHubBranch(repo_dir, "example", "foo", "rebase")
+        args.destination = GitHubReference(repo_dir, "example", "foo", "destination")
+        args.publication = GitHubReference(repo_dir, "example", "foo", "publication")
         args.working_dir = repo_dir
         args.git_username = "unittest"
         args.git_email = "unit@test.org"
@@ -57,9 +57,9 @@ class TestGoMod:
         repo.git.add(all=True)
         repo.git.commit("-m", "Init go module")
 
-        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        source = GitHubReference(repo_dir, "example", "foo", repo.active_branch.name)
         repo.create_remote("source", source.url)
-        repo.remotes.source.fetch(source.branch)
+        repo.remotes.source.fetch(source.ref)
 
         lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
         update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
@@ -80,9 +80,9 @@ class TestGoMod:
         repo.git.add(all=True)
         repo.git.commit("-m", "Init go workspace")
 
-        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        source = GitHubReference(repo_dir, "example", "foo", repo.active_branch.name)
         repo.create_remote("source", source.url)
-        repo.remotes.source.fetch(source.branch)
+        repo.remotes.source.fetch(source.ref)
 
         lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
         update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
@@ -104,9 +104,9 @@ class TestGoMod:
         repo.git.add(all=True)
         repo.git.commit("-m", "Init broken go module")
 
-        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        source = GitHubReference(repo_dir, "example", "foo", repo.active_branch.name)
         repo.create_remote("source", source.url)
-        repo.remotes.source.fetch(source.branch)
+        repo.remotes.source.fetch(source.ref)
 
         lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
         update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
@@ -126,9 +126,9 @@ class TestGoMod:
         repo.git.add(all=True)
         repo.git.commit("-m", "tidy and vendor go stuff")
 
-        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        source = GitHubReference(repo_dir, "example", "foo", repo.active_branch.name)
         repo.create_remote("source", source.url)
-        repo.remotes.source.fetch(source.branch)
+        repo.remotes.source.fetch(source.ref)
 
         lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
         update_go_modules_script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules.sh")
@@ -146,8 +146,8 @@ class TestGoModNoVendor:
     def _args_stub(_, repo_dir, source) -> MagicMock:
         args = MagicMock()
         args.source = source
-        args.dest = GitHubBranch(repo_dir, "example", "foo", "dest")
-        args.rebase = GitHubBranch(repo_dir, "example", "foo", "rebase")
+        args.destination = GitHubReference(repo_dir, "example", "foo", "destination")
+        args.publication = GitHubReference(repo_dir, "example", "foo", "publication")
         args.working_dir = repo_dir
         args.git_username = "unittest"
         args.git_email = "unit@test.org"
@@ -161,9 +161,9 @@ class TestGoModNoVendor:
         repo.git.add(all=True)
         repo.git.commit("-m", "Init go module")
 
-        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        source = GitHubReference(repo_dir, "example", "foo", repo.active_branch.name)
         repo.create_remote("source", source.url)
-        repo.remotes.source.fetch(source.branch)
+        repo.remotes.source.fetch(source.ref)
 
         lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
         script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules_no_vendor.sh")
@@ -184,9 +184,9 @@ class TestGoModNoVendor:
         repo.git.add(all=True)
         repo.git.commit("-m", "Init go workspace")
 
-        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        source = GitHubReference(repo_dir, "example", "foo", repo.active_branch.name)
         repo.create_remote("source", source.url)
-        repo.remotes.source.fetch(source.branch)
+        repo.remotes.source.fetch(source.ref)
 
         lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
         script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules_no_vendor.sh")
@@ -212,9 +212,9 @@ class TestGoModNoVendor:
         repo.git.add(all=True)
         repo.git.commit("-m", "Init broken go module")
 
-        source = GitHubBranch(repo_dir, "example", "foo", repo.active_branch.name)
+        source = GitHubReference(repo_dir, "example", "foo", repo.active_branch.name)
         repo.create_remote("source", source.url)
-        repo.remotes.source.fetch(source.branch)
+        repo.remotes.source.fetch(source.ref)
 
         lifecycle_hooks._setup_environment_variables(self._args_stub(repo_dir, source))
         script = lifecycle_hooks.LifecycleHookScript("_BUILTIN_/update_go_modules_no_vendor.sh")
@@ -253,64 +253,64 @@ class TestCommitMessageTags:
             (False, "UPSTREAM: commit message", "strict", Exception("Unknown commit message tag: commit message")),
         ),
     )
-    @patch("rebasebot.bot._is_pr_merged")
+    @patch("rebasebot.bot._is_pr_included_upstream")
     def test_commit_messages_tags(self, mocked_is_pr_merged, pr_is_merged, commit_message, tag_policy, expected):
         mocked_is_pr_merged.return_value = pr_is_merged
         mock_gitwd = MagicMock()
         mock_source_branch = "main"
         if isinstance(expected, Exception):
             with pytest.raises(Exception, match=str(expected)):
-                _add_to_rebase(commit_message, None, tag_policy, mock_gitwd, mock_source_branch)
+                _should_carry_commit(commit_message, None, tag_policy, mock_gitwd, mock_source_branch)
         else:
-            assert _add_to_rebase(commit_message, None, tag_policy, mock_gitwd, mock_source_branch) == expected
+            assert _should_carry_commit(commit_message, None, tag_policy, mock_gitwd, mock_source_branch) == expected
 
 
 class TestIsPrAvailable:
     @pytest.fixture
-    def dest_repo(self):
+    def destination_repo(self):
         return MagicMock()
 
     @pytest.fixture
-    def dest(self):
-        dest = MagicMock()
-        dest.ns = "test-namespace"
-        dest.name = "dest-repo"
-        dest.branch = "dest-branch"
-        return dest
+    def destination(self):
+        destination = MagicMock()
+        destination.ns = "test-namespace"
+        destination.name = "destination-repo"
+        destination.ref = "destination-branch"
+        return destination
 
     @pytest.fixture
-    def rebase(self):
-        rebase = MagicMock()
-        rebase.ns = "test-namespace"
-        rebase.name = "rebase-repo"
-        rebase.branch = "rebase-branch"
-        return rebase
+    def publication(self):
+        publication = MagicMock()
+        publication.ns = "test-namespace"
+        publication.name = "rebase-repo"
+        publication.ref = "rebase-branch"
+        return publication
 
-    def test_is_pr_available(self, dest_repo, dest, rebase):
+    def test_is_pr_available(self, destination_repo, destination, publication):
         # Test when pull request exists
         gh_pr = MagicMock()
         gh_pr.as_dict.return_value = {"head": {"repo": {"full_name": "test-namespace/rebase-repo"}}}
-        gh_pr.head.ref = rebase.branch
+        gh_pr.head.ref = publication.ref
         gh_pr.state = "open"
-        dest_repo.pull_requests.return_value = [gh_pr]
+        destination_repo.pull_requests.return_value = [gh_pr]
 
-        pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
-        dest_repo.pull_requests.assert_called_once_with(base="dest-branch", state="open")
+        pr, pr_available = _is_pr_available(destination_repo, destination, publication)
+        destination_repo.pull_requests.assert_called_once_with(base="destination-branch", state="open")
         assert pr == gh_pr
         assert pr_available is True
 
-    def test_is_pr_available_not_found(self, dest_repo, dest, rebase):
+    def test_is_pr_available_not_found(self, destination_repo, destination, publication):
         # Test when pull request doesn't exist
-        dest_repo.pull_requests.return_value = []
-        pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
-        dest_repo.pull_requests.assert_called_with(base="dest-branch", state="open")
+        destination_repo.pull_requests.return_value = []
+        pr, pr_available = _is_pr_available(destination_repo, destination, publication)
+        destination_repo.pull_requests.assert_called_with(base="destination-branch", state="open")
         assert pr is None
         assert pr_available is False
 
-    def test_is_pr_available_closed(self, dest_repo, dest, rebase):
+    def test_is_pr_available_closed(self, destination_repo, destination, publication):
         gh_pr = MagicMock()
         gh_pr.as_dict.return_value = {"head": {"repo": {"full_name": "test-namespace/rebase-repo"}}}
-        gh_pr.head.ref = rebase.branch
+        gh_pr.head.ref = publication.ref
         gh_pr.state = "closed"
 
         # Mock pull_requests to return only PRs that match the requested state
@@ -318,52 +318,52 @@ class TestIsPrAvailable:
             all_prs = [gh_pr]
             return [pr for pr in all_prs if pr.state == state]
 
-        dest_repo.pull_requests.side_effect = mock_pull_requests
+        destination_repo.pull_requests.side_effect = mock_pull_requests
 
-        pr, pr_available = _is_pr_available(dest_repo, dest, rebase)
-        dest_repo.pull_requests.assert_called_once_with(base="dest-branch", state="open")
+        pr, pr_available = _is_pr_available(destination_repo, destination, publication)
+        destination_repo.pull_requests.assert_called_once_with(base="destination-branch", state="open")
         assert pr is None
         assert pr_available is False
 
 
 class TestIsPrRequired:
     @pytest.fixture
-    def dest(self):
-        dest = MagicMock()
-        dest.branch = "dest-branch"
-        return dest
+    def destination(self):
+        destination = MagicMock()
+        destination.ref = "destination-branch"
+        return destination
 
     @pytest.fixture
-    def rebase(self):
-        rebase = MagicMock()
-        rebase.branch = "rebase-branch"
-        return rebase
+    def publication(self):
+        publication = MagicMock()
+        publication.ref = "rebase-branch"
+        return publication
 
-    def _gitwd_with_refs(self, *, dest_has_ref=True, rebase_has_ref=True, diff_output=""):
+    def _gitwd_with_refs(self, *, destination_has_ref=True, rebase_has_ref=True, diff_output=""):
         gitwd = MagicMock()
-        dest_refs = {"dest-branch": True} if dest_has_ref else {}
-        rebase_refs = {"rebase-branch": True} if rebase_has_ref else {}
-        gitwd.remotes.dest.refs = dest_refs
-        gitwd.remotes.rebase.refs = rebase_refs
+        destination_refs = {"destination-branch": True} if destination_has_ref else {}
+        publication_refs = {"rebase-branch": True} if rebase_has_ref else {}
+        gitwd.remotes.dest.refs = destination_refs
+        gitwd.remotes.rebase.refs = publication_refs
         gitwd.git.diff.return_value = diff_output
         return gitwd
 
-    def test_no_changes_between_branches_returns_false(self, dest, rebase):
+    def test_no_changes_between_branches_returns_false(self, destination, publication):
         gitwd = self._gitwd_with_refs(diff_output="")
-        assert _is_pr_required(gitwd, rebase, dest) is False
+        assert _is_pr_required(gitwd, publication, destination) is False
 
-    def test_changes_between_branches_returns_true(self, dest, rebase):
+    def test_changes_between_branches_returns_true(self, destination, publication):
         gitwd = self._gitwd_with_refs(diff_output="some diff")
-        assert _is_pr_required(gitwd, rebase, dest) is True
+        assert _is_pr_required(gitwd, publication, destination) is True
 
-    def test_missing_remote_refs_returns_true(self, dest, rebase):
-        gitwd = self._gitwd_with_refs(dest_has_ref=False, rebase_has_ref=False)
-        assert _is_pr_required(gitwd, rebase, dest) is True
+    def test_missing_remote_refs_returns_true(self, destination, publication):
+        gitwd = self._gitwd_with_refs(destination_has_ref=False, rebase_has_ref=False)
+        assert _is_pr_required(gitwd, publication, destination) is True
 
 
 class TestReportResult:
-    dest = GitHubBranch(url="https://github.com/user/repo", ns="user", name="repo", branch="main")
-    label = dest.label
+    destination = GitHubReference(url="https://github.com/user/repo", ns="user", name="repo", ref="main")
+    label = destination.label
 
     @pytest.mark.parametrize(
         "needs_rebase, pr_required, pr_available, pr_url, slack_message",
@@ -374,16 +374,16 @@ class TestReportResult:
                 True,
                 False,
                 "https://github.com/user/repo/pull/123",
-                f"Created a new rebase PR for `{label}`: <https://github.com/user/repo/pull/123|view PR>",
+                f"Created a new synchronization PR for `{label}`: <https://github.com/user/repo/pull/123|view PR>",
             ),
             (
                 True,
                 False,
                 True,
                 "https://github.com/user/repo/pull/456",
-                f"Updated the rebase PR for `{label}`: <https://github.com/user/repo/pull/456|view PR>",
+                f"Updated the synchronization PR for `{label}`: <https://github.com/user/repo/pull/456|view PR>",
             ),
-            # Rebase performed but no changes between rebase and dest (no PR needed)
+            # Rebase performed but no changes between rebase and destination (no PR needed)
             (
                 True,
                 False,
@@ -412,7 +412,7 @@ class TestReportResult:
                 True,
                 False,
                 "https://github.com/user/repo/pull/200",
-                f"Created a new rebase PR for `{label}` (hooks enabled): "
+                f"Created a new synchronization PR for `{label}` (hooks enabled): "
                 "<https://github.com/user/repo/pull/200|view PR>",
             ),
             (
@@ -420,7 +420,8 @@ class TestReportResult:
                 True,
                 True,
                 "https://github.com/user/repo/pull/201",
-                f"Updated the rebase PR for `{label}` (hooks enabled): <https://github.com/user/repo/pull/201|view PR>",
+                f"Updated the synchronization PR for `{label}` (hooks enabled): "
+                "<https://github.com/user/repo/pull/201|view PR>",
             ),
         ],
     )
@@ -441,7 +442,7 @@ class TestReportResult:
             pr_required,
             pr_available,
             pr_url,
-            self.dest,
+            self.destination,
             notify_slack=notify_slack,
         )
 
@@ -512,27 +513,27 @@ class TestNotifySlackError:
 
 class TestRunSlackErrorMessages:
     @patch("rebasebot.bot._create_pr")
-    @patch("rebasebot.bot._push_rebase_branch")
+    @patch("rebasebot.bot._push_publication_branch")
     @patch("rebasebot.bot._is_pr_available")
     @patch("rebasebot.slack.requests.post")
     def test_create_pr_http_error_fences_exception_and_response(
         self,
         mocked_post,
         mocked_is_pr_available,
-        mocked_push_rebase_branch,
+        mocked_push_publication_branch,
         mocked_create_pr,
         init_test_repositories,
         fake_github_provider,
         tmpdir,
     ):
-        source, rebase, dest = init_test_repositories
+        source, publication, destination = init_test_repositories
         CommitBuilder(source).update_file("test.go", "new content").commit("update test.go")
-        CommitBuilder(dest).remove_file("test.go").commit("remove test.go")
-        with CommitBuilder(dest) as cb:
+        CommitBuilder(destination).remove_file("test.go").commit("remove test.go")
+        with CommitBuilder(destination) as cb:
             cb.commit("Empty commit")
 
         mocked_is_pr_available.return_value = None, False
-        mocked_push_rebase_branch.return_value = True
+        mocked_push_publication_branch.return_value = True
 
         mock_response = MagicMock()
         mock_response.text = '{"message":"Validation Failed"}'
@@ -540,11 +541,11 @@ class TestRunSlackErrorMessages:
         http_error.response = mock_response
         mocked_create_pr.side_effect = http_error
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="rebase")
         args.source = source
         args.source_repo = None
-        args.dest = dest
-        args.rebase = rebase
+        args.destination = destination
+        args.publication = publication
         args.working_dir = tmpdir
         args.git_username = "test_rebasebot"
         args.git_email = "test@rebasebot.ocp"
@@ -553,21 +554,21 @@ class TestRunSlackErrorMessages:
         args.exclude_commits = []
         args.update_go_modules = False
         args.conflict_policy = "auto"
-        args.ignore_manual_label = False
+        args.manual_override = False
         args.dry_run = False
         args.always_run_hooks = False
         args.title_prefix = ""
         args.pre_rebase_hook = None
         args.pre_carry_commit_hook = None
         args.post_rebase_hook = None
-        args.pre_push_rebase_branch_hook = None
+        args.pre_publication_hook = None
         args.pre_create_pr_hook = None
 
         result = cli.rebasebot_run(args, slack_webhook="test://webhook", github_app_wrapper=fake_github_provider)
 
         assert result is False
         expected_message = (
-            f"Failed to create a pull request for `{dest.label}`:\n"
+            f"Failed to create a pull request for `{destination.label}`:\n"
             f"```{http_error}```\nResponse:\n```{mock_response.text}```"
         )
         expected_blocks = _build_slack_blocks(expected_message, "❌", None)
@@ -587,15 +588,15 @@ class TestUpdatePrTitle:
         pull_req = MagicMock()
         pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         pull_req.update.return_value = True
-        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
-        dest = MagicMock(branch="main")
+        source = GitHubReference(url="https://github.com/my/repo", ns="my", name="repo", ref="my-feature")
+        destination = MagicMock(ref="main")
 
         try:
-            _update_pr_title(gitwd, pull_req, source, dest)
+            _update_pr_title(gitwd, pull_req, source, destination)
         except Exception as ex:
             raise AssertionError("Unexpected exception") from ex
 
-        pull_req.update.assert_called_once_with(title=f"Merge {source.web_url} (abcdefg) into {dest.branch}")
+        pull_req.update.assert_called_once_with(title=f"Merge {source.web_url} (abcdefg) into {destination.ref}")
 
     def test_jira_link(self):
         gitwd = MagicMock()
@@ -604,16 +605,16 @@ class TestUpdatePrTitle:
         pull_req.title = "OCPCLOUD-2051: Merge "
         "https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         pull_req.update.return_value = True
-        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
-        dest = MagicMock(branch="main")
+        source = GitHubReference(url="https://github.com/my/repo", ns="my", name="repo", ref="my-feature")
+        destination = MagicMock(ref="main")
 
         try:
-            _update_pr_title(gitwd, pull_req, source, dest)
+            _update_pr_title(gitwd, pull_req, source, destination)
         except Exception as ex:
             raise AssertionError("Unexpected exception") from ex
 
         pull_req.update.assert_called_once_with(
-            title=f"OCPCLOUD-2051: Merge {source.web_url} (abcdefg) into {dest.branch}"
+            title=f"OCPCLOUD-2051: Merge {source.web_url} (abcdefg) into {destination.ref}"
         )
 
     def test_upstream_sync_prefix(self):
@@ -624,16 +625,16 @@ class TestUpdatePrTitle:
             "UPSTREAM-SYNC: Merge https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         )
         pull_req.update.return_value = True
-        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
-        dest = MagicMock(branch="main")
+        source = GitHubReference(url="https://github.com/my/repo", ns="my", name="repo", ref="my-feature")
+        destination = MagicMock(ref="main")
 
         try:
-            _update_pr_title(gitwd, pull_req, source, dest)
+            _update_pr_title(gitwd, pull_req, source, destination)
         except Exception as ex:
             raise AssertionError(f"Unexpected exception: {ex}") from ex
 
         pull_req.update.assert_called_once_with(
-            title=f"UPSTREAM-SYNC: Merge {source.web_url} (abcdefg) into {dest.branch}"
+            title=f"UPSTREAM-SYNC: Merge {source.web_url} (abcdefg) into {destination.ref}"
         )
 
     def test_unknown_format_keep_unchanged(self):
@@ -642,11 +643,11 @@ class TestUpdatePrTitle:
         pull_req = MagicMock()
         pull_req.title = "OCPCLOUD-2051: Manual rebase to lastest upstream version"
         pull_req.update.return_value = True
-        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
-        dest = MagicMock(branch="main")
+        source = GitHubReference(url="https://github.com/my/repo", ns="my", name="repo", ref="my-feature")
+        destination = MagicMock(ref="main")
 
         try:
-            _update_pr_title(gitwd, pull_req, source, dest)
+            _update_pr_title(gitwd, pull_req, source, destination)
         except Exception as ex:
             raise AssertionError("Unexpected exception") from ex
 
@@ -658,36 +659,40 @@ class TestUpdatePrTitle:
         pull_req = MagicMock()
         pull_req.title = "Merge https://github.com/kubernetes/cloud-provider-aws/tree/master (b80e8ef) into master"
         pull_req.update.return_value = False
-        source = GitHubBranch(url="https://github.com/my/repo", ns="my", name="repo", branch="my-feature")
-        dest = MagicMock(branch="main")
+        source = GitHubReference(url="https://github.com/my/repo", ns="my", name="repo", ref="my-feature")
+        destination = MagicMock(ref="main")
 
         with pytest.raises(PullRequestUpdateException, match="Error updating title for pull request"):
-            _update_pr_title(gitwd, pull_req, source, dest)
+            _update_pr_title(gitwd, pull_req, source, destination)
 
-        pull_req.update.assert_called_once_with(title=f"Merge {source.web_url} (abcdefg) into {dest.branch}")
+        pull_req.update.assert_called_once_with(title=f"Merge {source.web_url} (abcdefg) into {destination.ref}")
 
 
 class TestUpdatePrBody:
     def test_success(self):
         pull_req = MagicMock()
         pull_req.update.return_value = True
-        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
-        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        source = GitHubReference(url="https://github.com/upstream/repo", ns="upstream", name="repo", ref="main")
+        destination = GitHubReference(
+            url="https://github.com/downstream/repo", ns="downstream", name="repo", ref="release"
+        )
         summary = RebaseSummary(upstream_commit_count=2)
         prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
 
-        _update_pr_body(pull_req, summary, source, dest, prow_job)
+        _update_pr_body(pull_req, summary, source, destination, prow_job)
 
-        pull_req.update.assert_called_once_with(body=build_pr_body(summary, source, dest, prow_job))
+        pull_req.update.assert_called_once_with(body=build_pr_body(summary, source, destination, prow_job))
 
     def test_failure(self):
         pull_req = MagicMock()
         pull_req.update.return_value = False
         pull_req.html_url = "https://github.com/downstream/repo/pull/1"
-        source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")
-        dest = GitHubBranch(url="https://github.com/downstream/repo", ns="downstream", name="repo", branch="release")
+        source = GitHubReference(url="https://github.com/upstream/repo", ns="upstream", name="repo", ref="main")
+        destination = GitHubReference(
+            url="https://github.com/downstream/repo", ns="downstream", name="repo", ref="release"
+        )
         summary = RebaseSummary(upstream_commit_count=2)
         prow_job = ProwJobContext(job_name=None, job_type=None, build_id=None)
 
         with pytest.raises(PullRequestUpdateException, match="Error updating body for pull request"):
-            _update_pr_body(pull_req, summary, source, dest, prow_job)
+            _update_pr_body(pull_req, summary, source, destination, prow_job)
