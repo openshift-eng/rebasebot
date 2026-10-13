@@ -1107,7 +1107,7 @@ def _sync_upstream(
     ignore_manual_label: bool,
     title_prefix: str,
 ) -> bool:
-    """Publish the upstream tip and let the PR handle the merge and its conflicts."""
+    """Publish a clean merge, or the upstream tip when conflicts require manual resolution."""
     upstream = gitwd.commit(f"refs/remotes/source/{source.branch}").hexsha
     downstream = gitwd.commit(f"dest/{dest.branch}").hexsha
     logging.info("Upstream: %s; downstream: %s", upstream, downstream)
@@ -1125,24 +1125,50 @@ def _sync_upstream(
         logging.info("Downstream already contains upstream.")
         return True
     if dry_run:
-        logging.info("Dry run: would sync %s to %s. No push or PR update.", upstream, rebase.label)
+        logging.info("Dry run: would sync upstream changes to %s. No push or PR update.", rebase.label)
         return True
 
-    status, _, stderr = gitwd.git.merge_tree(
+    status, merged_tree, stderr = gitwd.git.merge_tree(
         "--write-tree", downstream, upstream, with_extended_output=True, with_exceptions=False
     )
     if status not in (0, 1):
         raise RepoException(f"Cannot check merge conflicts: {stderr}")
     has_conflicts = status == 1
+    tree = merged_tree.splitlines()[0]
 
     remote_ref = f"refs/heads/{rebase.branch}"
     remote = gitwd.git.ls_remote("--heads", "rebase", remote_ref)
     remote_sha = remote.split()[0] if remote else ""
-    if remote_sha != upstream:
-        gitwd.git.push(f"--force-with-lease={remote_ref}:{remote_sha}", "rebase", f"{upstream}:{remote_ref}")
-        logging.info("Sync branch updated to %s.", upstream)
+    published = downstream
+    if has_conflicts:
+        published = upstream
+        logging.info("Merge conflicts detected; publishing upstream for manual resolution.")
+    elif not synchronized:
+        existing = None
+        if remote_sha:
+            gitwd.git.fetch("rebase", remote_ref)
+            existing = gitwd.commit(remote_sha)
+        if (
+            existing is not None
+            and [parent.hexsha for parent in existing.parents] == [downstream, upstream]
+            and existing.tree.hexsha == tree
+        ):
+            published = remote_sha
+        else:
+            published = gitwd.git.commit_tree(
+                tree,
+                "-p",
+                downstream,
+                "-p",
+                upstream,
+                "-m",
+                f"Merge upstream/{source.branch} into {dest.branch}",
+            )
+    if remote_sha != published:
+        gitwd.git.push(f"--force-with-lease={remote_ref}:{remote_sha}", "rebase", f"{published}:{remote_ref}")
+        logging.info("Sync branch updated to %s.", published)
     else:
-        logging.info("Sync branch already matches upstream; no push required.")
+        logging.info("Sync branch already contains upstream changes; no push required.")
 
     if not pr_available:
         title = f"Sync upstream {source.branch} into {dest.branch}"
@@ -1163,7 +1189,7 @@ def _sync_upstream(
         raise PullRequestUpdateException(f"Error updating body for pull request: {pull_req.html_url}")
 
     if synchronized:
-        logging.info("Downstream already contains upstream; pending sync branch now matches upstream.")
+        logging.info("Downstream already contains upstream; pending sync branch now matches downstream.")
         return True
     pr_url = pull_req.html_url
     logging.info("Upstream sync PR: %s", pr_url)
@@ -1221,7 +1247,7 @@ def run(
         or update_go_modules
         or always_run_hooks
     ):
-        logging.error("Merge mode publishes upstream exactly and does not support replay policies or lifecycle hooks.")
+        logging.error("Merge mode does not support replay policies or lifecycle hooks.")
         return False
     if sync_mode == "merge" and (dest.ns, dest.name, dest.branch) == (rebase.ns, rebase.name, rebase.branch):
         logging.error("Merge mode requires a sync branch separate from the downstream branch.")
