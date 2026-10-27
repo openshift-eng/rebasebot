@@ -81,7 +81,6 @@ class TestCliArgParser:
             ("pre-carry-commit-hook", "hook.sh"),
             ("pre-rebase-hook", "hook.sh"),
             ("post-rebase-hook", "hook.sh"),
-            ("pre-push-rebase-branch-hook", "hook.sh"),
             ("pre-create-pr-hook", "hook.sh"),
             ("update-go-modules", None),
             ("always-run-hooks", None),
@@ -100,6 +99,21 @@ class TestCliArgParser:
         valid_args_dict.pop("update-go-modules")
         with patch("sys.argv", ["rebasebot", *args_dict_to_list(valid_args_dict), "--sync-mode", "merge"]):
             assert _parse_cli_arguments().sync_mode == "merge"
+
+    def test_merge_accepts_multiple_pre_push_scripts(self, valid_args_dict):
+        valid_args_dict.pop("update-go-modules")
+        argv = [
+            "rebasebot",
+            *args_dict_to_list(valid_args_dict),
+            "--sync-mode",
+            "merge",
+            "--pre-push-rebase-branch-hook",
+            "one.sh",
+            "git:dest/main:two.sh",
+        ]
+        with patch("sys.argv", argv):
+            args = _parse_cli_arguments()
+        assert args.pre_push_rebase_branch_hook == ["one.sh", "git:dest/main:two.sh"]
 
     @pytest.mark.parametrize(
         "github_ref,expected",

@@ -26,8 +26,12 @@ PR_BODY_LOST_LINE_LIMIT = 20
 DROPPED_COMMITS_DISPLAY_LIMIT = 20
 
 
+def _escape_markdown(value: str) -> str:
+    return re.sub(r"([\\`*_\[\]<>])", r"\\\1", value)
+
+
 def _branch_link(branch: GitHubBranch) -> str:
-    label = re.sub(r"([\\`*_\[\]<>])", r"\\\1", branch.label)
+    label = _escape_markdown(branch.label)
     return f"[{label}]({branch.web_url})"
 
 
@@ -38,10 +42,18 @@ def build_merge_pr_body(
     prow_job: ProwJobContext,
     *,
     conflicted_pr_number: int | None = None,
+    preparation_scripts: list[str] | None = None,
 ) -> str:
     """Describe an upstream sync PR and optional manual conflict resolution."""
     repo = shlex.quote(f"{dest.ns}/{dest.name}")
     body = f"This PR syncs upstream changes from {_branch_link(source)} into {_branch_link(dest)}."
+    if preparation_scripts:
+        body += (
+            "\n\n## Preparation hooks\n\n"
+            "Configured `--pre-push-rebase-branch-hook` scripts, in execution order:\n\n"
+            + "\n".join(f"- {_escape_markdown(script)}" for script in preparation_scripts)
+            + "\n\nSet `rebase/manual` before editing this PR branch and keep it until the PR is merged."
+        )
     if conflicted_pr_number is not None:
         dest_ssh = shlex.quote(f"git@github.com:{dest.ns}/{dest.name}.git")
         rebase_ssh = shlex.quote(f"git@github.com:{rebase.ns}/{rebase.name}.git")

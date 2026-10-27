@@ -259,7 +259,9 @@ def _parse_cli_arguments():
         type=str,
         required=False,
         nargs="+",
-        help="The location of the pre-push-rebase-branch lifecycle hook script.",
+        help="Locations of pre-push scripts, run in order. Merge mode runs them on the clean merged checkout, "
+        "including dry runs. Scripts must commit all changes and preserve the merge. "
+        "Skipped on conflicts or when downstream already contains upstream.",
     )
     parser.add_argument(
         "--pre-create-pr-hook",
@@ -299,7 +301,6 @@ def _parse_cli_arguments():
                 "--pre-rebase-hook",
                 "--pre-carry-commit-hook",
                 "--post-rebase-hook",
-                "--pre-push-rebase-branch-hook",
                 "--pre-create-pr-hook",
                 "--update-go-modules",
                 "--always-run-hooks",

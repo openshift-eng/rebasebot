@@ -38,6 +38,38 @@ def test_branch_link_escapes_markdown_in_the_ref():
     assert link in build_pr_body(RebaseSummary(upstream_commit_count=1), source, dest, prow)
 
 
+@pytest.mark.parametrize("conflicts", [False, True])
+def test_preparation_pr_lists_hooks_without_execution_recipe(conflicts):
+    source = GitHubBranch("https://github.com/example/upstream.git", "example", "upstream", "main")
+    dest = GitHubBranch("https://github.com/example/downstream.git", "example", "downstream", "main")
+    rebase = GitHubBranch("https://github.com/example/scratch.git", "example", "scratch", "sync")
+    locations = ["git:dest/main:hack/first.sh", "git:HEAD:hack/second.sh"]
+    body = build_merge_pr_body(
+        source,
+        dest,
+        rebase,
+        ProwJobContext(None, None, None),
+        preparation_scripts=locations,
+        conflicted_pr_number=42 if conflicts else None,
+    )
+    assert "## Preparation hooks" in body
+    assert body.index(locations[0]) < body.index(locations[1])
+    assert "rebase/manual" in body
+    assert "REBASEBOT_HOOKS" not in body
+    assert "export REBASEBOT_" not in body
+    assert "python3" not in body
+    assert "Rebasebot installed" not in body
+    assert ("## Resolve conflicts" in body) == conflicts
+
+
+def test_preparation_hook_locations_are_rendered_as_text():
+    branch = GitHubBranch("https://github.com/example/project.git", "example", "project", "main")
+    body = build_merge_pr_body(
+        branch, branch, branch, ProwJobContext(None, None, None), preparation_scripts=["git:HEAD:<script>[link]*`_.sh"]
+    )
+    assert r"- git:HEAD:\<script\>\[link\]\*\`\_.sh" in body
+
+
 class TestBuildPrBody:
     def test_with_log_url(self):
         source = GitHubBranch(url="https://github.com/upstream/repo", ns="upstream", name="repo", branch="main")

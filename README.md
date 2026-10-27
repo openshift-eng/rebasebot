@@ -32,9 +32,15 @@ branch so PR CI tests upstream changes together with downstream carries. If the
 merge has conflicts, the bot publishes the unmerged upstream tip and creates or
 updates the PR with manual conflict-resolution instructions.
 
+Merge mode supports `--pre-push-rebase-branch-hook` after a successful merge,
+including dry runs. Scripts run in order and must commit their changes while
+preserving the merge history. Failed scripts or uncommitted changes stop
+publication. PRs list the configured preparation hooks for manual recovery.
+
 Choose the default `replay` mode when you need carry filtering, bot-commit
-squashing, lifecycle hooks, Go module updates or ART cherry-picks. Merge mode
-does not support these features or resolve conflicts automatically.
+squashing, other lifecycle hooks, `--always-run-hooks`, `--update-go-modules` or
+ART cherry-picks. Merge mode rejects these options and does not resolve
+conflicts automatically.
 
 ## Auth parameters
 
@@ -197,7 +203,7 @@ Lifecycle hook parameters accept one or more script location arguments, which ar
 - `--pre-rebase-hook`: Executed when repository is setup with `rebase` branch checked out on `source/branch` before rebase.
 - `--pre-carry-commit-hook`: Executed before carrying each commit during the rebase process. The upstream is merged into the rebase branch.
 - `--post-rebase-hook`: Executed after the rebase process is completed.
-- `--pre-push-rebase-branch-hook`: Executed before pushing the rebase branch to the remote repository.
+- `--pre-push-rebase-branch-hook`: Executed before pushing the rebase branch to the remote repository. Also supported in `--sync-mode merge` (see [merge synchronization](#merge-synchronization)).
 - `--pre-create-pr-hook`: Executed before creating the pull request.
 
 ### Script sources
@@ -267,7 +273,8 @@ Some rebasebot arguments are available in lifecycle hook scripts as environment 
 - `REBASEBOT_GIT_USERNAME`: Committer username from `--git-username`.
 - `REBASEBOT_GIT_EMAIL`: Committer email from `--git-email`.
 
-*Note: Remotes are always `source`, `dest`, and `rebase`. The local branch is called rebase.*
+Remotes are always `source`, `dest`, and `rebase`. Replay hooks run on the local
+`rebase` branch. Merge preparation hooks run with detached HEAD.
 
 ### Always run hooks
 
