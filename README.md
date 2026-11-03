@@ -283,6 +283,17 @@ Enable this behavior with the opt-in `--always-run-hooks` flag. When this flag i
 - Built-in hooks (e.g. triggered by flags, `--update-go-modules`) are also executed as usual.
 - The execution order and logic of the rebase process remain unchanged.
 
+### Force an explicit replay
+
+Use `--force-rebase` to replay carries and regeneration hooks even when dest
+already contains source, such as after a reverted release. Unlike
+`--always-run-hooks`, it rebuilds from the source tree. Existing filtering,
+conflict, manual-label, dry-run, push, and PR controls still apply.
+
+Filter unwanted reverts with `UPSTREAM: <drop>` under an applicable tag policy
+or `--exclude-commits`; otherwise they can undo the restored content.
+The flag is disabled by default and incompatible with `--sync-mode merge`.
+
 ## Dynamic source git reference selection
 
 Rebasebot offers the capability to dynamically determine the source branch or tag for rebasing, enabling integration into CI/CD pipelines. This is especially valuable when rebasing from release tags or dynamically created branches.

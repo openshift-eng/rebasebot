@@ -96,7 +96,7 @@ class TestRebases:
         source, rebase, dest = init_test_repositories
         CommitBuilder(source).add_file("baz.txt", "fiz").commit("other upstream commit")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -147,7 +147,7 @@ class TestRebases:
             cb.add_file("generated-test3", "content")
             cb.commit("commit #1 from anotherbot", committer_email="anotherbot@example.com")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -206,7 +206,7 @@ class TestRebases:
             cb.add_file("generated-test-ops", "content")
             cb.commit("commit #1 from ops nightly", committer_email="ops+nightly@example.com")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -265,7 +265,7 @@ class TestRebases:
             cb.update_file("generated-test", "content from second bot")
             cb.commit("commit #2 from secondbot", committer_email="secondbot@example.com")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -328,7 +328,7 @@ class TestRebases:
             cb.add_file("generated-test3", "content")
             cb.commit("commit #1 from anotherbot", committer_email="anotherbot@example.com")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -395,7 +395,7 @@ class TestRebases:
         repo.git.checkout(dest.branch)
         repo.git.merge("--no-ff", "-m", "Merge branch 'feature'", repo.heads.feature)
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -452,7 +452,7 @@ class TestRebases:
         with CommitBuilder(dest) as cb:
             cb.commit("Empty commit")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -523,7 +523,7 @@ class TestRebases:
 
         fake_github_provider.github_app.repository = fake_repository_func
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -558,7 +558,7 @@ class TestRebases:
             cb.add_file("carry-file2", "content")
             drop_commit = cb.commit("UPSTREAM: <carry>: dropped by exclude_commits")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -615,7 +615,7 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
             cb.add_file("carry-file1", "content")
             cb.commit("UPSTREAM: <carry>: carry commit #1")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -677,7 +677,7 @@ git commit -m 'UPSTREAM: <drop>: test-hook-script generated files'
             )
             cb.commit("UPSTREAM: <carry>: add test hook script")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.dest = dest
         args.rebase = rebase
@@ -731,7 +731,7 @@ exit 5""",
             )
             cb.commit("UPSTREAM: <carry>: add test hook script")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -788,7 +788,7 @@ echo main
         mock_parse_github_branch_hooks.side_effect = fake_parse_github_branch
         mock_parse_github_branch_cli.side_effect = fake_parse_github_branch
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = None
         args.source_repo = f"{source.ns}/{source.name}"
         url = "git:https://github.com/openshift-eng/rebasebot/main:tests/data/test-source-ref-hook-script.sh"
@@ -827,7 +827,7 @@ touch post-rebase-hook.success"""
             cb.commit("UPSTREAM: <carry>: add test hook scripts")
 
         # Configure args with always_run_hooks=True and multiple hook types to test
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -879,7 +879,7 @@ touch post-rebase-hook.success"""
             cb.commit("UPSTREAM: <carry>: add test hook scripts")
 
         # Configure args with always_run_hooks=False (default behavior)
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -940,7 +940,7 @@ fi"""
             cb.add_file("verify-hook.sh", post_rebase_hook_script)
             cb.commit("UPSTREAM: <carry>: add verify hook script")
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -982,7 +982,7 @@ fi"""
 
     @staticmethod
     def _make_rebase_args(source, dest, rebase, tmpdir):
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest

@@ -112,7 +112,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -162,7 +162,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -215,7 +215,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -271,7 +271,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: add snapshot timeout"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
@@ -320,7 +320,7 @@ class TestConflictPolicy:
             "UPSTREAM: <carry>: downstream only file"
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
