@@ -290,6 +290,9 @@ already contains source, such as after a reverted release. Unlike
 `--always-run-hooks`, it rebuilds from the source tree. Existing filtering,
 conflict, manual-label, dry-run, push, and PR controls still apply.
 
+Selecting an older source can roll back upstream content already present in dest.
+Check the source reference and review the generated diff before merging.
+
 Filter unwanted reverts with `UPSTREAM: <drop>` under an applicable tag policy
 or `--exclude-commits`; otherwise they can undo the restored content.
 The flag is disabled by default and incompatible with `--sync-mode merge`.
