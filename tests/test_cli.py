@@ -344,14 +344,15 @@ def test_merge_rejects_deprecated_rebase_options(valid_args_dict, capsys, option
 
 @pytest.mark.parametrize("missing", ["source-repo", "source-ref-hook"])
 def test_source_reference_hook_requires_repository_and_hook(valid_args_dict, capsys, missing):
-    valid_args_dict.pop("source")
     valid_args_dict.update({"source-repo": "example/source", "source-ref-hook": "hook.sh"})
+    if missing == "source-ref-hook":
+        valid_args_dict.pop("source")
     valid_args_dict.pop(missing)
     with patch("sys.argv", ["rebasebot", *args_dict_to_list(valid_args_dict)]):
         with pytest.raises(SystemExit) as exc:
             _parse_cli_arguments()
     assert exc.value.code == 2
-    assert f"--{missing}" in capsys.readouterr().err
+    assert f"--{missing} must also be specified" in capsys.readouterr().err
 
 
 @patch("rebasebot.bot.run", return_value=True)
