@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from rebasebot.cli import _parse_cli_arguments
+from rebasebot.cli import _parse_cli_arguments, rebasebot_run
 from rebasebot.cli import main as cli_main
 from rebasebot.github import GitHubBranch
 
@@ -71,6 +71,16 @@ class TestCliArgParser:
         with patch("sys.argv", ["rebasebot", *get_valid_cli_args()]):
             assert _parse_cli_arguments().sync_mode == "replay"
 
+    @pytest.mark.parametrize("enabled", [False, True])
+    @patch("rebasebot.cli.bot.run", return_value=True)
+    def test_force_rebase_default_and_forwarding(self, run, get_valid_cli_args, enabled):
+        extra_args = {"force-rebase": None} if enabled else {}
+        with patch("sys.argv", ["rebasebot", *get_valid_cli_args(extra_args)]):
+            args = _parse_cli_arguments()
+        assert args.force_rebase is enabled
+        assert rebasebot_run(args, slack_webhook=None, github_app_wrapper=MagicMock())
+        assert run.call_args.kwargs["force_rebase"] is enabled
+
     @pytest.mark.parametrize(
         "option,value",
         [
@@ -85,6 +95,7 @@ class TestCliArgParser:
             ("pre-create-pr-hook", "hook.sh"),
             ("update-go-modules", None),
             ("always-run-hooks", None),
+            ("force-rebase", None),
             ("tag-pol", "strict"),
         ],
     )

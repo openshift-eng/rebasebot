@@ -540,7 +540,7 @@ class TestRunSlackErrorMessages:
         http_error.response = mock_response
         mocked_create_pr.side_effect = http_error
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest

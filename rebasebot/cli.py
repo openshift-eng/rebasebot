@@ -269,6 +269,12 @@ def _parse_cli_arguments():
         help="The location of the pre-create-pr lifecycle hook script.",
     )
     parser.add_argument(
+        "--force-rebase",
+        action="store_true",
+        help="Replay downstream carries and run regeneration hooks even if dest already contains source. "
+        "Replay mode only; all filtering, conflict, manual-label, dry-run, push, and PR controls still apply.",
+    )
+    parser.add_argument(
         "--always-run-hooks",
         action="store_true",
         default=False,
@@ -303,6 +309,7 @@ def _parse_cli_arguments():
                 "--pre-create-pr-hook",
                 "--update-go-modules",
                 "--always-run-hooks",
+                "--force-rebase",
             )
             if getattr(args, option[2:].replace("-", "_"))
         ]
@@ -404,6 +411,7 @@ def rebasebot_run(args, slack_webhook, github_app_wrapper):
                 always_run_hooks=args.always_run_hooks,
                 title_prefix=args.title_prefix,
                 sync_mode=args.sync_mode,
+                force_rebase=args.force_rebase,
             )
         finally:
             os.chdir(original_cwd)

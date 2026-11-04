@@ -1219,8 +1219,13 @@ def run(
     title_prefix: str = "",
     prow_job: ProwJobContext | None = None,
     sync_mode: str = "replay",
+    force_rebase: bool = False,
 ) -> bool:
     """Run Rebase Bot."""
+    if sync_mode == "merge" and force_rebase:
+        logging.error("--force-rebase is incompatible with --sync-mode merge.")
+        return False
+
     if prow_job is None:
         prow_job = ProwJobContext.from_env()
 
@@ -1346,7 +1351,7 @@ def run(
         return False
 
     try:
-        needs_rebase = _needs_rebase(gitwd, source, dest)
+        needs_rebase = force_rebase or _needs_rebase(gitwd, source, dest)
         if needs_rebase:
             upstream_commit_count = int(
                 gitwd.git.rev_list("--count", f"dest/{dest.branch}..refs/remotes/source/{source.branch}")

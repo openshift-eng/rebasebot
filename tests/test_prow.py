@@ -115,7 +115,7 @@ class TestRehearsalSlackSuppression:
             build_id="12345",
         )
 
-        args = MagicMock(sync_mode="replay")
+        args = MagicMock(sync_mode="replay", force_rebase=False)
         args.source = source
         args.source_repo = None
         args.dest = dest
