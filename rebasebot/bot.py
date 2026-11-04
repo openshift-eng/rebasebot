@@ -1093,6 +1093,40 @@ def _report_result(  # pylint: disable=R0917
         notify_slack(message, "✅")
 
 
+def _prepare_merge(
+    gitwd: git.Repo,
+    candidate: str,
+    hooks: lifecycle_hooks.LifecycleHooks,
+    github_app_provider: GithubAppProvider,
+) -> str:
+    """Prepare the candidate in the bot's working directory before publication."""
+    for operation in ("rebase", "cherry-pick", "revert", "merge", "am"):
+        gitwd.git.execute(["git", operation, "--quit"], with_exceptions=False)
+    gitwd.git.checkout("--force", "--detach", candidate)
+    gitwd.git.clean("-ffdx")
+    gitwd.git.submodule("deinit", "--all", "--force")
+    gitwd.git.execute(["git", "bisect", "reset", candidate], with_exceptions=False)
+    hooks.fetch_hook_scripts(gitwd=gitwd, github_app_provider=github_app_provider)
+    hooks.execute_scripts_for_hook(lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH)
+    if gitwd.is_dirty(untracked_files=True):
+        raise RepoException("Merge preparation hooks left uncommitted changes, including untracked files.")
+    published = gitwd.head.commit.hexsha
+    if not gitwd.is_ancestor(candidate, published):
+        raise RepoException("Merge preparation hooks discarded the candidate merge.")
+    return published
+
+
+def _equivalent_prepared_merge(gitwd: git.Repo, existing: Commit, prepared: str, candidate: str) -> bool:
+    """Compare generated content and the merge's input histories, ignoring commit dates."""
+    merge = gitwd.commit(candidate)
+    if existing.tree != gitwd.commit(prepared).tree:
+        return False
+    for commit in gitwd.iter_commits(f"{merge.parents[0].hexsha}..{existing.hexsha}", ancestry_path=True):
+        if commit.parents == merge.parents and commit.tree == merge.tree:
+            return True
+    return False
+
+
 def _sync_upstream(
     *,
     gitwd: git.Repo,
@@ -1106,6 +1140,8 @@ def _sync_upstream(
     dry_run: bool,
     ignore_manual_label: bool,
     title_prefix: str,
+    hooks: lifecycle_hooks.LifecycleHooks,
+    github_app_provider: GithubAppProvider,
 ) -> bool:
     """Publish a clean merge, or the upstream tip when conflicts require manual resolution."""
     upstream = gitwd.commit(f"refs/remotes/source/{source.branch}").hexsha
@@ -1124,7 +1160,8 @@ def _sync_upstream(
     if synchronized and not pr_available:
         logging.info("Downstream already contains upstream.")
         return True
-    if dry_run:
+    preparation_scripts = hooks.hooks.get(lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH, [])
+    if dry_run and not preparation_scripts:
         logging.info("Dry run: would sync upstream changes to %s. No push or PR update.", rebase.label)
         return True
 
@@ -1149,7 +1186,8 @@ def _sync_upstream(
             gitwd.git.fetch("rebase", remote_ref)
             existing = gitwd.commit(remote_sha)
         if (
-            existing is not None
+            not preparation_scripts
+            and existing is not None
             and [parent.hexsha for parent in existing.parents] == [downstream, upstream]
             and existing.tree.hexsha == tree
         ):
@@ -1164,12 +1202,26 @@ def _sync_upstream(
                 "-m",
                 f"Merge upstream/{source.branch} into {dest.branch}",
             )
+        if preparation_scripts:
+            candidate = published
+            published = _prepare_merge(gitwd, candidate, hooks, github_app_provider)
+            if existing is not None and _equivalent_prepared_merge(gitwd, existing, published, candidate):
+                published = remote_sha
+    if dry_run:
+        logging.info("Dry run complete. No push or PR update.")
+        return True
+    if preparation_scripts:
+        pull_req, pr_available = _is_pr_available(dest_repo, dest, rebase)
+        if not ignore_manual_label and pull_req and any(label["name"] == "rebase/manual" for label in pull_req.labels):
+            logging.info("Manual override detected after preparation on %s; skipping publication.", pull_req.html_url)
+            return True
     if remote_sha != published:
         gitwd.git.push(f"--force-with-lease={remote_ref}:{remote_sha}", "rebase", f"{published}:{remote_ref}")
         logging.info("Sync branch updated to %s.", published)
     else:
         logging.info("Sync branch already contains upstream changes; no push required.")
 
+    script_locations = [script.script_location for script in preparation_scripts]
     if not pr_available:
         title = f"Sync upstream {source.branch} into {dest.branch}"
         if title_prefix:
@@ -1179,11 +1231,16 @@ def _sync_upstream(
             dest=dest,
             rebase=rebase,
             title=title,
-            body=build_merge_pr_body(source, dest, rebase, prow_job),
+            body=build_merge_pr_body(source, dest, rebase, prow_job, preparation_scripts=script_locations),
         )
 
     body = build_merge_pr_body(
-        source, dest, rebase, prow_job, conflicted_pr_number=pull_req.number if has_conflicts else None
+        source,
+        dest,
+        rebase,
+        prow_job,
+        conflicted_pr_number=pull_req.number if has_conflicts else None,
+        preparation_scripts=script_locations,
     )
     if pull_req.body != body and not pull_req.update(body=body):
         raise PullRequestUpdateException(f"Error updating body for pull request: {pull_req.html_url}")
@@ -1248,11 +1305,15 @@ def run(
         or conflict_policy != "auto"
         or bot_emails
         or exclude_commits
-        or any(hooks.hooks.values())
+        or any(
+            scripts
+            for hook, scripts in hooks.hooks.items()
+            if hook != lifecycle_hooks.LifecycleHook.PRE_PUSH_REBASE_BRANCH
+        )
         or update_go_modules
         or always_run_hooks
     ):
-        logging.error("Merge mode does not support replay policies or lifecycle hooks.")
+        logging.error("Merge mode supports only pre-push preparation hooks, without replay policies.")
         return False
     if sync_mode == "merge" and (dest.ns, dest.name, dest.branch) == (rebase.ns, rebase.name, rebase.branch):
         logging.error("Merge mode requires a sync branch separate from the downstream branch.")
@@ -1337,6 +1398,8 @@ def run(
                 dry_run=dry_run,
                 ignore_manual_label=ignore_manual_label,
                 title_prefix=title_prefix,
+                hooks=hooks,
+                github_app_provider=github_app_provider,
             )
         except Exception as ex:
             logging.exception("Failed to sync upstream into %s", dest.label)

@@ -1,3 +1,5 @@
+import shlex
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -6,7 +8,7 @@ import pytest
 import requests
 
 from rebasebot import bot
-from rebasebot.lifecycle_hooks import LifecycleHook
+from rebasebot.lifecycle_hooks import LifecycleHook, LifecycleHooks
 from rebasebot.pr_body import build_merge_pr_body
 from rebasebot.prow import ProwJobContext
 from tests.conftest import CommitBuilder
@@ -236,14 +238,21 @@ def test_downstream_already_contains_upstream(merge_run, dry_run):
     create_pr.assert_not_called()
 
 
-def test_dry_run_with_conflict_never_publishes(merge_run):
-    options, create_pr, _ = merge_run
+def test_dry_run_with_conflict_never_publishes(merge_run, configure_preparation_hooks, caplog):
+    options, create_pr, dest_repo = merge_run
+    configure_preparation_hooks("exit 1\n")
+    pr = sync_pr(options)
+    dest_repo.pull_requests.return_value = [pr]
+    caplog.set_level("INFO")
     CommitBuilder(options["source"]).update_file("test.go", "upstream").commit("upstream conflict")
     CommitBuilder(options["dest"]).update_file("test.go", "downstream").commit("downstream conflict")
     options["dry_run"] = True
     assert bot.run(**options)
     assert not git.Repo(options["rebase"].url).heads
     create_pr.assert_not_called()
+    pr.update.assert_not_called()
+    assert "preparation complete" not in caplog.text
+    assert "No push or PR update" in caplog.text
 
 
 @pytest.mark.parametrize("during_fetch", [False, True])
@@ -343,7 +352,7 @@ def test_unrelated_histories_fail_before_publication(merge_run):
     create_pr.assert_not_called()
 
 
-@pytest.mark.parametrize("stage", list(LifecycleHook))
+@pytest.mark.parametrize("stage", [hook for hook in LifecycleHook if hook != LifecycleHook.PRE_PUSH_REBASE_BRANCH])
 def test_direct_merge_run_rejects_hooks(merge_run, stage):
     options, create_pr, _ = merge_run
     options["hooks"].hooks = {stage: [MagicMock()]}
@@ -433,3 +442,342 @@ def test_failed_initial_conflict_instructions_update_recovers_without_creating_a
     pr.update.assert_called_once()
     gh_app._post.assert_called_once()
     created.update.assert_called_once()
+
+
+@pytest.fixture
+def configure_preparation_hooks(merge_run, tmp_path, monkeypatch):
+    options, _, _ = merge_run
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    args = Namespace(
+        **options,
+        pre_rebase_hook=None,
+        pre_carry_commit_hook=None,
+        post_rebase_hook=None,
+        pre_create_pr_hook=None,
+        pre_push_rebase_branch_hook=[],
+        update_go_modules=False,
+    )
+
+    def configure(*scripts):
+        paths = []
+        for i, script in enumerate(scripts):
+            path = tmp_path / f"hook {i}.sh"
+            path.write_text("#!/bin/sh\nset -eu\n" + script)
+            path.chmod(0o700)
+            paths.append(str(path))
+        args.pre_push_rebase_branch_hook = paths
+        for name, value in (
+            ("SOURCE", args.source.branch),
+            ("DEST", args.dest.branch),
+            ("REBASE", args.rebase.branch),
+            ("WORKING_DIR", args.working_dir),
+            ("GIT_USERNAME", args.git_username),
+            ("GIT_EMAIL", args.git_email),
+        ):
+            monkeypatch.setenv(f"REBASEBOT_{name}", value)
+        options["hooks"] = LifecycleHooks(str(script_dir), args)
+
+    return configure
+
+
+def test_merge_hooks_generate_commits_in_order_with_refs_and_environment(merge_run, configure_preparation_hooks):
+    options, create_pr, _ = merge_run
+    upstream = CommitBuilder(options["source"]).add_file("upstream.txt", "upstream").commit("upstream advance")
+    downstream = git.Repo(options["dest"].url).head.commit
+    configure_preparation_hooks(
+        'test "$PWD" = "$REBASEBOT_WORKING_DIR"\n'
+        'test "$REBASEBOT_SOURCE" = main\n'
+        'test "$REBASEBOT_DEST" = main\n'
+        f'test "$REBASEBOT_REBASE" = "{options["rebase"].branch}"\n'
+        'test "$REBASEBOT_GIT_USERNAME" = test\n'
+        'test "$REBASEBOT_GIT_EMAIL" = test@example.com\n'
+        f'test "$(git rev-parse source/main)" = {upstream.hexsha}\n'
+        f'test "$(git rev-parse dest/main)" = {downstream.hexsha}\n'
+        "test -f another_file.go\ntest -f upstream.txt\n"
+        'printf "first\\n" > generated.txt\n',
+        'printf "second\\n" >> generated.txt\ngit add generated.txt\ngit commit -m generated\n',
+    )
+
+    assert bot.run(**options)
+
+    published = git.Repo(options["rebase"].url).head.commit
+    assert published.message.strip() == "generated"
+    assert published.parents[0].parents == (downstream, upstream)
+    assert (published.tree / "generated.txt").data_stream.read() == b"first\nsecond\n"
+    assert "## Preparation hooks" in create_pr.return_value.body
+    assert create_pr.return_value.body.index("hook 0.sh") < create_pr.return_value.body.index("hook 1.sh")
+    assert "rebase/manual" in create_pr.return_value.body
+
+
+@pytest.mark.parametrize("output", ["untracked", "tracked", "staged", "failed", "reset", "amend"])
+def test_invalid_preparation_prevents_publication(merge_run, configure_preparation_hooks, tmp_path, output):
+    options, create_pr, _ = merge_run
+    CommitBuilder(options["source"]).commit("upstream advance")
+    marker = tmp_path / "later-ran"
+    scripts = {
+        "untracked": "echo generated > extra.txt\n",
+        "tracked": "echo modified > test.go\n",
+        "staged": "echo staged > test.go\ngit add test.go\n",
+        "failed": "exit 9\n",
+        "reset": "git reset --hard source/main\n",
+        "amend": "git commit --amend -m replaced\n",
+    }
+    later = f"touch '{marker}'\n" if output == "failed" else "true\n"
+    configure_preparation_hooks(scripts[output], later)
+    assert not bot.run(**options)
+    assert not git.Repo(options["rebase"].url).heads
+    assert not marker.exists()
+    create_pr.assert_not_called()
+
+
+@pytest.mark.parametrize("skip", ["manual", "manual-during-fetch", "synchronized", "synchronized-pr", "conflict"])
+def test_preparation_skipped_for_paused_synchronized_or_conflicted_sync(
+    merge_run, configure_preparation_hooks, skip, caplog
+):
+    options, create_pr, dest_repo = merge_run
+    configure_preparation_hooks("exit 1\n")
+    if skip not in ("synchronized", "synchronized-pr"):
+        CommitBuilder(options["source"]).update_file("test.go", "upstream").commit("upstream advance")
+    if skip == "manual":
+        dest_repo.pull_requests.return_value = [sync_pr(options, manual=True)]
+    elif skip == "manual-during-fetch":
+        dest_repo.pull_requests.side_effect = [[sync_pr(options)], [sync_pr(options, manual=True)]]
+    elif skip == "synchronized-pr":
+        pr = sync_pr(options)
+        dest_repo.pull_requests.return_value = [pr]
+        options["dry_run"] = True
+        caplog.set_level("INFO")
+    elif skip == "conflict":
+        CommitBuilder(options["dest"]).update_file("test.go", "downstream").commit("downstream conflict")
+    assert bot.run(**options)
+    if skip == "conflict":
+        assert git.Repo(options["rebase"].url).head.commit == git.Repo(options["source"].url).head.commit
+        body = create_pr.return_value.body
+        assert "## Resolve conflicts" in body
+        assert "from rebasebot.lifecycle_hooks" not in body
+    elif skip == "synchronized-pr":
+        pr.update.assert_not_called()
+        create_pr.assert_not_called()
+        assert "preparation complete" not in caplog.text
+        assert "No push or PR update" in caplog.text
+    else:
+        assert not git.Repo(options["rebase"].url).heads
+        create_pr.assert_not_called()
+
+
+def test_failed_preparation_keeps_workspace_and_rerun_starts_fresh(merge_run, configure_preparation_hooks):
+    options, create_pr, _ = merge_run
+    CommitBuilder(options["source"]).commit("upstream advance")
+    configure_preparation_hooks(
+        "git cherry-pick dest/main source/main || true\n"
+        "echo partial > generated.txt\necho edited > test.go\ngit init -q nested\n"
+        "echo cache/ >> .git/info/exclude\nmkdir -p cache\ntouch cache/stale\nexit 1\n"
+    )
+    work = Path(options["working_dir"])
+
+    def failed_state():
+        repo = git.Repo(work)
+        return (
+            repo.head.commit.parents,
+            repo.head.commit.tree,
+            (work / "generated.txt").read_text(),
+            repo.git.status("--porcelain"),
+            Path(repo.git_dir, "sequencer").exists(),
+        )
+
+    assert not bot.run(**options)
+    first = failed_state()
+    assert first[2] == "partial\n"
+    assert not bot.run(**options)
+    assert failed_state() == first
+
+    configure_preparation_hooks("git cherry-pick --allow-empty source/main source/main\n")
+    assert bot.run(**options)
+    published = git.Repo(options["rebase"].url).head.commit
+    assert "generated.txt" not in published.tree
+    assert (published.tree / "test.go").data_stream.read() != b"edited\n"
+    assert not (work / "nested").exists()
+    assert not (work / "cache").exists()
+    create_pr.assert_called_once()
+
+
+def test_preparation_recovers_from_failed_bisect_hook(merge_run, configure_preparation_hooks):
+    options, _, _ = merge_run
+    CommitBuilder(options["source"]).commit("upstream advance")
+    configure_preparation_hooks("git bisect start\necho partial > test.go\nexit 1\n")
+    assert not bot.run(**options)
+    work = Path(options["working_dir"])
+    assert (work / "test.go").read_text() == "partial\n"
+    assert Path(git.Repo(work).git_dir, "BISECT_START").exists()
+
+    upstream = CommitBuilder(options["source"]).update_file("test.go", "new upstream").commit("upstream advance")
+    configure_preparation_hooks("git bisect start\n")
+
+    assert bot.run(**options)
+    published = git.Repo(options["rebase"].url).head.commit
+    assert published.parents == (git.Repo(options["dest"].url).head.commit, upstream)
+    assert (published.tree / "test.go").data_stream.read() == b"new upstream"
+
+
+def test_failed_preparation_rerun_restores_submodules(merge_run, configure_preparation_hooks, tmp_path):
+    options, _, _ = merge_run
+    sub = git.Repo.init(tmp_path / "dependency")
+    with sub.config_writer() as config:
+        config.set_value("user", "email", "test@example.com")
+        config.set_value("user", "name", "test")
+    Path(sub.working_dir, "data.txt").write_text("original\n")
+    sub.git.add("data.txt")
+    sub.git.commit("-m", "dependency")
+    source = git.Repo(options["source"].url)
+    source.git.execute(["git", "-c", "protocol.file.allow=always", "submodule", "add", sub.working_dir, "dependency"])
+    source.git.commit("-m", "upstream adds dependency")
+    observations = tmp_path / "observations"
+    configure_preparation_hooks(
+        "git -c protocol.file.allow=always submodule update --init\n"
+        f"cat dependency/data.txt >> {shlex.quote(str(observations))}\n"
+        "echo dirty > dependency/data.txt\nexit 1\n"
+    )
+    assert not bot.run(**options)
+    assert not bot.run(**options)
+    assert observations.read_text() == "original\noriginal\n"
+
+
+def test_prepared_rerun_keeps_published_sha_but_changed_content_or_inputs_update(
+    merge_run, configure_preparation_hooks, monkeypatch
+):
+    options, create_pr, dest_repo = merge_run
+    source = options["source"]
+    upstream = CommitBuilder(source).commit("upstream advance")
+    configure_preparation_hooks("echo generated > generated.txt\ngit add generated.txt\ngit commit -m generated\n")
+    assert bot.run(**options)
+    remote = git.Repo(options["rebase"].url)
+    original = remote.head.commit
+    dest_repo.pull_requests.return_value = [create_pr.return_value]
+    commands = []
+    execute = git.Git.execute
+
+    def record(self, command, *args, **kwargs):
+        commands.append(command)
+        return execute(self, command, *args, **kwargs)
+
+    monkeypatch.setattr(git.Git, "execute", record)
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2030-01-01T00:00:00Z")
+    assert bot.run(**options)
+    assert remote.head.commit == original
+    assert not any(command[1] == "push" for command in commands)
+    create_pr.return_value.update.reset_mock()
+    assert bot.run(**options)
+    create_pr.return_value.update.assert_not_called()
+
+    configure_preparation_hooks("echo changed > generated.txt\ngit add generated.txt\ngit commit -m generated\n")
+    assert bot.run(**options)
+    changed_output = remote.head.commit
+    assert changed_output != original
+    assert changed_output.parents[0].parents[1] == upstream
+    assert (changed_output.tree / "generated.txt").data_stream.read() == b"changed\n"
+    newer = CommitBuilder(source).commit("empty upstream advance")
+    assert bot.run(**options)
+    assert remote.head.commit != changed_output
+    assert remote.head.commit.tree == changed_output.tree
+    assert remote.head.commit.parents[0].parents[1] == newer
+    CommitBuilder(options["dest"]).commit("empty downstream advance")
+    assert bot.run(**options)
+    assert remote.head.commit.parents[0].parents[0] == git.Repo(options["dest"].url).head.commit
+
+
+def test_prepared_publication_keeps_explicit_lease(merge_run, configure_preparation_hooks, monkeypatch):
+    options, create_pr, dest_repo = merge_run
+    configure_preparation_hooks("echo generated > generated.txt\ngit add generated.txt\ngit commit -m generated\n")
+    CommitBuilder(options["source"]).commit("upstream advance")
+    assert bot.run(**options)
+    dest_repo.pull_requests.return_value = [create_pr.return_value]
+    CommitBuilder(options["source"]).commit("second upstream advance")
+    create_pr.reset_mock()
+    execute = git.Git.execute
+    concurrent = []
+
+    def race(self, command, *args, **kwargs):
+        if command[1] == "push":
+            remote = git.Repo(options["rebase"].url)
+            remote.git.fetch(options["source"].url, options["source"].branch)
+            remote.git.checkout("-B", options["rebase"].branch, "FETCH_HEAD")
+            concurrent.append(CommitBuilder(options["rebase"]).commit("human push"))
+        return execute(self, command, *args, **kwargs)
+
+    monkeypatch.setattr(git.Git, "execute", race)
+    assert not bot.run(**options)
+    assert git.Repo(options["rebase"].url).head.commit == concurrent[0]
+    create_pr.assert_not_called()
+
+
+def test_hook_dry_run_prepares_locally_without_remote_or_pr_writes(merge_run, configure_preparation_hooks, tmp_path):
+    options, create_pr, dest_repo = merge_run
+    CommitBuilder(options["source"]).commit("upstream advance")
+    marker = tmp_path / "hook-ran"
+    configure_preparation_hooks(
+        f'touch "{marker}"\necho generated > generated.txt\ngit add generated.txt\ngit commit -m generated\n'
+    )
+    options["dry_run"] = True
+    pr = sync_pr(options)
+    dest_repo.pull_requests.return_value = [pr]
+    assert bot.run(**options)
+    assert marker.exists()
+    assert not git.Repo(options["rebase"].url).heads
+    pr.update.assert_not_called()
+    create_pr.assert_not_called()
+
+
+def test_preparation_fetches_all_git_scripts_before_execution(merge_run, configure_preparation_hooks):
+    options, create_pr, _ = merge_run
+    CommitBuilder(options["source"]).commit("upstream advance")
+    first = (
+        "#!/bin/sh\nset -eu\n"
+        "printf '%s\\n' '#!/bin/sh' 'echo NEW > result.txt' 'git add result.txt' "
+        "'git commit -m replacement' > second.sh\n"
+        "git add second.sh\ngit commit -m replace-second\n"
+    )
+    second = "#!/bin/sh\nset -eu\necho ORIGINAL > result.txt\ngit add result.txt\ngit commit -m original\n"
+    CommitBuilder(options["dest"]).add_file("first.sh", first).add_file("second.sh", second).commit(
+        "preparation scripts"
+    )
+    configure_preparation_hooks("true\n", "true\n")
+    scripts = options["hooks"].hooks[LifecycleHook.PRE_PUSH_REBASE_BRANCH]
+    scripts[0].script_location = "git:dest/main:first.sh"
+    scripts[1].script_location = "git:HEAD:second.sh"
+    assert bot.run(**options)
+    published = git.Repo(options["rebase"].url).head.commit
+    assert (published.tree / "result.txt").data_stream.read() == b"ORIGINAL\n"
+
+
+def test_manual_label_added_during_preparation_stops_publication(merge_run, configure_preparation_hooks, tmp_path):
+    options, create_pr, dest_repo = merge_run
+    CommitBuilder(options["source"]).commit("upstream advance")
+    marker = tmp_path / "preparation-completed"
+    configure_preparation_hooks(f"touch {shlex.quote(str(marker))}\n")
+    manual = sync_pr(options, manual=True)
+    dest_repo.pull_requests.side_effect = lambda **kwargs: [manual] if marker.exists() else []
+
+    assert bot.run(**options)
+    assert not git.Repo(options["rebase"].url).heads
+    manual.update.assert_not_called()
+    create_pr.assert_not_called()
+
+
+def test_equivalent_preparation_can_keep_candidate_on_a_second_parent(
+    merge_run, configure_preparation_hooks, monkeypatch
+):
+    options, create_pr, dest_repo = merge_run
+    CommitBuilder(options["source"]).commit("upstream advance")
+    configure_preparation_hooks(
+        "candidate=$(git rev-parse HEAD)\n"
+        "git checkout --detach source/main\n"
+        'git merge --no-ff "$candidate" -m "merge prepared candidate"\n'
+    )
+    assert bot.run(**options)
+    remote = git.Repo(options["rebase"].url)
+    published = remote.head.commit
+    dest_repo.pull_requests.return_value = [create_pr.return_value]
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2030-01-01T00:00:00Z")
+    assert bot.run(**options)
+    assert remote.head.commit == published

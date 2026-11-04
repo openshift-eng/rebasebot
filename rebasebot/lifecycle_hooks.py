@@ -299,6 +299,9 @@ class LifecycleHooks:
         self.tmp_hook_scripts_dir = tmp_script_dir
         self.working_dir = args.working_dir if args is not None else None
 
+        if args is None:
+            return
+
         _setup_environment_variables(args)
 
         if args.pre_rebase_hook is not None:
