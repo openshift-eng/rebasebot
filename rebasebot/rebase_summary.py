@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DroppedCommit:
-    """A downstream commit omitted from the rebase branch."""
+    """A downstream commit omitted from the publication branch."""
 
     sha: str
     message: str
@@ -29,7 +29,7 @@ class DroppedCommit:
 
 @dataclass(frozen=True)
 class ArtPrInfo:
-    """An ART pull request cherry-picked into the rebase branch."""
+    """An ART pull request cherry-picked into the publication branch."""
 
     number: int
     title: str
@@ -48,7 +48,7 @@ class ContentLossWarning:
 
 @dataclass(frozen=True)
 class RebaseSummary:
-    """Metadata about a rebase run, used when rendering the rebase PR body."""
+    """Metadata about a rebase run, used when rendering the synchronization PR body."""
 
     upstream_commit_count: int
     dropped_commits: list[DroppedCommit] = field(default_factory=list)
